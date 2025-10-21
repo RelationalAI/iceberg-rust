@@ -15,10 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, TryFutureExt};
+use itertools::Itertools;
 
 use crate::delete_file_index::DeleteFileIndex;
 use crate::expr::{Bind, BoundPredicate, Predicate};
@@ -28,10 +30,13 @@ use crate::scan::{
     PartitionFilterCache,
 };
 use crate::spec::{
-    ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList, SchemaRef, SnapshotRef,
-    TableMetadataRef,
+    ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList,
+    Operation, SchemaRef, SnapshotRef, TableMetadataRef,
 };
+use crate::util::snapshot::ancestors_between;
 use crate::{Error, ErrorKind, Result};
+
+type ManifestEntryFilterFn = dyn Fn(&ManifestEntryRef) -> bool + Send + Sync;
 
 /// Wraps a [`ManifestFile`] alongside the objects that are needed
 /// to process it in a thread-safe manner
@@ -46,6 +51,9 @@ pub(crate) struct ManifestFileContext {
     snapshot_schema: SchemaRef,
     expression_evaluator_cache: Arc<ExpressionEvaluatorCache>,
     delete_file_index: DeleteFileIndex,
+
+     /// filter manifest entries.
+     filter_fn: Option<Arc<ManifestEntryFilterFn>>,
 }
 
 /// Wraps a [`ManifestEntryRef`] alongside the objects that are needed
@@ -74,12 +82,14 @@ impl ManifestFileContext {
             mut sender,
             expression_evaluator_cache,
             delete_file_index,
+            filter_fn,
             ..
         } = self;
+        let filter_fn = filter_fn.unwrap_or_else(|| Arc::new(|_| true));
 
         let manifest = object_cache.get_manifest(&manifest_file).await?;
 
-        for manifest_entry in manifest.entries() {
+        for manifest_entry in manifest.entries().iter().filter(|e| filter_fn(e)) {
             let manifest_entry_context = ManifestEntryContext {
                 // TODO: refactor to avoid the expensive ManifestEntry clone
                 manifest_entry: manifest_entry.clone(),
@@ -138,6 +148,11 @@ impl ManifestEntryContext {
 pub(crate) struct PlanContext {
     pub snapshot: SnapshotRef,
 
+    /// Starting snapshot ID (exclusive) for changelog scans
+    pub from_snapshot_id: Option<i64>,
+    /// Ending snapshot ID (inclusive) for changelog scans
+    pub to_snapshot_id: Option<i64>,
+
     pub table_metadata: TableMetadataRef,
     pub snapshot_schema: SchemaRef,
     pub case_sensitive: bool,
@@ -180,18 +195,65 @@ impl PlanContext {
         Ok(partition_filter)
     }
 
-    pub(crate) fn build_manifest_file_contexts(
+    pub(crate) async fn build_manifest_file_contexts(
         &self,
-        manifest_list: Arc<ManifestList>,
         tx_data: Sender<ManifestEntryContext>,
         delete_file_idx: DeleteFileIndex,
         delete_file_tx: Sender<ManifestEntryContext>,
     ) -> Result<Box<impl Iterator<Item = Result<ManifestFileContext>> + 'static>> {
-        let manifest_files = manifest_list.entries().iter();
+        let mut filter_fn: Option<Arc<ManifestEntryFilterFn>> = None;
+        let manifest_files = {
+            if let Some(to_snapshot_id) = self.to_snapshot_id {
+                // Incremental scan mode:
+                // Get all added files between two snapshots.
+                // - data files in `Append`, `Overwrite` and `Delete` snapshots are included.
+                //
+                // `latest_snapshot_id` is inclusive, `oldest_snapshot_id` is exclusive.
+
+                let snapshots =
+                    ancestors_between(&self.table_metadata, to_snapshot_id, self.from_snapshot_id)
+                        .filter(|snapshot| {
+                            matches!(
+                                snapshot.summary().operation,
+                                Operation::Append | Operation::Overwrite | Operation::Delete
+                            )
+                        })
+                        .collect_vec();
+                let snapshot_ids: HashSet<i64> = snapshots
+                    .iter()
+                    .map(|snapshot| snapshot.snapshot_id())
+                    .collect();
+
+                let mut manifest_files = vec![];
+                for snapshot in snapshots {
+                    let manifest_list = self
+                        .object_cache
+                        .get_manifest_list(&snapshot, &self.table_metadata)
+                        .await?;
+                    for entry in manifest_list.entries() {
+                        if !snapshot_ids.contains(&entry.added_snapshot_id) {
+                            continue;
+                        }
+                        manifest_files.push(entry.clone());
+                    }
+                }
+                filter_fn = Some(Arc::new(move |entry: &ManifestEntryRef| {
+                    entry
+                        .snapshot_id()
+                        .map(|id| snapshot_ids.contains(&id))
+                        .unwrap_or(true) // Include entries without snapshot_id
+                }));
+
+                manifest_files
+            } else {
+                let manifest_list = self.get_manifest_list().await?;
+                manifest_list.entries().to_vec()
+            }
+        };
 
         // TODO: Ideally we could ditch this intermediate Vec as we return an iterator.
         let mut filtered_mfcs = vec![];
-        for manifest_file in manifest_files {
+        for manifest_file in &manifest_files {
             let tx = if manifest_file.content == ManifestContentType::Deletes {
                 delete_file_tx.clone()
             } else {
@@ -224,6 +286,7 @@ impl PlanContext {
                 partition_bound_predicate,
                 tx,
                 delete_file_idx.clone(),
+                filter_fn.clone(),
             );
 
             filtered_mfcs.push(Ok(mfc));
@@ -238,6 +301,7 @@ impl PlanContext {
         partition_filter: Option<Arc<BoundPredicate>>,
         sender: Sender<ManifestEntryContext>,
         delete_file_index: DeleteFileIndex,
+        filter_fn: Option<Arc<ManifestEntryFilterFn>>,
     ) -> ManifestFileContext {
         let bound_predicates =
             if let (Some(ref partition_bound_predicate), Some(snapshot_bound_predicate)) =
@@ -260,6 +324,7 @@ impl PlanContext {
             field_ids: self.field_ids.clone(),
             expression_evaluator_cache: self.expression_evaluator_cache.clone(),
             delete_file_index,
+            filter_fn,
         }
     }
 }

@@ -37,7 +37,7 @@ use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluato
 use crate::expr::{Bind, BoundPredicate, Predicate};
 use crate::io::FileIO;
 use crate::runtime::spawn;
-use crate::spec::{DataContentType, SnapshotRef};
+use crate::spec::{DataContentType, ManifestStatus, SnapshotRef};
 use crate::table::Table;
 use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind, Result};
@@ -51,6 +51,10 @@ pub struct TableScanBuilder<'a> {
     // Defaults to none which means select all columns
     column_names: Option<Vec<String>>,
     snapshot_id: Option<i64>,
+    /// Exclusive. Used for incremental scan.
+    from_snapshot_id: Option<i64>,
+    /// Inclusive. Used for incremental scan.
+    to_snapshot_id: Option<i64>,
     batch_size: Option<usize>,
     case_sensitive: bool,
     filter: Option<Predicate>,
@@ -59,6 +63,8 @@ pub struct TableScanBuilder<'a> {
     concurrency_limit_manifest_files: usize,
     row_group_filtering_enabled: bool,
     row_selection_enabled: bool,
+    /// Whether to perform a changelog scan
+    is_changelog_scan: bool,
 }
 
 impl<'a> TableScanBuilder<'a> {
@@ -69,6 +75,8 @@ impl<'a> TableScanBuilder<'a> {
             table,
             column_names: None,
             snapshot_id: None,
+            from_snapshot_id: None,
+            to_snapshot_id: None,
             batch_size: None,
             case_sensitive: true,
             filter: None,
@@ -77,6 +85,7 @@ impl<'a> TableScanBuilder<'a> {
             concurrency_limit_manifest_files: num_cpus,
             row_group_filtering_enabled: true,
             row_selection_enabled: false,
+            is_changelog_scan: false,
         }
     }
 
@@ -127,6 +136,18 @@ impl<'a> TableScanBuilder<'a> {
     /// Set the snapshot to scan. When not set, it uses current snapshot.
     pub fn snapshot_id(mut self, snapshot_id: i64) -> Self {
         self.snapshot_id = Some(snapshot_id);
+        self
+    }
+
+    /// Set the starting snapshot id (exclusive) for changelog scan.
+    pub fn from_snapshot_id(mut self, from_snapshot_id: i64) -> Self {
+        self.from_snapshot_id = Some(from_snapshot_id);
+        self
+    }
+
+    /// Set the ending snapshot id (inclusive) for changelog scan (See [`Self::from_snapshot_id`]).
+    pub fn to_snapshot_id(mut self, to_snapshot_id: i64) -> Self {
+        self.to_snapshot_id = Some(to_snapshot_id);
         self
     }
 
@@ -183,8 +204,35 @@ impl<'a> TableScanBuilder<'a> {
         self
     }
 
+    /// Enable changelog scan mode. This will scan data files between two snapshots
+    /// and track which rows were inserted or deleted. Requires `from_snapshot_id`
+    /// and `to_snapshot_id` to be set.
+    ///
+    /// When enabled, the scan will identify data files that were added or deleted
+    /// between the two snapshots, allowing you to track changes at the row level.
+    pub fn changelog(mut self) -> Self {
+        self.is_changelog_scan = true;
+        self
+    }
+
     /// Build the table scan.
     pub fn build(self) -> Result<TableScan> {
+        // Validate changelog scan requirements
+        if self.is_changelog_scan {
+            if self.from_snapshot_id.is_none() || self.to_snapshot_id.is_none() {
+                return Err(Error::new(
+                    ErrorKind::DataInvalid,
+                    "Changelog scan requires both from_snapshot_id and to_snapshot_id to be set",
+                ));
+            }
+            if self.snapshot_id.is_some() {
+                return Err(Error::new(
+                    ErrorKind::DataInvalid,
+                    "Cannot use snapshot_id with changelog scan. Use from_snapshot_id and to_snapshot_id instead",
+                ));
+            }
+        }
+
         let snapshot = match self.snapshot_id {
             Some(snapshot_id) => self
                 .table
@@ -277,6 +325,8 @@ impl<'a> TableScanBuilder<'a> {
 
         let plan_context = PlanContext {
             snapshot,
+            from_snapshot_id: self.from_snapshot_id,
+            to_snapshot_id: self.to_snapshot_id,
             table_metadata: self.table.metadata_ref(),
             snapshot_schema: schema,
             case_sensitive: self.case_sensitive,
@@ -350,17 +400,14 @@ impl TableScan {
 
         let (delete_file_idx, delete_file_tx) = DeleteFileIndex::new();
 
-        let manifest_list = plan_context.get_manifest_list().await?;
-
         // get the [`ManifestFile`]s from the [`ManifestList`], filtering out any
         // whose partitions cannot match this
         // scan's filter
         let manifest_file_contexts = plan_context.build_manifest_file_contexts(
-            manifest_list,
             manifest_entry_data_ctx_tx,
             delete_file_idx.clone(),
             manifest_entry_delete_ctx_tx,
-        )?;
+        ).await?;
 
         let mut channel_for_manifest_error = file_scan_task_tx.clone();
 
@@ -438,6 +485,145 @@ impl TableScan {
         }
 
         arrow_reader_builder.build().read(self.plan_files().await?)
+    }
+
+    /// Returns a stream of [`FileScanTask`]s for changelog append scan.
+    /// This function is currently identical to `plan_files` but exists as a separate
+    /// function to allow for future evolution of changelog-specific planning logic.
+    pub async fn plan_append_changelog_files(&self) -> Result<FileScanTaskStream> {
+        let Some(plan_context) = self.plan_context.as_ref() else {
+            return Ok(Box::pin(futures::stream::empty()));
+        };
+
+        let concurrency_limit_manifest_files = self.concurrency_limit_manifest_files;
+        let concurrency_limit_manifest_entries = self.concurrency_limit_manifest_entries;
+
+        // used to stream ManifestEntryContexts between stages of the file plan operation
+        let (manifest_entry_data_ctx_tx, manifest_entry_data_ctx_rx) =
+            channel(concurrency_limit_manifest_files);
+        let (manifest_entry_delete_ctx_tx, manifest_entry_delete_ctx_rx) =
+            channel(concurrency_limit_manifest_files);
+
+        // used to stream the results back to the caller
+        let (file_scan_task_tx, file_scan_task_rx) = channel(concurrency_limit_manifest_entries);
+
+        let (file_scan_task_tx_delete, file_scan_task_rx_delete) = channel::<Result<String>>(concurrency_limit_manifest_entries);
+
+        let (delete_file_idx, delete_file_tx) = DeleteFileIndex::new();
+
+        // get the [`ManifestFile`]s from the [`ManifestList`], filtering out any
+        // whose partitions cannot match this
+        // scan's filter
+        let manifest_file_contexts = plan_context.build_manifest_file_contexts(
+            manifest_entry_data_ctx_tx,
+            delete_file_idx.clone(),
+            manifest_entry_delete_ctx_tx,
+        ).await?;
+
+        let mut channel_for_manifest_error = file_scan_task_tx.clone();
+
+        // Concurrently load all [`Manifest`]s and stream their [`ManifestEntry`]s
+        spawn(async move {
+            let result = futures::stream::iter(manifest_file_contexts)
+                .try_for_each_concurrent(concurrency_limit_manifest_files, |ctx| async move {
+                    ctx.fetch_manifest_and_stream_manifest_entries().await
+                })
+                .await;
+
+            if let Err(error) = result {
+                let _ = channel_for_manifest_error.send(Err(error)).await;
+            }
+        });
+
+        let mut channel_for_data_manifest_entry_error = file_scan_task_tx.clone();
+        let mut channel_for_delete_manifest_entry_error = file_scan_task_tx.clone();
+
+        // Process the delete file [`ManifestEntry`] stream in parallel
+        spawn(async move {
+            let result = manifest_entry_delete_ctx_rx
+                .map(|me_ctx| Ok((me_ctx, delete_file_tx.clone())))
+                .try_for_each_concurrent(
+                    concurrency_limit_manifest_entries,
+                    |(manifest_entry_context, tx)| async move {
+                        spawn(async move {
+                            Self::process_delete_manifest_entry(manifest_entry_context, tx).await
+                        })
+                        .await
+                    },
+                )
+                .await;
+
+            if let Err(error) = result {
+                let _ = channel_for_delete_manifest_entry_error
+                    .send(Err(error))
+                    .await;
+            }
+        })
+        .await;
+
+        // Process the data file [`ManifestEntry`] stream in parallel
+        spawn(async move {
+            let result = manifest_entry_data_ctx_rx
+                .map(|me_ctx| Ok((me_ctx, file_scan_task_tx.clone(), file_scan_task_tx_delete.clone())))
+                .try_for_each_concurrent(
+                    concurrency_limit_manifest_entries,
+                    |(manifest_entry_context, tx, mut tx_delete)| async move {
+                        if manifest_entry_context.manifest_entry.status() == ManifestStatus::Added {
+                            spawn(async move {
+                                Self::process_data_manifest_entry(manifest_entry_context, tx).await
+                            })
+                            .await
+                        } else if manifest_entry_context.manifest_entry.status() == ManifestStatus::Deleted {
+                            spawn(async move {
+                                tx_delete
+                                    .send(Ok(manifest_entry_context.manifest_entry.file_path().to_string()))
+                                    .await?;
+                                Ok(())
+                            })
+                            .await
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
+
+            if let Err(error) = result {
+                let _ = channel_for_data_manifest_entry_error.send(Err(error)).await;
+            }
+        });
+
+        // Collect all deleted file paths
+        let deleted_files: std::collections::HashSet<String> = file_scan_task_rx_delete.try_collect().await?;
+
+        // TODO: This blocks until we find all the deletes, which could be improved by
+        // prioritizing finding those first (e.g., process deleted data fileentries before added data entries).
+
+        // Filter out file scan tasks whose file path matches deleted files
+        let filtered_stream = file_scan_task_rx.try_filter(move |task| {
+            futures::future::ready(!deleted_files.contains(&task.data_file_path))
+        });
+
+        Ok(filtered_stream.boxed())
+    }
+
+    /// Returns an [`ArrowRecordBatchStream`] for changelog append scan.
+    /// This reads the data files that were added between two snapshots, and includes
+    /// a `_pos` column with the row ordinal within each parquet file (per Iceberg spec, field ID 2147483645)
+    /// and a `_file` column with the file path for each row (per Iceberg spec, field ID 2147483646).
+    pub async fn appends_changelog_to_arrow(&self) -> Result<ArrowRecordBatchStream> {
+        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
+            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+            .with_row_group_filtering_enabled(self.row_group_filtering_enabled)
+            .with_row_selection_enabled(self.row_selection_enabled)
+            .with_row_ordinals(true) // Enable row number column for changelog scans
+            .with_file_path(true); // Enable file path column for changelog scans
+
+        if let Some(batch_size) = self.batch_size {
+            arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
+        }
+
+        arrow_reader_builder.build().read(self.plan_append_changelog_files().await?)
     }
 
     /// Returns a reference to the column names of the table scan.
@@ -567,8 +753,9 @@ pub mod tests {
     use std::sync::Arc;
 
     use arrow_array::{
-        ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
+        ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, RunArray, StringArray,
     };
+    use arrow_array::types::Int32Type;
     use futures::{TryStreamExt, stream};
     use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
     use parquet::basic::Compression;
@@ -1301,6 +1488,72 @@ pub mod tests {
 
         let int64_arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(int64_arr.value(0), 1);
+    }
+
+    // TODO @vustef L0: Make this (or some other) test actually test when there's a delete of a previously added data file.
+    #[tokio::test]
+    async fn test_changelog_no_delete_files() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+       // Get the two snapshots in the table
+       let snapshots = fixture.table.metadata().snapshots().collect::<Vec<_>>();
+
+       assert_eq!(snapshots.len(), 2, "Test fixture should have two snapshots");
+
+       // Determine the correct order by snapshot IDs (since validation requires to_snapshot_id > from_snapshot_id)
+       // Sort snapshots by snapshot_id to ensure consistent ordering
+       let mut snapshot_ids: Vec<i64> = snapshots.iter().map(|s| s.snapshot_id()).collect();
+       snapshot_ids.sort();
+
+       let first_snapshot_id = snapshot_ids[0];
+       let second_snapshot_id = snapshot_ids[1];
+
+       // Create a changelog scan from first to second snapshot
+       let table_scan = fixture
+           .table
+           .scan()
+           .from_snapshot_id(first_snapshot_id)
+           .to_snapshot_id(second_snapshot_id)
+           .build()
+           .unwrap();
+
+        // Call appends_changelog_to_arrow to get the changelog data
+        let batch_stream = table_scan.appends_changelog_to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        // Verify we got data from the changelog scan
+        assert!(!batches.is_empty(), "Changelog scan should return batches");
+
+        // Count total rows across all batches - should be exactly 1024 (only from 1.parquet)
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1024, "Changelog scan should return exactly 1024 rows from 1.parquet, not data from both 1.parquet and 3.parquet");
+
+        // Verify data column - all values should be 1 (as written in the parquet files)
+        let col = batches[0].column_by_name("x").unwrap();
+        let int64_arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(int64_arr.value(0), 1);
+
+        // Verify the _pos column is present and contains row ordinals starting from 0
+        let pos_col = batches[0].column_by_name("_pos").expect("_pos column should be present");
+        let pos_arr = pos_col.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(pos_arr.value(0), 0, "_pos column should start at 0");
+
+        // Verify the _file column contains specifically 1.parquet (the Added file, not 3.parquet which is Existing)
+        // The _file column is stored as a RunArray (Run-End Encoded) for memory efficiency
+        let file_col = batches[0].column_by_name("_file").expect("_file column should be present");
+        let file_run_arr = file_col.as_any().downcast_ref::<RunArray<Int32Type>>().unwrap();
+
+        // Verify the run array has a single run covering the entire batch
+        let run_ends = file_run_arr.run_ends();
+        assert_eq!(run_ends.values().len(), 1, "Should have exactly one run for constant file path");
+        assert_eq!(run_ends.values()[0], batches[0].num_rows() as i32, "Run length should equal batch size");
+
+        // Extract and verify the file path value
+        let file_values = file_run_arr.values().as_any().downcast_ref::<StringArray>().unwrap();
+        let file_path = file_values.value(0);
+        assert!(file_path.ends_with("1.parquet"), "_file column should contain 1.parquet (the Added file), got: {}", file_path);
     }
 
     #[tokio::test]
