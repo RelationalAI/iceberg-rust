@@ -8,7 +8,7 @@ use crate::arrow::delete_filter::DeleteFilter;
 use crate::arrow::{ArrowBatchEmitter, ArrowReaderBuilder, IncrementalArrowBatchRecordStream};
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
-use crate::scan::{ArrowRecordBatchStream, DeleteFileContext};
+use crate::scan::DeleteFileContext;
 use crate::scan::cache::{ExpressionEvaluatorCache, ManifestEvaluatorCache, PartitionFilterCache};
 use crate::scan::context::ManifestEntryContext;
 use crate::spec::{DataContentType, ManifestStatus, Snapshot, SnapshotRef};
@@ -453,11 +453,10 @@ impl IncrementalTableScan {
     /// Returns an [`IncrementalArrowBatchRecordStream`] for this incremental table scan.
     pub async fn to_arrow(&self) -> Result<IncrementalArrowBatchRecordStream> {
         let file_scan_task_stream = self.plan_files().await?;
-        let mut arrow_reader_builder  =
-            ArrowReaderBuilder::new(self.file_io.clone())
-                .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
-                .with_row_group_filtering_enabled(true)
-                .with_row_selection_enabled(true);
+        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
+            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+            .with_row_group_filtering_enabled(true)
+            .with_row_selection_enabled(true);
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
