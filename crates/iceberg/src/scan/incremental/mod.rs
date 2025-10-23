@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::delete_filter::DeleteFilter;
-use crate::arrow::{ArrowBatchEmitter, ArrowReaderBuilder, CombinedIncrementalBatchRecordStream};
+use crate::arrow::{ArrowBatchEmitter, ArrowReaderBuilder, CombinedIncrementalBatchRecordStream, UnzippedIncrementalBatchRecordStream};
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
 use crate::scan::DeleteFileContext;
@@ -433,6 +433,22 @@ impl IncrementalTableScan {
 
     /// Returns an [`CombinedIncrementalBatchRecordStream`] for this incremental table scan.
     pub async fn to_arrow(&self) -> Result<CombinedIncrementalBatchRecordStream> {
+        let file_scan_task_stream = self.plan_files().await?;
+        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
+            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+            .with_row_group_filtering_enabled(true)
+            .with_row_selection_enabled(true);
+
+        if let Some(batch_size) = self.batch_size {
+            arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
+        }
+
+        let arrow_reader = arrow_reader_builder.build();
+        file_scan_task_stream.read(arrow_reader)
+    }
+
+    /// Returns an [`UnzippedIncrementalBatchRecordStream`] for this incremental table scan.
+    pub async fn to_unzipped_arrow(&self) -> Result<UnzippedIncrementalBatchRecordStream> {
         let file_scan_task_stream = self.plan_files().await?;
         let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
             .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
