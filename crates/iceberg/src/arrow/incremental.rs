@@ -207,8 +207,6 @@ async fn process_incremental_append_task(
 
     // Build the batch stream and send all the RecordBatches that it generates
     // to the requester.
-    let file_path = task.data_file_path.clone();
-    println!("Reading data file: {}", file_path);
     let record_batch_stream = record_batch_stream_builder
         .build()?
         .map(move |batch| match batch {

@@ -426,23 +426,6 @@ impl IncrementalTableScan {
             Ok(())
         })?;
 
-        for task in tasks.iter() {
-            match task {
-                IncrementalFileScanTask::Append(append_task) => {
-                    println!(
-                        "Planned incremental append file scan task: {:?}, deletes: {:?}",
-                        append_task.data_file_path, append_task.positional_deletes,
-                    );
-                }
-                IncrementalFileScanTask::Delete(delete_path, _) => {
-                    println!(
-                        "Planned incremental delete file scan task: {:?}",
-                        delete_path,
-                    );
-                }
-            }
-        }
-
         // We actually would not need a stream here, but we can keep it compatible with
         // other scan types.
         Ok(futures::stream::iter(tasks).map(|t| Ok(t)).boxed())
