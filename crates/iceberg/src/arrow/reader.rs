@@ -526,7 +526,7 @@ impl ArrowReader {
         })
     }
 
-    pub(crate) fn build_field_id_set_and_map(
+    fn build_field_id_set_and_map(
         parquet_schema: &SchemaDescriptor,
         predicate: &BoundPredicate,
     ) -> Result<(HashSet<i32>, HashMap<i32, usize>)> {
@@ -544,7 +544,7 @@ impl ArrowReader {
 
     /// Insert the leaf field id into the field_ids using for projection.
     /// For nested type, it will recursively insert the leaf field id.
-    pub(crate) fn include_leaf_field_id(field: &NestedField, field_ids: &mut Vec<i32>) {
+    fn include_leaf_field_id(field: &NestedField, field_ids: &mut Vec<i32>) {
         match field.field_type.as_ref() {
             Type::Primitive(_) => {
                 field_ids.push(field.id);
@@ -1435,11 +1435,13 @@ impl<R: FileRead> AsyncFileReader for ArrowFileReader<R> {
     fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, parquet::errors::Result<Bytes>> {
         Box::pin(
             self.r
-                .read(range.start as u64..range.end as u64)
+                .read(range.start..range.end)
                 .map_err(|err| parquet::errors::ParquetError::External(Box::new(err))),
         )
     }
 
+    // TODO: currently we don't respect `ArrowReaderOptions` cause it don't expose any method to access the option field
+    // we will fix it after `v55.1.0` is released in https://github.com/apache/arrow-rs/issues/7393
     fn get_metadata(
         &mut self,
         _options: Option<&'_ ArrowReaderOptions>,
