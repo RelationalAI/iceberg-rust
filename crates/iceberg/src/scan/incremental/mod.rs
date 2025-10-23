@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::delete_filter::DeleteFilter;
-use crate::arrow::{ArrowBatchEmitter, ArrowReaderBuilder, CombinedIncrementalBatchRecordStream, UnzippedIncrementalBatchRecordStream};
+use crate::arrow::{StreamsInto, ArrowReaderBuilder, CombinedIncrementalBatchRecordStream, UnzippedIncrementalBatchRecordStream};
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
 use crate::scan::DeleteFileContext;

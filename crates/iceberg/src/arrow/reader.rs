@@ -141,9 +141,10 @@ pub struct ArrowReader {
     pub(crate) row_selection_enabled: bool,
 }
 
-/// Trait indicating that Arrow batches can be read from an implementing type.
-pub trait ArrowBatchEmitter<R, S = ArrowRecordBatchStream> {
-    /// Reads Arrow batches from the implementing type.
+/// Trait indicating that the implementing type streams into a stream of type `S` using
+/// a reader of type `R`.
+pub trait StreamsInto<R, S = ArrowRecordBatchStream> {
+    /// Read from the reader and produce a stream of type `S`.
     fn read(self, reader: R) -> Result<S>;
 }
 
@@ -356,7 +357,6 @@ impl ArrowReader {
             ArrowReaderOptions::new(),
         )
         .await?;
-
         Ok(record_batch_stream_builder)
     }
 

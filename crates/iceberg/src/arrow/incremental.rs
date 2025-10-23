@@ -9,7 +9,7 @@ use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use roaring::RoaringTreemap;
 
 use crate::arrow::record_batch_transformer::RecordBatchTransformer;
-use crate::arrow::{ArrowBatchEmitter, ArrowReader};
+use crate::arrow::{StreamsInto, ArrowReader};
 use crate::io::FileIO;
 use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
@@ -34,13 +34,13 @@ pub type CombinedIncrementalBatchRecordStream =
 /// Stream type for obtaining a separate stream of appended and deleted record batches.
 pub type UnzippedIncrementalBatchRecordStream = (ArrowRecordBatchStream, ArrowRecordBatchStream);
 
-impl ArrowBatchEmitter<ArrowReader, CombinedIncrementalBatchRecordStream>
+impl StreamsInto<ArrowReader, CombinedIncrementalBatchRecordStream>
     for IncrementalFileScanTaskStream
 {
     /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns a
     /// stream of Arrow `RecordBatch`es containing the data from the files.
     fn read(self, reader: ArrowReader) -> Result<CombinedIncrementalBatchRecordStream> {
-        let (appends, deletes) = ArrowBatchEmitter::<
+        let (appends, deletes) = StreamsInto::<
             ArrowReader,
             UnzippedIncrementalBatchRecordStream,
         >::read(self, reader)?;
@@ -52,7 +52,7 @@ impl ArrowBatchEmitter<ArrowReader, CombinedIncrementalBatchRecordStream>
     }
 }
 
-impl ArrowBatchEmitter<ArrowReader, UnzippedIncrementalBatchRecordStream>
+impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
     for IncrementalFileScanTaskStream
 {
     /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns two
