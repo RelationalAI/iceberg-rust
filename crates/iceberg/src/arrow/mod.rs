@@ -35,7 +35,6 @@ mod value;
 
 mod incremental;
 pub use incremental::*;
-
 pub use reader::*;
 pub use value::*;
 pub(crate) mod record_batch_partition_splitter;

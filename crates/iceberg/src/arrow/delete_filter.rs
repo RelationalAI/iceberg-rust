@@ -71,10 +71,8 @@ impl DeleteFilter {
             .and_then(|st| st.delete_vectors.get(delete_file_path).cloned())
     }
 
-    pub(crate) fn with_read<F,G>(&self, f: F) -> Result<G>
-    where
-        F: FnOnce(&DeleteFileFilterState) -> Result<G>,
-    {
+    pub(crate) fn with_read<F, G>(&self, f: F) -> Result<G>
+    where F: FnOnce(&DeleteFileFilterState) -> Result<G> {
         let state = self.state.read().map_err(|e| {
             Error::new(
                 ErrorKind::Unexpected,
