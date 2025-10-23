@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use roaring::RoaringTreemap;
@@ -57,10 +58,8 @@ impl ArrowBatchEmitter<ArrowReader, UnzippedIncrementalBatchRecordStream>
     /// Take a stream of `IncrementalFileScanTasks` and reads all the files. Returns two
     /// separate streams of Arrow `RecordBatch`es containing appended data and deleted records.
     fn read(self, reader: ArrowReader) -> Result<UnzippedIncrementalBatchRecordStream> {
-        let (appends_tx, appends_rx) =
-            futures::channel::mpsc::channel(reader.concurrency_limit_data_files);
-        let (deletes_tx, deletes_rx) =
-            futures::channel::mpsc::channel(reader.concurrency_limit_data_files);
+        let (appends_tx, appends_rx) = channel(reader.concurrency_limit_data_files);
+        let (deletes_tx, deletes_rx) = channel(reader.concurrency_limit_data_files);
 
         let batch_size = reader.batch_size;
         let concurrency_limit_data_files = reader.concurrency_limit_data_files;
