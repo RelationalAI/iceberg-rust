@@ -110,12 +110,12 @@ impl ArrowBatchEmitter<ArrowReader, UnzippedIncrementalBatchRecordStream>
                             IncrementalFileScanTask::Delete(file_path, delete_vector) => {
                                 spawn(async move {
                                     // Clone the `RoaringTreemap` underlying the delete vector to take ownership.
-                                    let bit_map = {
+                                    let treemap = {
                                         let guard = delete_vector.lock().unwrap();
                                         guard.inner.clone()
                                     };
                                     let record_batch_stream = process_incremental_delete_task(
-                                        file_path, bit_map, batch_size,
+                                        file_path, treemap, batch_size,
                                     );
 
                                     match record_batch_stream {
