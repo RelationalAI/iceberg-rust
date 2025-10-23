@@ -37,7 +37,7 @@ pub type UnzippedIncrementalBatchRecordStream = (ArrowRecordBatchStream, ArrowRe
 impl ArrowBatchEmitter<ArrowReader, CombinedIncrementalBatchRecordStream>
     for IncrementalFileScanTaskStream
 {
-    /// Take a stream of `IncrementalFileScanTasks` and reads all the files. Returns a
+    /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns a
     /// stream of Arrow `RecordBatch`es containing the data from the files.
     fn read(self, reader: ArrowReader) -> Result<CombinedIncrementalBatchRecordStream> {
         let (appends, deletes) = ArrowBatchEmitter::<
@@ -55,7 +55,7 @@ impl ArrowBatchEmitter<ArrowReader, CombinedIncrementalBatchRecordStream>
 impl ArrowBatchEmitter<ArrowReader, UnzippedIncrementalBatchRecordStream>
     for IncrementalFileScanTaskStream
 {
-    /// Take a stream of `IncrementalFileScanTasks` and reads all the files. Returns two
+    /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns two
     /// separate streams of Arrow `RecordBatch`es containing appended data and deleted records.
     fn read(self, reader: ArrowReader) -> Result<UnzippedIncrementalBatchRecordStream> {
         let (appends_tx, appends_rx) = channel(reader.concurrency_limit_data_files);
