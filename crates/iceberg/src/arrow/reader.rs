@@ -33,7 +33,6 @@ use arrow_string::like::starts_with;
 use bytes::Bytes;
 use fnv::FnvHashSet;
 use futures::future::BoxFuture;
-use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, try_join};
 use parquet::arrow::arrow_reader::{
     ArrowPredicateFn, ArrowReaderOptions, RowFilter, RowSelection, RowSelector,
@@ -143,9 +142,9 @@ pub struct ArrowReader {
 }
 
 /// Trait indicating that Arrow batches can be read from an implementing type.
-pub trait ArrowBatchEmitter<R, B = RecordBatch> {
+pub trait ArrowBatchEmitter<R, S = ArrowRecordBatchStream> {
     /// Reads Arrow batches from the implementing type.
-    fn read(self, reader: R) -> Result<BoxStream<'static, Result<B>>>;
+    fn read(self, reader: R) -> Result<S>;
 }
 
 impl ArrowReader {

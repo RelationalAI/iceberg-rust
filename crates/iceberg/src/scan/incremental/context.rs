@@ -7,8 +7,8 @@ use crate::Result;
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::object_cache::ObjectCache;
+use crate::scan::ExpressionEvaluatorCache;
 use crate::scan::context::{ManifestEntryContext, ManifestEntryFilterFn, ManifestFileContext};
-use crate::scan::{ExpressionEvaluatorCache, ManifestEvaluatorCache, PartitionFilterCache};
 use crate::spec::{
     ManifestContentType, ManifestEntryRef, ManifestFile, Operation, SchemaRef, SnapshotRef,
     TableMetadataRef,
@@ -33,12 +33,6 @@ pub(crate) struct IncrementalPlanContext {
 
     /// The field IDs to scan.
     pub field_ids: Arc<Vec<i32>>,
-
-    /// The partition filter cache to use for the scan.
-    pub partition_filter_cache: Arc<PartitionFilterCache>,
-
-    /// The manifest evaluator cache to use for the scan.
-    pub manifest_evaluator_cache: Arc<ManifestEvaluatorCache>,
 
     /// The expression evaluator cache to use for the scan.
     pub expression_evaluator_cache: Arc<ExpressionEvaluatorCache>,

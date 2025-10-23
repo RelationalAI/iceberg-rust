@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::delete_filter::DeleteFilter;
-use crate::arrow::{ArrowBatchEmitter, ArrowReaderBuilder, IncrementalArrowBatchRecordStream};
+use crate::arrow::{ArrowBatchEmitter, ArrowReaderBuilder, CombinedIncrementalBatchRecordStream};
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
 use crate::scan::DeleteFileContext;
-use crate::scan::cache::{ExpressionEvaluatorCache, ManifestEvaluatorCache, PartitionFilterCache};
+use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
 use crate::spec::{DataContentType, ManifestStatus, Snapshot, SnapshotRef};
 use crate::table::Table;
@@ -219,8 +219,6 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             to_snapshot_schema: schema,
             object_cache: self.table.object_cache().clone(),
             field_ids: Arc::new(field_ids),
-            partition_filter_cache: Arc::new(PartitionFilterCache::new()),
-            manifest_evaluator_cache: Arc::new(ManifestEvaluatorCache::new()),
             expression_evaluator_cache: Arc::new(ExpressionEvaluatorCache::new()),
             caching_delete_file_loader: CachingDeleteFileLoader::new(
                 self.table.file_io().clone(),
@@ -450,8 +448,8 @@ impl IncrementalTableScan {
         Ok(futures::stream::iter(tasks).map(|t| Ok(t)).boxed())
     }
 
-    /// Returns an [`IncrementalArrowBatchRecordStream`] for this incremental table scan.
-    pub async fn to_arrow(&self) -> Result<IncrementalArrowBatchRecordStream> {
+    /// Returns an [`CombinedIncrementalBatchRecordStream`] for this incremental table scan.
+    pub async fn to_arrow(&self) -> Result<CombinedIncrementalBatchRecordStream> {
         let file_scan_task_stream = self.plan_files().await?;
         let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
             .with_data_file_concurrency_limit(self.concurrency_limit_data_files)

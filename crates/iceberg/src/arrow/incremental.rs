@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::stream::select;
+use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use roaring::RoaringTreemap;
 
 use crate::arrow::record_batch_transformer::RecordBatchTransformer;
 use crate::arrow::{ArrowBatchEmitter, ArrowReader};
 use crate::io::FileIO;
+use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
     AppendedFileScanTask, IncrementalFileScanTask, IncrementalFileScanTaskStream,
@@ -25,66 +27,134 @@ pub enum IncrementalBatchType {
 }
 
 /// The stream of incremental Arrow `RecordBatch`es with batch type.
-pub type IncrementalArrowBatchRecordStream =
+pub type CombinedIncrementalBatchRecordStream =
     Pin<Box<dyn Stream<Item = Result<(IncrementalBatchType, RecordBatch)>> + Send + 'static>>;
 
-impl ArrowBatchEmitter<ArrowReader, (IncrementalBatchType, RecordBatch)>
+/// Stream type for obtaining a separate stream of appended and deleted record batches.
+pub type UnzippedIncrementalBatchRecordStream = (ArrowRecordBatchStream, ArrowRecordBatchStream);
+
+impl ArrowBatchEmitter<ArrowReader, CombinedIncrementalBatchRecordStream>
     for IncrementalFileScanTaskStream
 {
     /// Take a stream of `IncrementalFileScanTasks` and reads all the files. Returns a
     /// stream of Arrow `RecordBatch`es containing the data from the files.
-    fn read(self, reader: ArrowReader) -> Result<IncrementalArrowBatchRecordStream> {
-        let file_io = reader.file_io.clone();
-        let batch_size = reader.batch_size;
-        let concurrency_limit_data_files = reader.concurrency_limit_data_files;
+    fn read(self, reader: ArrowReader) -> Result<CombinedIncrementalBatchRecordStream> {
+        let (appends, deletes) = ArrowBatchEmitter::<
+            ArrowReader,
+            UnzippedIncrementalBatchRecordStream,
+        >::read(self, reader)?;
 
-        let stream = self
-            .map_ok(move |task| {
-                let file_io = file_io.clone();
+        let left = appends.map(|res| res.map(|batch| (IncrementalBatchType::Append, batch)));
+        let right = deletes.map(|res| res.map(|batch| (IncrementalBatchType::Delete, batch)));
 
-                process_incremental_file_scan_task(task, batch_size, file_io)
-            })
-            .map_err(|err| {
-                Error::new(ErrorKind::Unexpected, "file scan task generate failed").with_source(err)
-            })
-            .try_buffer_unordered(concurrency_limit_data_files)
-            .try_flatten_unordered(concurrency_limit_data_files);
-
-        Ok(Box::pin(stream) as IncrementalArrowBatchRecordStream)
+        Ok(Box::pin(select(left, right)) as CombinedIncrementalBatchRecordStream)
     }
 }
 
-async fn process_incremental_file_scan_task(
-    task: IncrementalFileScanTask,
-    batch_size: Option<usize>,
-    file_io: FileIO,
-) -> Result<IncrementalArrowBatchRecordStream> {
-    match task {
-        IncrementalFileScanTask::Append(append_task) => {
-            process_incremental_append_task(append_task, batch_size, file_io)
-                .await
-                .map(|stream| {
-                    // Map the stream to include the batch type
-                    let typed_stream = stream.map(|batch_result| {
-                        batch_result.map(|batch| (IncrementalBatchType::Append, batch))
-                    });
-                    Box::pin(typed_stream) as IncrementalArrowBatchRecordStream
+impl ArrowBatchEmitter<ArrowReader, UnzippedIncrementalBatchRecordStream>
+    for IncrementalFileScanTaskStream
+{
+    /// Take a stream of `IncrementalFileScanTasks` and reads all the files. Returns two
+    /// separate streams of Arrow `RecordBatch`es containing appended data and deleted records.
+    fn read(self, reader: ArrowReader) -> Result<UnzippedIncrementalBatchRecordStream> {
+        let (appends_tx, appends_rx) =
+            futures::channel::mpsc::channel(reader.concurrency_limit_data_files);
+        let (deletes_tx, deletes_rx) =
+            futures::channel::mpsc::channel(reader.concurrency_limit_data_files);
+
+        let batch_size = reader.batch_size;
+        let concurrency_limit_data_files = reader.concurrency_limit_data_files;
+        let file_io = reader.file_io.clone();
+
+        spawn(async move {
+            let _ = self
+                .try_for_each_concurrent(concurrency_limit_data_files, |task| {
+                    let file_io = file_io.clone();
+                    let mut appends_tx = appends_tx.clone();
+                    let mut deletes_tx = deletes_tx.clone();
+                    async move {
+                        match task {
+                            IncrementalFileScanTask::Append(append_task) => {
+                                spawn(async move {
+                                    let record_batch_stream = process_incremental_append_task(
+                                        append_task,
+                                        batch_size,
+                                        file_io,
+                                    )
+                                    .await;
+
+                                    match record_batch_stream {
+                                        Ok(mut stream) => {
+                                            while let Some(batch) = stream.next().await {
+                                                let result = appends_tx
+                                                    .send(batch.map_err(|e| {
+                                                        Error::new(
+                                                            ErrorKind::Unexpected,
+                                                            "failed to read appended record batch",
+                                                        )
+                                                        .with_source(e)
+                                                    }))
+                                                    .await;
+
+                                                if result.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = appends_tx.send(Err(e)).await;
+                                        }
+                                    }
+                                });
+                            }
+                            IncrementalFileScanTask::Delete(file_path, delete_vector) => {
+                                spawn(async move {
+                                    // Clone the `RoaringTreemap` underlying the delete vector to take ownership.
+                                    let bit_map = {
+                                        let guard = delete_vector.lock().unwrap();
+                                        guard.inner.clone()
+                                    };
+                                    let record_batch_stream = process_incremental_delete_task(
+                                        file_path, bit_map, batch_size,
+                                    );
+
+                                    // Write a match block like above with the following while loop in the Ok arm
+                                    match record_batch_stream {
+                                        Ok(mut stream) => {
+                                            while let Some(batch) = stream.next().await {
+                                                let result = deletes_tx
+                                                    .send(batch.map_err(|e| {
+                                                        Error::new(
+                                                            ErrorKind::Unexpected,
+                                                            "failed to read deleted record batch",
+                                                        )
+                                                        .with_source(e)
+                                                    }))
+                                                    .await;
+
+                                                if result.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = deletes_tx.send(Err(e)).await;
+                                        }
+                                    }
+                                });
+                            }
+                        };
+
+                        Ok(())
+                    }
                 })
-        }
-        IncrementalFileScanTask::Delete(file_path, delete_vector) => {
-            // Clone the `RoaringTreemap` underlying the delete vector to take ownership.
-            let bit_map = {
-                let guard = delete_vector.lock().unwrap();
-                guard.inner.clone()
-            };
-            process_incremental_delete_task(file_path, bit_map, batch_size).map(|stream| {
-                // Map the stream to include the batch type
-                let typed_stream = stream.map(|batch_result| {
-                    batch_result.map(|batch| (IncrementalBatchType::Delete, batch))
-                });
-                Box::pin(typed_stream) as IncrementalArrowBatchRecordStream
-            })
-        }
+                .await;
+        });
+
+        return Ok((
+            Box::pin(deletes_rx) as ArrowRecordBatchStream,
+            Box::pin(appends_rx) as ArrowRecordBatchStream,
+        ));
     }
 }
 
