@@ -118,7 +118,6 @@ impl ArrowBatchEmitter<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         file_path, bit_map, batch_size,
                                     );
 
-                                    // Write a match block like above with the following while loop in the Ok arm
                                     match record_batch_stream {
                                         Ok(mut stream) => {
                                             while let Some(batch) = stream.next().await {
