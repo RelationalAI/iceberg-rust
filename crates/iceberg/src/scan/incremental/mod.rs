@@ -448,6 +448,7 @@ impl IncrementalTableScan {
     }
 
     /// Returns an [`UnzippedIncrementalBatchRecordStream`] for this incremental table scan.
+    /// This stream will yield separate streams for appended and deleted record batches.
     pub async fn to_unzipped_arrow(&self) -> Result<UnzippedIncrementalBatchRecordStream> {
         let file_scan_task_stream = self.plan_files().await?;
         let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
