@@ -63,6 +63,7 @@ impl BasicDeleteFileLoader {
             data_file_path,
             self.file_io.clone(),
             false,
+            false, // don't include row ordinals for delete files
         )
         .await?
         .build()?

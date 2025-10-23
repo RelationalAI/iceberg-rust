@@ -15,26 +15,5 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Conversion between Iceberg and Arrow schema
-
-mod schema;
-pub use schema::*;
-
-mod nan_val_cnt_visitor;
-pub(crate) use nan_val_cnt_visitor::*;
-pub(crate) mod caching_delete_file_loader;
-/// Delete File loader
-pub mod delete_file_loader;
-pub(crate) mod delete_filter;
-
-mod reader;
-pub(crate) mod record_batch_projector;
-pub(crate) mod record_batch_transformer;
-mod value;
-
-mod incremental;
-pub use incremental::*;
-
-pub use reader::*;
-pub use value::*;
-pub(crate) mod record_batch_partition_splitter;
+/// Utilities for working with snapshots.
+pub mod snapshot;

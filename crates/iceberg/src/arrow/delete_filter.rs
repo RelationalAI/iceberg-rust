@@ -35,9 +35,15 @@ enum EqDelState {
 }
 
 #[derive(Debug, Default)]
-struct DeleteFileFilterState {
+pub(crate) struct DeleteFileFilterState {
     delete_vectors: HashMap<String, Arc<Mutex<DeleteVector>>>,
     equality_deletes: HashMap<String, EqDelState>,
+}
+
+impl DeleteFileFilterState {
+    pub fn delete_vectors(&self) -> &HashMap<String, Arc<Mutex<DeleteVector>>> {
+        &self.delete_vectors
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -63,6 +69,19 @@ impl DeleteFilter {
             .read()
             .ok()
             .and_then(|st| st.delete_vectors.get(delete_file_path).cloned())
+    }
+
+    pub(crate) fn with_read<F,G>(&self, f: F) -> Result<G>
+    where
+        F: FnOnce(&DeleteFileFilterState) -> Result<G>,
+    {
+        let state = self.state.read().map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                format!("Failed to acquire read lock: {}", e),
+            )
+        })?;
+        f(&state)
     }
 
     pub(crate) fn try_start_eq_del_load(&self, file_path: &str) -> Option<Arc<Notify>> {
