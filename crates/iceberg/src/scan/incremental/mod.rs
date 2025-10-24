@@ -423,8 +423,10 @@ impl IncrementalTableScan {
             }
         });
 
+        // Collect all append tasks.
         let mut tasks = file_scan_task_rx.try_collect::<Vec<_>>().await?;
 
+        // Compute those file paths that have been appended.
         let appended_files = tasks
             .iter()
             .filter_map(|task| match task {
@@ -435,6 +437,7 @@ impl IncrementalTableScan {
             })
             .collect::<HashSet<String>>();
 
+        // Augment `tasks` with delete tasks.
         delete_filter.with_read(|state| {
             for (path, delete_vector) in state.delete_vectors().iter() {
                 if !appended_files.contains::<String>(path) {

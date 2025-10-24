@@ -71,7 +71,8 @@ pub type IncrementalFileScanTaskStream = BoxStream<'static, Result<IncrementalFi
 pub enum IncrementalFileScanTask {
     /// An appended data file.
     Append(AppendedFileScanTask),
-    /// Deleted records of a data file.
+    /// Deleted records of a data file. First argument is the file path, second the delete
+    /// vector.
     Delete(String, Arc<Mutex<DeleteVector>>),
 }
 
