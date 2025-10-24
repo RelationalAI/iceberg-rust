@@ -86,10 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some((_, batch)) = stream.try_next().await? {
         rows += batch.num_rows();
     }
-    println!(
-        "Finished reading incremental scan in {:?}",
-        time.elapsed()
-    );
+    println!("Finished reading incremental scan in {:?}", time.elapsed());
 
     println!("Total rows: {:?}", rows);
     Ok(())

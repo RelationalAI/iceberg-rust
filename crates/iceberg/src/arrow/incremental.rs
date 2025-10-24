@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -9,7 +26,7 @@ use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use roaring::RoaringTreemap;
 
 use crate::arrow::record_batch_transformer::RecordBatchTransformer;
-use crate::arrow::{StreamsInto, ArrowReader};
+use crate::arrow::{ArrowReader, StreamsInto};
 use crate::io::FileIO;
 use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
@@ -40,10 +57,8 @@ impl StreamsInto<ArrowReader, CombinedIncrementalBatchRecordStream>
     /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns a
     /// stream of Arrow `RecordBatch`es containing the data from the files.
     fn read(self, reader: ArrowReader) -> Result<CombinedIncrementalBatchRecordStream> {
-        let (appends, deletes) = StreamsInto::<
-            ArrowReader,
-            UnzippedIncrementalBatchRecordStream,
-        >::read(self, reader)?;
+        let (appends, deletes) =
+            StreamsInto::<ArrowReader, UnzippedIncrementalBatchRecordStream>::read(self, reader)?;
 
         let left = appends.map(|res| res.map(|batch| (IncrementalBatchType::Append, batch)));
         let right = deletes.map(|res| res.map(|batch| (IncrementalBatchType::Delete, batch)));
