@@ -493,11 +493,19 @@ impl IncrementalTableScan {
             return Ok(());
         }
 
-        // Abort the plan if we encounter a manifest entry for a data file
+        // Abort the plan if we encounter a manifest entry for a data file or equality
+        // deletes.
         if manifest_entry_context.manifest_entry.content_type() == DataContentType::Data {
             return Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 "Encountered an entry for a data file in a delete file manifest",
+            ));
+        } else if manifest_entry_context.manifest_entry.content_type()
+            == DataContentType::EqualityDeletes
+        {
+            return Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "Equality deletes are not supported yet in incremental scans",
             ));
         }
 
