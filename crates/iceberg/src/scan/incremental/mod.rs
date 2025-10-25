@@ -548,3 +548,6 @@ impl IncrementalTableScan {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

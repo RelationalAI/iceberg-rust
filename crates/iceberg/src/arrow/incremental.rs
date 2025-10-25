@@ -165,8 +165,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
         });
 
         return Ok((
-            Box::pin(deletes_rx) as ArrowRecordBatchStream,
             Box::pin(appends_rx) as ArrowRecordBatchStream,
+            Box::pin(deletes_rx) as ArrowRecordBatchStream,
         ));
     }
 }
