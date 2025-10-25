@@ -57,6 +57,12 @@ use crate::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
 use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind};
 
+/// Reserved field ID for the file path (_file) column per Iceberg spec
+pub(crate) const RESERVED_FIELD_ID_FILE: i32 = 2147483646;
+
+/// Column name for the file path metadata column per Iceberg spec
+pub(crate) const RESERVED_COL_NAME_FILE: &str = "_file";
+
 /// Builder to create ArrowReader
 pub struct ArrowReaderBuilder {
     batch_size: Option<usize>,
@@ -124,15 +130,22 @@ impl ArrowReaderBuilder {
 /// Reads data from Parquet files
 #[derive(Clone)]
 pub struct ArrowReader {
-    batch_size: Option<usize>,
-    file_io: FileIO,
-    delete_file_loader: CachingDeleteFileLoader,
+    pub(crate) batch_size: Option<usize>,
+    pub(crate) file_io: FileIO,
+    pub(crate) delete_file_loader: CachingDeleteFileLoader,
 
     /// the maximum number of data files that can be fetched at the same time
-    concurrency_limit_data_files: usize,
+    pub(crate) concurrency_limit_data_files: usize,
 
-    row_group_filtering_enabled: bool,
-    row_selection_enabled: bool,
+    pub(crate) row_group_filtering_enabled: bool,
+    pub(crate) row_selection_enabled: bool,
+}
+
+/// Trait indicating that the implementing type streams into a stream of type `S` using
+/// a reader of type `R`.
+pub trait StreamsInto<R, S = ArrowRecordBatchStream> {
+    /// Read from the reader and produce a stream of type `S`.
+    fn read(self, reader: R) -> Result<S>;
 }
 
 impl ArrowReader {
@@ -352,7 +365,7 @@ impl ArrowReader {
     /// Using the Parquet page index, we build a `RowSelection` that rejects rows that are indicated
     /// as having been deleted by a positional delete, taking into account any row groups that have
     /// been skipped entirely by the filter predicate
-    fn build_deletes_row_selection(
+    pub(crate) fn build_deletes_row_selection(
         row_group_metadata_list: &[RowGroupMetaData],
         selected_row_groups: &Option<Vec<usize>>,
         positional_deletes: &DeleteVector,
@@ -457,6 +470,62 @@ impl ArrowReader {
         Ok(results.into())
     }
 
+    /// Adds a `_file` column to the RecordBatch containing the file path.
+    /// Uses Run-End Encoding (RLE) for maximum memory efficiency when the same
+    /// file path is repeated across all rows.
+    pub(crate) fn add_file_path_column(batch: RecordBatch, file_path: &str) -> Result<RecordBatch> {
+        use std::collections::HashMap;
+
+        use arrow_array::{Int32Array, RunArray, StringArray};
+        use arrow_schema::Field;
+
+        let num_rows = batch.num_rows();
+
+        // Use Run-End Encoded array for optimal memory efficiency
+        // For a constant value repeated num_rows times, this stores:
+        // - run_ends: [num_rows] (one i32)
+        // - values: [file_path] (one string)
+        let run_ends = Int32Array::from(vec![num_rows as i32]);
+        let values = StringArray::from(vec![file_path]);
+        // TODO @vustef L0: These may not be supported in Julia's Arrow.jl, see what alternatives we have...
+        let file_array = RunArray::try_new(&run_ends, &values).map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "Failed to create RunArray for _file column",
+            )
+            .with_source(e)
+        })?;
+
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(file_array) as ArrayRef);
+
+        let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
+        // Per Iceberg spec, the _file column has reserved field ID RESERVED_FIELD_ID_FILE
+        // DataType is RunEndEncoded with Int32 run ends and Utf8 values
+        // Note: values field is nullable to match what StringArray::from() creates // TODO @vustef: Not sure why is that the case, fix it.
+        let run_ends_field = Arc::new(Field::new("run_ends", DataType::Int32, false));
+        let values_field = Arc::new(Field::new("values", DataType::Utf8, true));
+        let file_field = Field::new(
+            RESERVED_COL_NAME_FILE,
+            DataType::RunEndEncoded(run_ends_field, values_field),
+            false,
+        )
+        .with_metadata(HashMap::from([(
+            PARQUET_FIELD_ID_META_KEY.to_string(),
+            RESERVED_FIELD_ID_FILE.to_string(),
+        )]));
+        fields.push(Arc::new(file_field));
+
+        let schema = Arc::new(ArrowSchema::new(fields));
+        RecordBatch::try_new(schema, columns).map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "Failed to add _file column to RecordBatch",
+            )
+            .with_source(e)
+        })
+    }
+
     fn build_field_id_set_and_map(
         parquet_schema: &SchemaDescriptor,
         predicate: &BoundPredicate,
@@ -495,7 +564,7 @@ impl ArrowReader {
         }
     }
 
-    fn get_arrow_projection_mask(
+    pub(crate) fn get_arrow_projection_mask(
         field_ids: &[i32],
         iceberg_schema_of_task: &Schema,
         parquet_schema: &SchemaDescriptor,
