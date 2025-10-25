@@ -705,10 +705,7 @@ impl IncrementalTestFixture {
 
             assert_eq!(deleted_pairs, expected_deletes);
         } else {
-            assert!(
-                expected_deletes.is_empty(),
-                "Expected deletes but got none"
-            );
+            assert!(expected_deletes.is_empty(), "Expected deletes but got none");
         }
     }
 }
@@ -745,13 +742,9 @@ async fn test_incremental_fixture_simple() {
     // Expected appends: snapshot 2 adds [1, 2, 3]
     // Expected deletes: snapshot 3 deletes [2]
     // In total we expect appends [1, 3] and deletes []
-    fixture.verify_incremental_scan(
-        1,
-        3,
-        vec![(1, "1"), (3, "3")],
-        vec![],
-    )
-    .await;
+    fixture
+        .verify_incremental_scan(1, 3, vec![(1, "1"), (3, "3")], vec![])
+        .await;
 }
 
 #[tokio::test]
@@ -795,11 +788,5 @@ async fn test_incremental_fixture_complex() {
 
     // Verify incremental scan from snapshot 1 to snapshot 5
     // All data has been deleted, so we expect the empty result.
-    fixture.verify_incremental_scan(
-        1,
-        5,
-        vec![],
-        vec![],
-    )
-    .await;
+    fixture.verify_incremental_scan(1, 5, vec![], vec![]).await;
 }
