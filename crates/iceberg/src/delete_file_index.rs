@@ -74,7 +74,6 @@ impl DeleteFileIndex {
                     let mut guard = state.write().unwrap();
                     *guard = DeleteFileIndexState::Populated(populated_delete_file_index);
                 }
-
                 notify.notify_waiters();
             }
         });
