@@ -956,7 +956,11 @@ async fn test_incremental_scan_edge_cases() {
         Operation::Add(vec![], "empty.parquet".to_string()),
         // Snapshot 2: Add file A with 3 rows
         Operation::Add(
-            vec![(1, "a1".to_string()), (2, "a2".to_string()), (3, "a3".to_string())],
+            vec![
+                (1, "a1".to_string()),
+                (2, "a2".to_string()),
+                (3, "a3".to_string()),
+            ],
             "file-a.parquet".to_string(),
         ),
         // Snapshot 3: Add file B with 4 rows
@@ -1024,15 +1028,10 @@ async fn test_incremental_scan_edge_cases() {
     // Snapshot 6: adds file-c (100,200)
     // Net: appends (100,200) from file-c; deletes pos 0,3 from file-b
     fixture
-        .verify_incremental_scan(
-            4,
-            6,
-            vec![(100, "c1"), (200, "c2")],
-            vec![
-                (0, file_b_path.as_str()), // n=10
-                (3, file_b_path.as_str()), // n=40
-            ],
-        )
+        .verify_incremental_scan(4, 6, vec![(100, "c1"), (200, "c2")], vec![
+            (0, file_b_path.as_str()), // n=10
+            (3, file_b_path.as_str()), // n=40
+        ])
         .await;
 
     // Test 3: Scan from snapshot 2 to 7
@@ -1046,15 +1045,10 @@ async fn test_incremental_scan_edge_cases() {
     // Net deletes: positions 0,1 from file-a (n=1,2) existed at snapshot 2 and were deleted
     // Note: (3) from file-a already existed at snapshot 2, so it's not a net append!
     fixture
-        .verify_incremental_scan(
-            2,
-            7,
-            vec![(30, "b3"), (200, "c2")],
-            vec![
-                (0, file_a_path.as_str()), // n=1
-                (1, file_a_path.as_str()), // n=2
-            ],
-        )
+        .verify_incremental_scan(2, 7, vec![(30, "b3"), (200, "c2")], vec![
+            (0, file_a_path.as_str()), // n=1
+            (1, file_a_path.as_str()), // n=2
+        ])
         .await;
 
     // Test 4: Scan from snapshot 5 to 6
@@ -1063,12 +1057,7 @@ async fn test_incremental_scan_edge_cases() {
     // Snapshot 6: adds file-c (100,200)
     // Net: appends (100,200) from file-c, no deletes
     fixture
-        .verify_incremental_scan(
-            5,
-            6,
-            vec![(100, "c1"), (200, "c2")],
-            vec![],
-        )
+        .verify_incremental_scan(5, 6, vec![(100, "c1"), (200, "c2")], vec![])
         .await;
 
     // Test 5: Scan from snapshot 3 to 4
