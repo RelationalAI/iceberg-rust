@@ -177,7 +177,7 @@ async fn process_incremental_append_task(
 ) -> Result<ArrowRecordBatchStream> {
     let mut record_batch_stream_builder = ArrowReader::create_parquet_record_batch_stream_builder(
         &task.data_file_path,
-        file_io.clone(),
+        file_io,
         true,
     )
     .await?;
