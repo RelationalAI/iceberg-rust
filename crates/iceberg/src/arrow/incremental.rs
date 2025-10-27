@@ -235,16 +235,20 @@ fn process_incremental_delete_task(
     delete_vector: RoaringTreemap,
     batch_size: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "pos",
+        DataType::UInt64,
+        false,
+    )]));
+
+    let batch_size = batch_size.unwrap_or(1024);
+
     let stream = futures::stream::iter(delete_vector)
-        .chunks(batch_size.unwrap_or(1024))
+        .chunks(batch_size)
         .map(move |chunk| {
             let array = UInt64Array::from_iter(chunk);
             RecordBatch::try_new(
-                Arc::new(ArrowSchema::new(vec![Field::new(
-                    "pos",
-                    DataType::UInt64,
-                    false,
-                )])),
+                Arc::clone(&schema), // Cheap Arc clone instead of full schema creation
                 vec![Arc::new(array)],
             )
             .map_err(|_| {
