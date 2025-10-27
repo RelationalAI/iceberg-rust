@@ -164,10 +164,10 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                 .await;
         });
 
-        return Ok((
+        Ok((
             Box::pin(appends_rx) as ArrowRecordBatchStream,
             Box::pin(deletes_rx) as ArrowRecordBatchStream,
-        ));
+        ))
     }
 }
 
@@ -238,7 +238,7 @@ fn process_incremental_delete_task(
     let stream = futures::stream::iter(delete_vector.into_iter())
         .chunks(batch_size.unwrap_or(1024))
         .map(move |chunk| {
-            let array = UInt64Array::from_iter(chunk.into_iter());
+            let array = UInt64Array::from_iter(chunk);
             RecordBatch::try_new(
                 Arc::new(ArrowSchema::new(vec![Field::new(
                     "pos",
