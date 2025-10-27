@@ -20,7 +20,9 @@ use std::fs;
 use std::fs::File;
 use std::sync::Arc;
 
+use arrow_array::cast::AsArray;
 use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray};
+use futures::TryStreamExt;
 use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -1119,9 +1121,6 @@ async fn test_incremental_scan_builder_options() {
         ),
     ])
     .await;
-
-    use arrow_array::cast::AsArray;
-    use futures::TryStreamExt;
 
     // Test 1: Column projection - select only the "n" column
     let scan = fixture
