@@ -862,4 +862,30 @@ async fn test_incremental_fixture_complex() {
     // Verify incremental scan from snapshot 1 to snapshot 5.
     // All data has been deleted, so we expect the empty result.
     fixture.verify_incremental_scan(1, 5, vec![], vec![]).await;
+
+    // Verify incremental scan from snapshot 2 to snapshot 5.
+    // Snapshot 2 starts with: (1,a), (2,b), (3,c), (4,d), (5,e) in data-2.parquet
+    // Snapshot 3: Deletes positions 1,3 from data-2.parquet (n=2,4; data=b,d)
+    // Snapshot 4: Adds (6,f), (7,g) in data-4.parquet
+    // Snapshot 5: Deletes positions 0,2,4 from data-2.parquet and 0,1 from data-4.parquet (n=1,3,5,6,7; data=a,c,e,f,g)
+    //
+    // The incremental scan computes the NET EFFECT between snapshot 2 and 5:
+    // - Files added in snapshot 4 were completely deleted in snapshot 5, so NO net appends
+    // - Net deletes from data-2.parquet: positions 0,1,2,3,4 (all 5 rows deleted across snapshots 3 and 5)
+    // - Since data-4 was added and deleted between 2 and 5, it doesn't appear in the scan
+    let data_2_path = format!("{}/data/data-2.parquet", fixture.table_location);
+    fixture
+        .verify_incremental_scan(
+            2,
+            5,
+            vec![], // No net appends (data-4 was added and fully deleted)
+            vec![
+                (0, data_2_path.as_str()), // All 5 positions from data-2.parquet
+                (1, data_2_path.as_str()),
+                (2, data_2_path.as_str()),
+                (3, data_2_path.as_str()),
+                (4, data_2_path.as_str()),
+            ],
+        )
+        .await;
 }
