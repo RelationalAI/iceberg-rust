@@ -451,7 +451,7 @@ impl IncrementalTableScan {
 
         // We actually would not need a stream here, but we can keep it compatible with
         // other scan types.
-        Ok(futures::stream::iter(tasks).map(|t| Ok(t)).boxed())
+        Ok(futures::stream::iter(tasks).map(Ok).boxed())
     }
 
     /// Returns an [`CombinedIncrementalBatchRecordStream`] for this incremental table scan.

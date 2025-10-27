@@ -82,7 +82,7 @@ impl IncrementalPlanContext {
             for snapshot in self.snapshots.iter() {
                 let manifest_list = self
                     .object_cache
-                    .get_manifest_list(&snapshot, &self.table_metadata)
+                    .get_manifest_list(snapshot, &self.table_metadata)
                     .await?;
                 for entry in manifest_list.entries() {
                     if !snapshot_ids.contains(&entry.added_snapshot_id) {

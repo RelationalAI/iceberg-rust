@@ -91,7 +91,7 @@ impl IncrementalFileScanTask {
             data_file_format: manifest_entry_context.manifest_entry.file_format(),
             schema: manifest_entry_context.snapshot_schema.clone(),
             project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
-            positional_deletes: delete_filter.get_delete_vector_for_path(&data_file_path),
+            positional_deletes: delete_filter.get_delete_vector_for_path(data_file_path),
         })
     }
 

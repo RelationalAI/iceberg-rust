@@ -235,7 +235,7 @@ fn process_incremental_delete_task(
     delete_vector: RoaringTreemap,
     batch_size: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
-    let stream = futures::stream::iter(delete_vector.into_iter())
+    let stream = futures::stream::iter(delete_vector)
         .chunks(batch_size.unwrap_or(1024))
         .map(move |chunk| {
             let array = UInt64Array::from_iter(chunk);
