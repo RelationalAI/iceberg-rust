@@ -888,4 +888,58 @@ async fn test_incremental_fixture_complex() {
             ],
         )
         .await;
+
+    // Verify incremental scan from snapshot 3 to snapshot 5.
+    // Snapshot 3 state: (1,a), (3,c), (5,e) remain in data-2.parquet at positions 0,2,4
+    // Snapshot 4: Adds (6,f), (7,g) in data-4.parquet
+    // Snapshot 5: Deletes positions 0,2,4 from data-2.parquet (n=1,3,5) and 0,1 from data-4.parquet (n=6,7)
+    //
+    // Net effect from snapshot 3 to 5:
+    // - No net appends (data-4 was added and fully deleted between 3 and 5)
+    // - Net deletes from data-2.parquet: positions 0,2,4 (the three remaining rows deleted in snapshot 5)
+    fixture
+        .verify_incremental_scan(
+            3,
+            5,
+            vec![], // No net appends (data-4 was added and fully deleted)
+            vec![
+                (0, data_2_path.as_str()), // Positions 0,2,4 from data-2.parquet
+                (2, data_2_path.as_str()), // (n=1,3,5; data=a,c,e)
+                (4, data_2_path.as_str()),
+            ],
+        )
+        .await;
+
+    // Verify incremental scan from snapshot 1 to snapshot 4.
+    // Snapshot 1: Empty
+    // Snapshot 2: Adds (1,a), (2,b), (3,c), (4,d), (5,e) in data-2.parquet
+    // Snapshot 3: Deletes positions 1,3 from data-2.parquet (n=2,4; data=b,d)
+    // Snapshot 4: Adds (6,f), (7,g) in data-4.parquet
+    //
+    // Net effect from snapshot 1 to 4:
+    // - Net appends: (1,a), (3,c), (5,e), (6,f), (7,g) - all rows that exist at snapshot 4
+    // - No deletes: rows deleted in snapshot 3 were added after snapshot 1, so they don't count as deletes
+    fixture
+        .verify_incremental_scan(
+            1,
+            4,
+            vec![(1, "a"), (3, "c"), (5, "e"), (6, "f"), (7, "g")],
+            vec![], // No deletes (deleted rows were added after snapshot 1)
+        )
+        .await;
+
+    // Verify incremental scan from snapshot 2 to snapshot 4.
+    // Snapshot 2: Has (1,a), (2,b), (3,c), (4,d), (5,e) in data-2.parquet
+    // Snapshot 3: Deletes positions 1,3 from data-2.parquet (n=2,4; data=b,d)
+    // Snapshot 4: Adds (6,f), (7,g) in data-4.parquet
+    //
+    // Net effect from snapshot 2 to 4:
+    // - Net appends: (6,f), (7,g) from data-4.parquet
+    // - Net deletes: positions 1,3 from data-2.parquet (n=2,4; data=b,d) - existed at snapshot 2 and deleted in 3
+    fixture
+        .verify_incremental_scan(2, 4, vec![(6, "f"), (7, "g")], vec![
+            (1, data_2_path.as_str()), // Positions 1,3 from data-2.parquet
+            (3, data_2_path.as_str()), // (n=2,4; data=b,d)
+        ])
+        .await;
 }
