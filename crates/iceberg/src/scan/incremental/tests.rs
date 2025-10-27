@@ -42,9 +42,10 @@ pub enum Operation {
     /// vec!["a", "b", "c"])` adds three rows with n=1,2,3 and data="a","b","c"
     Add(Vec<i32>, Vec<String>),
 
-    /// Delete rows by their n values (uses positional deletes).
-    /// Example: `Delete(vec![2])` deletes the row where n=2
-    Delete(Vec<i32>),
+    /// Delete rows by their global positions (uses positional deletes).
+    /// Positions are global indices across all data files in order of their creation.
+    /// Example: `Delete(vec![0, 1])` deletes the first and second rows from the table
+    Delete(Vec<i64>),
 }
 
 /// Tracks the state of data files across snapshots
@@ -402,20 +403,26 @@ impl IncrementalTestFixture {
                     manifest_list_write.close().await.unwrap();
                 }
 
-                Operation::Delete(n_values_to_delete) => {
-                    // Find positions to delete from each data file
+                Operation::Delete(positions_to_delete) => {
+                    // Map global positions to file-specific positions
                     let mut deletes_by_file: HashMap<String, Vec<i64>> = HashMap::new();
 
-                    for n_to_delete in n_values_to_delete {
+                    for global_pos in positions_to_delete {
+                        // Find which data file contains this global position
+                        let mut file_offset = 0i64;
                         for data_file in &data_files {
-                            if let Some(pos) =
-                                data_file.n_values.iter().position(|n| n == n_to_delete)
+                            let file_size = data_file.n_values.len() as i64;
+                            if global_pos >= &file_offset && global_pos < &(file_offset + file_size)
                             {
+                                // This position belongs to this file
+                                let local_pos = global_pos - file_offset;
                                 deletes_by_file
                                     .entry(data_file.path.clone())
                                     .or_default()
-                                    .push(pos as i64);
+                                    .push(local_pos);
+                                break;
                             }
+                            file_offset += file_size;
                         }
                     }
 
@@ -648,7 +655,7 @@ impl IncrementalTestFixture {
         from_snapshot_id: i64,
         to_snapshot_id: i64,
         expected_appends: Vec<(i32, &str)>,
-        expected_deletes: Vec<(i32, &str)>,
+        expected_deletes: Vec<u64>,
     ) {
         use arrow_array::cast::AsArray;
         use arrow_select::concat::concat_batches;
@@ -706,20 +713,12 @@ impl IncrementalTestFixture {
             let delete_batch =
                 concat_batches(&delete_batches[0].schema(), delete_batches.iter()).unwrap();
 
-            let n_array = delete_batch
+            let pos_array = delete_batch
                 .column(0)
-                .as_primitive::<arrow_array::types::Int32Type>();
-            let data_array = delete_batch.column(1).as_string::<i32>();
+                .as_primitive::<arrow_array::types::UInt64Type>();
 
-            let mut deleted_pairs: Vec<(i32, String)> = (0..delete_batch.num_rows())
-                .map(|i| (n_array.value(i), data_array.value(i).to_string()))
-                .collect();
+            let mut deleted_pairs: Vec<u64> = pos_array.iter().filter_map(|v| v).collect();
             deleted_pairs.sort();
-
-            let expected_deletes: Vec<(i32, String)> = expected_deletes
-                .into_iter()
-                .map(|(n, s)| (n, s.to_string()))
-                .collect();
 
             assert_eq!(deleted_pairs, expected_deletes);
         } else {
@@ -737,7 +736,7 @@ async fn test_incremental_fixture_simple() {
             "2".to_string(),
             "3".to_string(),
         ]),
-        Operation::Delete(vec![2]),
+        Operation::Delete(vec![1]), // Delete position 1 (n=2, data="2")
     ])
     .await;
 
@@ -756,12 +755,20 @@ async fn test_incremental_fixture_simple() {
     assert_eq!(snapshots[1].parent_snapshot_id(), Some(1));
     assert_eq!(snapshots[2].parent_snapshot_id(), Some(2));
 
-    // Verify incremental scan from snapshot 1 to snapshot 3
+    // Verify incremental scan from snapshot 1 to snapshot 3.
     // Expected appends: snapshot 2 adds [1, 2, 3]
     // Expected deletes: snapshot 3 deletes [2]
     // In total we expect appends [1, 3] and deletes []
     fixture
         .verify_incremental_scan(1, 3, vec![(1, "1"), (3, "3")], vec![])
+        .await;
+
+    // Verify incremental scan from snapshot 2 to snapshot 3.
+    fixture.verify_incremental_scan(2, 3, vec![], vec![1]).await;
+
+    // Verify incremental scan from snapshot 1 to snapshot 1.
+    fixture
+        .verify_incremental_scan(1, 1, vec![], vec![])
         .await;
 }
 
@@ -775,10 +782,10 @@ async fn test_incremental_fixture_complex() {
             "c".to_string(),
             "d".to_string(),
             "e".to_string(),
-        ]), // Snapshot 2: Add 5 rows
-        Operation::Delete(vec![2, 4]),  // Snapshot 3: Delete rows with n=2,4
-        Operation::Add(vec![6, 7], vec!["f".to_string(), "g".to_string()]), // Snapshot 4: Add 2 more rows
-        Operation::Delete(vec![1, 3, 5, 6, 7]), // Snapshot 5: Delete all remaining rows
+        ]), // Snapshot 2: Add 5 rows (positions 0-4)
+        Operation::Delete(vec![1, 3]),  // Snapshot 3: Delete positions 1,3 (n=2,4; data=b,d)
+        Operation::Add(vec![6, 7], vec!["f".to_string(), "g".to_string()]), // Snapshot 4: Add 2 more rows (positions 5-6)
+        Operation::Delete(vec![0, 2, 4, 5, 6]), // Snapshot 5: Delete positions 0,2,4,5,6 (all remaining rows: n=1,3,5,6,7)
     ])
     .await;
 
@@ -804,7 +811,7 @@ async fn test_incremental_fixture_complex() {
         5
     );
 
-    // Verify incremental scan from snapshot 1 to snapshot 5
+    // Verify incremental scan from snapshot 1 to snapshot 5.
     // All data has been deleted, so we expect the empty result.
     fixture.verify_incremental_scan(1, 5, vec![], vec![]).await;
 }

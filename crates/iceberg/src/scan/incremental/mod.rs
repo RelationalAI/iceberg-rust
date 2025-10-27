@@ -174,10 +174,12 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         )
         .collect_vec();
 
-        assert_eq!(
-            snapshots.first().map(|s| s.snapshot_id()),
-            Some(snapshot_to.snapshot_id())
-        );
+        if !snapshots.is_empty() {
+            assert_eq!(
+                snapshots.first().map(|s| s.snapshot_id()),
+                Some(snapshot_to.snapshot_id())
+            );
+        }
 
         let schema = snapshot_to.schema(self.table.metadata())?;
 
