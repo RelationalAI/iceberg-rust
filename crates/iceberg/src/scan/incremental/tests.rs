@@ -38,14 +38,15 @@ use crate::table::Table;
 /// Represents an operation to perform on a snapshot.
 #[derive(Debug, Clone)]
 pub enum Operation {
-    /// Add rows with the given `n` values and `data` values. Example: `Add(vec![1, 2, 3],
-    /// vec!["a", "b", "c"])` adds three rows with n=1,2,3 and data="a","b","c"
-    Add(Vec<i32>, Vec<String>),
+    /// Add rows with the given (n, data) tuples, and write to the specified parquet file name.
+    /// Example: `Add(vec![(1, "a".to_string()), (2, "b".to_string())], "data-1.parquet".to_string())`
+    /// adds two rows with n=1,2 and data="a","b" to a file named "data-1.parquet"
+    Add(Vec<(i32, String)>, String),
 
-    /// Delete rows by their global positions (uses positional deletes).
-    /// Positions are global indices across all data files in order of their creation.
-    /// Example: `Delete(vec![0, 1])` deletes the first and second rows from the table
-    Delete(Vec<i64>),
+    /// Delete rows by their positions within specific parquet files (uses positional deletes).
+    /// Takes a vector of (position, file_name) tuples specifying which position in which file to delete.
+    /// Example: `Delete(vec![(0, "data-1.parquet"), (1, "data-1.parquet")])` deletes positions 0 and 1 from data-1.parquet
+    Delete(Vec<(i64, String)>),
 }
 
 /// Tracks the state of data files across snapshots
@@ -62,9 +63,16 @@ struct DataFileInfo {
 /// # Example
 /// ```
 /// let fixture = IncrementalTestFixture::new(vec![
-///     Operation::Add(vec![], vec![]),                     // Empty snapshot
-///     Operation::Add(vec![1, 2, 3], vec!["1", "2", "3"]), // Add 3 rows
-///     Operation::Delete(vec![2]),                         // Delete row with n=2
+///     Operation::Add(vec![], "empty.parquet".to_string()), // Empty snapshot
+///     Operation::Add(
+///         vec![
+///             (1, "1".to_string()),
+///             (2, "2".to_string()),
+///             (3, "3".to_string()),
+///         ],
+///         "data-1.parquet".to_string(),
+///     ), // Add 3 rows
+///     Operation::Delete(vec![(1, "data-1.parquet".to_string())]), // Delete position 1 from data-1.parquet
 /// ])
 /// .await;
 /// ```
@@ -259,7 +267,11 @@ impl IncrementalTestFixture {
             };
 
             match operation {
-                Operation::Add(n_values, data_values) => {
+                Operation::Add(rows, file_name) => {
+                    // Extract n_values and data_values from tuples
+                    let n_values: Vec<i32> = rows.iter().map(|(n, _)| *n).collect();
+                    let data_values: Vec<String> = rows.iter().map(|(_, d)| d.clone()).collect();
+
                     // Create data manifest
                     let mut data_writer = ManifestWriterBuilder::new(
                         self.next_manifest_file(),
@@ -299,9 +311,8 @@ impl IncrementalTestFixture {
 
                     // Add new data if not empty
                     if !n_values.is_empty() {
-                        let data_file_path =
-                            format!("{}/data/data-{}.parquet", &self.table_location, snapshot_id);
-                        self.write_parquet_file(&data_file_path, n_values, data_values)
+                        let data_file_path = format!("{}/data/{}", &self.table_location, file_name);
+                        self.write_parquet_file(&data_file_path, &n_values, &data_values)
                             .await;
 
                         data_writer
@@ -330,7 +341,7 @@ impl IncrementalTestFixture {
                             path: data_file_path,
                             snapshot_id,
                             sequence_number,
-                            n_values: n_values.clone(),
+                            n_values,
                         });
                     }
 
@@ -404,26 +415,15 @@ impl IncrementalTestFixture {
                 }
 
                 Operation::Delete(positions_to_delete) => {
-                    // Map global positions to file-specific positions
+                    // Group deletes by file
                     let mut deletes_by_file: HashMap<String, Vec<i64>> = HashMap::new();
 
-                    for global_pos in positions_to_delete {
-                        // Find which data file contains this global position
-                        let mut file_offset = 0i64;
-                        for data_file in &data_files {
-                            let file_size = data_file.n_values.len() as i64;
-                            if global_pos >= &file_offset && global_pos < &(file_offset + file_size)
-                            {
-                                // This position belongs to this file
-                                let local_pos = global_pos - file_offset;
-                                deletes_by_file
-                                    .entry(data_file.path.clone())
-                                    .or_default()
-                                    .push(local_pos);
-                                break;
-                            }
-                            file_offset += file_size;
-                        }
+                    for (position, file_name) in positions_to_delete {
+                        let data_file_path = format!("{}/data/{}", &self.table_location, file_name);
+                        deletes_by_file
+                            .entry(data_file_path)
+                            .or_default()
+                            .push(*position);
                     }
 
                     // Create data manifest with existing data files
@@ -655,7 +655,7 @@ impl IncrementalTestFixture {
         from_snapshot_id: i64,
         to_snapshot_id: i64,
         expected_appends: Vec<(i32, &str)>,
-        expected_deletes: Vec<u64>,
+        expected_deletes: Vec<(u64, &str)>,
     ) {
         use arrow_array::cast::AsArray;
         use arrow_select::concat::concat_batches;
@@ -717,8 +717,37 @@ impl IncrementalTestFixture {
                 .column(0)
                 .as_primitive::<arrow_array::types::UInt64Type>();
 
-            let mut deleted_pairs: Vec<u64> = pos_array.iter().filter_map(|v| v).collect();
+            // The file path column is a RunArray (Run-End Encoded), so we need to decode it
+            // RunArray stores repeated values efficiently. To access individual values, we use
+            // the Array trait which handles the run-length decoding automatically.
+            use arrow_array::Array;
+            let file_path_column = delete_batch.column(1);
+
+            let mut deleted_pairs: Vec<(u64, String)> = (0..delete_batch.num_rows())
+                .map(|i| {
+                    let pos = pos_array.value(i);
+                    // Use Array::to_data() to get the decoded data, then cast back
+                    let file_path = {
+                        // Get a slice of the run array for this single row
+                        let slice = file_path_column.slice(i, 1);
+                        // Cast the slice to a run array and get its values
+                        let run_arr = slice
+                            .as_any()
+                            .downcast_ref::<arrow_array::RunArray<arrow_array::types::Int32Type>>()
+                            .unwrap();
+                        let values = run_arr.values();
+                        let str_arr = values.as_string::<i32>();
+                        str_arr.value(0).to_string()
+                    };
+                    (pos, file_path)
+                })
+                .collect();
             deleted_pairs.sort();
+
+            let expected_deletes: Vec<(u64, String)> = expected_deletes
+                .into_iter()
+                .map(|(pos, file)| (pos, file.to_string()))
+                .collect();
 
             assert_eq!(deleted_pairs, expected_deletes);
         } else {
@@ -730,13 +759,16 @@ impl IncrementalTestFixture {
 #[tokio::test]
 async fn test_incremental_fixture_simple() {
     let fixture = IncrementalTestFixture::new(vec![
-        Operation::Add(vec![], vec![]),
-        Operation::Add(vec![1, 2, 3], vec![
-            "1".to_string(),
-            "2".to_string(),
-            "3".to_string(),
-        ]),
-        Operation::Delete(vec![1]), // Delete position 1 (n=2, data="2")
+        Operation::Add(vec![], "empty.parquet".to_string()),
+        Operation::Add(
+            vec![
+                (1, "1".to_string()),
+                (2, "2".to_string()),
+                (3, "3".to_string()),
+            ],
+            "data-2.parquet".to_string(),
+        ),
+        Operation::Delete(vec![(1, "data-2.parquet".to_string())]), // Delete position 1 (n=2, data="2")
     ])
     .await;
 
@@ -764,28 +796,44 @@ async fn test_incremental_fixture_simple() {
         .await;
 
     // Verify incremental scan from snapshot 2 to snapshot 3.
-    fixture.verify_incremental_scan(2, 3, vec![], vec![1]).await;
+    let data_file_path = format!("{}/data/data-2.parquet", fixture.table_location);
+    fixture
+        .verify_incremental_scan(2, 3, vec![], vec![(1, &data_file_path)])
+        .await;
 
     // Verify incremental scan from snapshot 1 to snapshot 1.
-    fixture
-        .verify_incremental_scan(1, 1, vec![], vec![])
-        .await;
+    fixture.verify_incremental_scan(1, 1, vec![], vec![]).await;
 }
 
 #[tokio::test]
 async fn test_incremental_fixture_complex() {
     let fixture = IncrementalTestFixture::new(vec![
-        Operation::Add(vec![], vec![]), // Snapshot 1: Empty
-        Operation::Add(vec![1, 2, 3, 4, 5], vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-            "e".to_string(),
-        ]), // Snapshot 2: Add 5 rows (positions 0-4)
-        Operation::Delete(vec![1, 3]),  // Snapshot 3: Delete positions 1,3 (n=2,4; data=b,d)
-        Operation::Add(vec![6, 7], vec!["f".to_string(), "g".to_string()]), // Snapshot 4: Add 2 more rows (positions 5-6)
-        Operation::Delete(vec![0, 2, 4, 5, 6]), // Snapshot 5: Delete positions 0,2,4,5,6 (all remaining rows: n=1,3,5,6,7)
+        Operation::Add(vec![], "empty.parquet".to_string()), // Snapshot 1: Empty
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+            ],
+            "data-2.parquet".to_string(),
+        ), // Snapshot 2: Add 5 rows (positions 0-4)
+        Operation::Delete(vec![
+            (1, "data-2.parquet".to_string()),
+            (3, "data-2.parquet".to_string()),
+        ]), // Snapshot 3: Delete positions 1,3 (n=2,4; data=b,d)
+        Operation::Add(
+            vec![(6, "f".to_string()), (7, "g".to_string())],
+            "data-4.parquet".to_string(),
+        ), // Snapshot 4: Add 2 more rows (positions 5-6)
+        Operation::Delete(vec![
+            (0, "data-2.parquet".to_string()),
+            (2, "data-2.parquet".to_string()),
+            (4, "data-2.parquet".to_string()),
+            (0, "data-4.parquet".to_string()),
+            (1, "data-4.parquet".to_string()),
+        ]), // Snapshot 5: Delete positions 0,2,4,5,6 (all remaining rows: n=1,3,5,6,7)
     ])
     .await;
 
