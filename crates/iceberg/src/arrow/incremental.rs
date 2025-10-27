@@ -78,12 +78,11 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
 
         let batch_size = reader.batch_size;
         let concurrency_limit_data_files = reader.concurrency_limit_data_files;
-        let file_io = reader.file_io.clone();
 
         spawn(async move {
             let _ = self
                 .try_for_each_concurrent(concurrency_limit_data_files, |task| {
-                    let file_io = file_io.clone();
+                    let file_io = reader.file_io.clone();
                     let mut appends_tx = appends_tx.clone();
                     let mut deletes_tx = deletes_tx.clone();
                     async move {
