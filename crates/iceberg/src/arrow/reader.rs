@@ -144,8 +144,8 @@ pub struct ArrowReader {
 /// Trait indicating that the implementing type streams into a stream of type `S` using
 /// a reader of type `R`.
 pub trait StreamsInto<R, S = ArrowRecordBatchStream> {
-    /// Read from the reader and produce a stream of type `S`.
-    fn read(self, reader: R) -> Result<S>;
+    /// Stream from the reader and produce a stream of type `S`.
+    fn stream(self, reader: R) -> Result<S>;
 }
 
 impl ArrowReader {

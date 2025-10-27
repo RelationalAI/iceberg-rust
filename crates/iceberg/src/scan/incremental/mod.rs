@@ -469,7 +469,7 @@ impl IncrementalTableScan {
         }
 
         let arrow_reader = arrow_reader_builder.build();
-        file_scan_task_stream.read(arrow_reader)
+        file_scan_task_stream.stream(arrow_reader)
     }
 
     /// Returns an [`UnzippedIncrementalBatchRecordStream`] for this incremental table scan.
@@ -486,7 +486,7 @@ impl IncrementalTableScan {
         }
 
         let arrow_reader = arrow_reader_builder.build();
-        file_scan_task_stream.read(arrow_reader)
+        file_scan_task_stream.stream(arrow_reader)
     }
 
     async fn process_delete_manifest_entry(

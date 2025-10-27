@@ -56,9 +56,9 @@ impl StreamsInto<ArrowReader, CombinedIncrementalBatchRecordStream>
 {
     /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns a
     /// stream of Arrow `RecordBatch`es containing the data from the files.
-    fn read(self, reader: ArrowReader) -> Result<CombinedIncrementalBatchRecordStream> {
+    fn stream(self, reader: ArrowReader) -> Result<CombinedIncrementalBatchRecordStream> {
         let (appends, deletes) =
-            StreamsInto::<ArrowReader, UnzippedIncrementalBatchRecordStream>::read(self, reader)?;
+            StreamsInto::<ArrowReader, UnzippedIncrementalBatchRecordStream>::stream(self, reader)?;
 
         let left = appends.map(|res| res.map(|batch| (IncrementalBatchType::Append, batch)));
         let right = deletes.map(|res| res.map(|batch| (IncrementalBatchType::Delete, batch)));
@@ -72,7 +72,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
 {
     /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns two
     /// separate streams of Arrow `RecordBatch`es containing appended data and deleted records.
-    fn read(self, reader: ArrowReader) -> Result<UnzippedIncrementalBatchRecordStream> {
+    fn stream(self, reader: ArrowReader) -> Result<UnzippedIncrementalBatchRecordStream> {
         let (appends_tx, appends_rx) = channel(reader.concurrency_limit_data_files);
         let (deletes_tx, deletes_rx) = channel(reader.concurrency_limit_data_files);
 
