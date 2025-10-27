@@ -1224,13 +1224,12 @@ async fn test_incremental_scan_builder_options() {
     let stream = scan.to_arrow().await.unwrap();
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
-    let append_batches: Vec<_> = batches
+    let append_batches = batches
         .iter()
         .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
-        .map(|(_, b)| b.clone())
-        .collect();
+        .map(|(_, b)| b.clone());
 
-    for batch in append_batches.iter() {
+    for batch in append_batches {
         // Each batch should have at most 3 rows (except possibly the last)
         assert!(
             batch.num_rows() <= 3,
@@ -1250,13 +1249,12 @@ async fn test_incremental_scan_builder_options() {
     let stream = scan.to_arrow().await.unwrap();
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
-    let append_batches: Vec<_> = batches
+    let append_batches = batches
         .iter()
         .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
-        .map(|(_, b)| b.clone())
-        .collect();
+        .map(|(_, b)| b.clone());
 
-    for batch in append_batches.iter() {
+    for batch in append_batches {
         assert_eq!(batch.schema().fields().len(), 1, "Should project only 'n'");
         assert!(batch.num_rows() <= 4, "Batch size should be <= 4");
     }
