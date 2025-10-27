@@ -2699,12 +2699,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenv"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
-
-[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3789,6 +3783,7 @@ dependencies = [
  "datafusion-cli",
  "dirs",
  "fs-err",
+ "home",
  "iceberg",
  "iceberg-catalog-rest",
  "iceberg-datafusion",
@@ -5268,17 +5263,6 @@ name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
-
-[[package]]
-name = "playground"
-version = "0.7.0"
-dependencies = [
- "dotenv",
- "futures-util",
- "iceberg",
- "iceberg-catalog-rest",
- "tokio",
-]
 
 [[package]]
 name = "polling"
