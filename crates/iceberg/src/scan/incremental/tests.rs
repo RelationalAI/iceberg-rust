@@ -35,7 +35,8 @@ use crate::spec::{
 };
 use crate::table::Table;
 
-/// Represents an operation to perform on a snapshot.
+/// Represents an operation to perform on a snapshot of a table with schema (id: Int32,
+/// data: String).
 #[derive(Debug, Clone)]
 pub enum Operation {
     /// Add rows with the given (n, data) tuples, and write to the specified parquet file name.
@@ -1073,4 +1074,256 @@ async fn test_incremental_scan_edge_cases() {
             vec![(1, file_a_path.as_str())], // n=2
         )
         .await;
+}
+
+#[tokio::test]
+async fn test_incremental_scan_builder_options() {
+    // This test demonstrates using the incremental scan builder API with various options:
+    // - Column projection (selecting specific columns)
+    // - Batch size configuration
+    // - Verifying the schema and batch structure
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(vec![], "empty.parquet".to_string()),
+        // Snapshot 2: Add 10 rows to test batch size behavior
+        Operation::Add(
+            vec![
+                (1, "data-1".to_string()),
+                (2, "data-2".to_string()),
+                (3, "data-3".to_string()),
+                (4, "data-4".to_string()),
+                (5, "data-5".to_string()),
+                (6, "data-6".to_string()),
+                (7, "data-7".to_string()),
+                (8, "data-8".to_string()),
+                (9, "data-9".to_string()),
+                (10, "data-10".to_string()),
+            ],
+            "data-2.parquet".to_string(),
+        ),
+        // Snapshot 3: Delete some rows
+        Operation::Delete(vec![
+            (2, "data-2.parquet".to_string()), // n=3
+            (5, "data-2.parquet".to_string()), // n=6
+            (8, "data-2.parquet".to_string()), // n=9
+        ]),
+        // Snapshot 4: Add more rows
+        Operation::Add(
+            vec![
+                (20, "data-20".to_string()),
+                (21, "data-21".to_string()),
+                (22, "data-22".to_string()),
+                (23, "data-23".to_string()),
+                (24, "data-24".to_string()),
+            ],
+            "data-4.parquet".to_string(),
+        ),
+    ])
+    .await;
+
+    use arrow_array::cast::AsArray;
+    use futures::TryStreamExt;
+
+    // Test 1: Column projection - select only the "n" column
+    let scan = fixture
+        .table
+        .incremental_scan(1, 4)
+        .select(vec!["n"])
+        .build()
+        .unwrap();
+
+    let stream = scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    // Verify we have both append and delete batches
+    let append_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    assert!(!append_batches.is_empty(), "Should have append batches");
+
+    // Check schema - should only have "n" column
+    for batch in &append_batches {
+        assert_eq!(
+            batch.schema().fields().len(),
+            1,
+            "Should have only 1 column when projecting 'n'"
+        );
+        assert_eq!(
+            batch.schema().field(0).name(),
+            "n",
+            "Projected column should be 'n'"
+        );
+    }
+
+    // Test 2: Column projection - select only the "data" column
+    let scan = fixture
+        .table
+        .incremental_scan(1, 4)
+        .select(vec!["data"])
+        .build()
+        .unwrap();
+
+    let stream = scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    let append_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    for batch in &append_batches {
+        assert_eq!(
+            batch.schema().fields().len(),
+            1,
+            "Should have only 1 column when projecting 'data'"
+        );
+        assert_eq!(
+            batch.schema().field(0).name(),
+            "data",
+            "Projected column should be 'data'"
+        );
+    }
+
+    // Test 3: Select both columns explicitly
+    let scan = fixture
+        .table
+        .incremental_scan(1, 4)
+        .select(vec!["n", "data"])
+        .build()
+        .unwrap();
+
+    let stream = scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    let append_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    for batch in &append_batches {
+        assert_eq!(
+            batch.schema().fields().len(),
+            2,
+            "Should have 2 columns when projecting both"
+        );
+        assert_eq!(batch.schema().field(0).name(), "n");
+        assert_eq!(batch.schema().field(1).name(), "data");
+    }
+
+    // Test 4: Batch size configuration
+    let scan = fixture
+        .table
+        .incremental_scan(1, 2)
+        .with_batch_size(Some(3)) // Small batch size to test batching
+        .build()
+        .unwrap();
+
+    let stream = scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    let append_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    for batch in append_batches.iter() {
+        // Each batch should have at most 3 rows (except possibly the last)
+        assert!(
+            batch.num_rows() <= 3,
+            "Batch size should be <= 3 as configured"
+        );
+    }
+
+    // Test 5: Combining column projection and batch size
+    let scan = fixture
+        .table
+        .incremental_scan(1, 4)
+        .select(vec!["n"])
+        .with_batch_size(Some(4))
+        .build()
+        .unwrap();
+
+    let stream = scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    let append_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    for batch in append_batches.iter() {
+        assert_eq!(batch.schema().fields().len(), 1, "Should project only 'n'");
+        assert!(batch.num_rows() <= 4, "Batch size should be <= 4");
+    }
+
+    // Test 6: Verify actual data with column projection
+    let scan = fixture
+        .table
+        .incremental_scan(1, 2)
+        .select(vec!["n"])
+        .build()
+        .unwrap();
+
+    let stream = scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    let append_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    if !append_batches.is_empty() {
+        use arrow_select::concat::concat_batches;
+        let combined_batch =
+            concat_batches(&append_batches[0].schema(), append_batches.iter()).unwrap();
+
+        let n_array = combined_batch
+            .column(0)
+            .as_primitive::<arrow_array::types::Int32Type>();
+
+        let mut n_values: Vec<i32> = (0..combined_batch.num_rows())
+            .map(|i| n_array.value(i))
+            .collect();
+        n_values.sort();
+
+        assert_eq!(
+            n_values,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "Should have all 10 n values from snapshot 2"
+        );
+    }
+
+    // Test 7: Delete batches always have the same schema.
+    let scan = fixture.table.incremental_scan(2, 3).build().unwrap();
+
+    let stream = scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    let delete_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Delete)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    if !delete_batches.is_empty() {
+        for batch in &delete_batches {
+            // Delete batches should have "pos" and "_file" columns
+            assert!(
+                batch.schema().fields().len() == 2,
+                "Delete batch should have exactly position and file columns"
+            );
+            assert_eq!(
+                batch.num_rows(),
+                3,
+                "Should have 3 deleted positions from snapshot 3"
+            );
+        }
+    }
 }
