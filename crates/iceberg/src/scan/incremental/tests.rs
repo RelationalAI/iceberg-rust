@@ -245,6 +245,7 @@ impl IncrementalTestFixture {
 
         // Track all data files and their contents across snapshots
         let mut data_files: Vec<DataFileInfo> = Vec::new();
+        #[allow(clippy::type_complexity)]
         let mut delete_files: Vec<(String, i64, i64, Vec<(String, i64)>)> = Vec::new(); // (path, snapshot_id, sequence_number, [(data_file_path, position)])
 
         for (snapshot_idx, operation) in operations.iter().enumerate() {
@@ -412,7 +413,7 @@ impl IncrementalTestFixture {
                             {
                                 deletes_by_file
                                     .entry(data_file.path.clone())
-                                    .or_insert_with(Vec::new)
+                                    .or_default()
                                     .push(pos as i64);
                             }
                         }
@@ -788,8 +789,8 @@ async fn test_incremental_fixture_complex() {
 
     // Verify parent chain
     assert_eq!(snapshots[0].parent_snapshot_id(), None);
-    for i in 1..5 {
-        assert_eq!(snapshots[i].parent_snapshot_id(), Some(i as i64));
+    for (i, snapshot) in snapshots.iter().enumerate().take(5).skip(1) {
+        assert_eq!(snapshot.parent_snapshot_id(), Some(i as i64));
     }
 
     // Verify current snapshot
