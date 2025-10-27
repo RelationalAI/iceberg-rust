@@ -943,3 +943,145 @@ async fn test_incremental_fixture_complex() {
         ])
         .await;
 }
+
+#[tokio::test]
+async fn test_incremental_scan_edge_cases() {
+    // This test covers several edge cases:
+    // 1. Multiple data files added in separate snapshots
+    // 2. Deletes spread across multiple data files
+    // 3. Partial deletes from multiple files
+    // 4. Cross-file delete operations in a single snapshot
+    let fixture = IncrementalTestFixture::new(vec![
+        // Snapshot 1: Empty starting point
+        Operation::Add(vec![], "empty.parquet".to_string()),
+        // Snapshot 2: Add file A with 3 rows
+        Operation::Add(
+            vec![(1, "a1".to_string()), (2, "a2".to_string()), (3, "a3".to_string())],
+            "file-a.parquet".to_string(),
+        ),
+        // Snapshot 3: Add file B with 4 rows
+        Operation::Add(
+            vec![
+                (10, "b1".to_string()),
+                (20, "b2".to_string()),
+                (30, "b3".to_string()),
+                (40, "b4".to_string()),
+            ],
+            "file-b.parquet".to_string(),
+        ),
+        // Snapshot 4: Partial delete from file A (delete middle row n=2)
+        Operation::Delete(vec![(1, "file-a.parquet".to_string())]),
+        // Snapshot 5: Partial delete from file B (delete first and last rows n=10,40)
+        Operation::Delete(vec![
+            (0, "file-b.parquet".to_string()),
+            (3, "file-b.parquet".to_string()),
+        ]),
+        // Snapshot 6: Add file C with 2 rows
+        Operation::Add(
+            vec![(100, "c1".to_string()), (200, "c2".to_string())],
+            "file-c.parquet".to_string(),
+        ),
+        // Snapshot 7: Delete from multiple files in one snapshot (cross-file deletes)
+        Operation::Delete(vec![
+            (0, "file-a.parquet".to_string()), // n=1
+            (1, "file-b.parquet".to_string()), // n=20
+            (0, "file-c.parquet".to_string()), // n=100
+        ]),
+    ])
+    .await;
+
+    // Verify we have 7 snapshots
+    let n_snapshots = fixture.table.metadata().snapshots().count();
+    assert_eq!(n_snapshots, 7);
+
+    let file_a_path = format!("{}/data/file-a.parquet", fixture.table_location);
+    let file_b_path = format!("{}/data/file-b.parquet", fixture.table_location);
+
+    // Test 1: Scan from snapshot 1 to 4
+    // Should see: file-a (1,2,3), file-b (10,20,30,40) added, then (2) deleted from file-a
+    // BUT: The row n=2 was added AFTER snapshot 1, so it won't show as a delete!
+    // Net: appends (1,3) from file-a (n=2 added then deleted = net zero), (10,20,30,40) from file-b
+    // No deletes (n=2 was added and deleted between snapshots 1 and 4)
+    fixture
+        .verify_incremental_scan(
+            1,
+            4,
+            vec![
+                (1, "a1"),
+                (3, "a3"),
+                (10, "b1"),
+                (20, "b2"),
+                (30, "b3"),
+                (40, "b4"),
+            ],
+            vec![], // No deletes - n=2 was added and deleted between snapshots
+        )
+        .await;
+
+    // Test 2: Scan from snapshot 4 to 6
+    // Snapshot 4: has file-a (1,3) and file-b (10,20,30,40)
+    // Snapshot 5: deletes positions 0,3 from file-b (n=10,40)
+    // Snapshot 6: adds file-c (100,200)
+    // Net: appends (100,200) from file-c; deletes pos 0,3 from file-b
+    fixture
+        .verify_incremental_scan(
+            4,
+            6,
+            vec![(100, "c1"), (200, "c2")],
+            vec![
+                (0, file_b_path.as_str()), // n=10
+                (3, file_b_path.as_str()), // n=40
+            ],
+        )
+        .await;
+
+    // Test 3: Scan from snapshot 2 to 7
+    // This tests the full lifecycle: multiple adds, partial deletes, more adds, cross-file deletes
+    // Starting at snapshot 2: file-a (1,2,3) exists
+    // File-b is added in snapshot 3 (after snapshot 2)
+    // File-c is added in snapshot 6 (after snapshot 2)
+    // By snapshot 7: file-a has (3) at position 2, file-b has (30), file-c has (200)
+    //
+    // Net appends: file-b (30) and file-c (200) were added after snapshot 2
+    // Net deletes: positions 0,1 from file-a (n=1,2) existed at snapshot 2 and were deleted
+    // Note: (3) from file-a already existed at snapshot 2, so it's not a net append!
+    fixture
+        .verify_incremental_scan(
+            2,
+            7,
+            vec![(30, "b3"), (200, "c2")],
+            vec![
+                (0, file_a_path.as_str()), // n=1
+                (1, file_a_path.as_str()), // n=2
+            ],
+        )
+        .await;
+
+    // Test 4: Scan from snapshot 5 to 6
+    // Simple test: just adding a new file
+    // Snapshot 5 state: file-a (1,3), file-b (20,30)
+    // Snapshot 6: adds file-c (100,200)
+    // Net: appends (100,200) from file-c, no deletes
+    fixture
+        .verify_incremental_scan(
+            5,
+            6,
+            vec![(100, "c1"), (200, "c2")],
+            vec![],
+        )
+        .await;
+
+    // Test 5: Scan from snapshot 3 to 4
+    // Tests a single delete operation
+    // State at 3: file-a (1,2,3), file-b (10,20,30,40)
+    // State at 4: file-a (1,3), file-b (10,20,30,40)
+    // Net: no appends, 1 delete (position 1, n=2) from file-a
+    fixture
+        .verify_incremental_scan(
+            3,
+            4,
+            vec![],
+            vec![(1, file_a_path.as_str())], // n=2
+        )
+        .await;
+}
