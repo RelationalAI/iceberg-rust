@@ -66,7 +66,8 @@ impl AppendedFileScanTask {
 /// The stream of incremental file scan tasks.
 pub type IncrementalFileScanTaskStream = BoxStream<'static, Result<IncrementalFileScanTask>>;
 
-/// An incremental file scan task, which can be either an appended data file.
+/// An incremental file scan task, which can be either an appended data file or positional
+/// deletes.
 #[derive(Debug, Clone)]
 pub enum IncrementalFileScanTask {
     /// An appended data file.

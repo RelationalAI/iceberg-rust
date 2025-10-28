@@ -23,7 +23,7 @@ use roaring::treemap::BitmapIter;
 
 use crate::{Error, ErrorKind, Result};
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone)]
 pub struct DeleteVector {
     pub inner: RoaringTreemap,
 }

@@ -23,11 +23,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow_arith::boolean::{and, and_kleene, is_not_null, is_null, not, or, or_kleene};
-use arrow_array::{Array, ArrayRef, BooleanArray, Datum as ArrowDatum, RecordBatch, Scalar};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Datum as ArrowDatum, Int32Array, RecordBatch, RunArray, Scalar,
+    StringArray,
+};
 use arrow_cast::cast::cast;
 use arrow_ord::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow_schema::{
-    ArrowError, DataType, FieldRef, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+    ArrowError, DataType, Field, FieldRef, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
 };
 use arrow_string::like::starts_with;
 use bytes::Bytes;
@@ -470,23 +473,48 @@ impl ArrowReader {
         Ok(results.into())
     }
 
+    /// Helper function to add a `_file` column to a RecordBatch.
+    /// Takes the array and field to add, reducing code duplication.
+    fn add_file_path_column_impl(
+        batch: RecordBatch,
+        file_array: ArrayRef,
+        file_field: Field,
+    ) -> Result<RecordBatch> {
+        let mut columns = batch.columns().to_vec();
+        columns.push(file_array);
+
+        let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
+        fields.push(Arc::new(file_field));
+
+        let schema = Arc::new(ArrowSchema::new(fields));
+        RecordBatch::try_new(schema, columns).map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "Failed to add _file column to RecordBatch",
+            )
+            .with_source(e)
+        })
+    }
+
+    /// Creates the metadata for the `_file` field with the reserved field ID.
+    fn create_file_field_metadata() -> HashMap<String, String> {
+        HashMap::from([(
+            PARQUET_FIELD_ID_META_KEY.to_string(),
+            RESERVED_FIELD_ID_FILE.to_string(),
+        )])
+    }
+
     /// Adds a `_file` column to the RecordBatch containing the file path.
-    /// Uses Run-End Encoding (RLE) for maximum memory efficiency when the same
+    /// Uses Run-End Encoding (REE) for maximum memory efficiency when the same
     /// file path is repeated across all rows.
+    /// Note: This is only used in tests for now, for production usage we use the
+    /// non-REE version as it is Julia-compatible.
     #[allow(dead_code)]
-    pub(crate) fn add_file_path_column_rle(
+    pub(crate) fn add_file_path_column_ree(
         batch: RecordBatch,
         file_path: &str,
     ) -> Result<RecordBatch> {
-        use std::collections::HashMap;
-
-        use arrow_array::{Int32Array, RunArray, StringArray};
-        use arrow_schema::Field;
-
         let num_rows = batch.num_rows();
-
-        let mut columns = batch.columns().to_vec();
-        let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
 
         // Use Run-End Encoded array for optimal memory efficiency
         // For a constant value repeated num_rows times, this stores:
@@ -502,7 +530,7 @@ impl ArrowReader {
         } else {
             StringArray::from(vec![file_path])
         };
-        // TODO @vustef L0: These may not be supported in Julia's Arrow.jl, see what alternatives we have...
+
         let file_array = RunArray::try_new(&run_ends, &values).map_err(|e| {
             Error::new(
                 ErrorKind::Unexpected,
@@ -511,11 +539,9 @@ impl ArrowReader {
             .with_source(e)
         })?;
 
-        columns.push(Arc::new(file_array) as ArrayRef);
-
         // Per Iceberg spec, the _file column has reserved field ID RESERVED_FIELD_ID_FILE
         // DataType is RunEndEncoded with Int32 run ends and Utf8 values
-        // Note: values field is nullable to match what StringArray::from() creates // TODO @vustef: Not sure why is that the case, fix it.
+        // Note: values field is nullable to match what StringArray::from() creates
         let run_ends_field = Arc::new(Field::new("run_ends", DataType::Int32, false));
         let values_field = Arc::new(Field::new("values", DataType::Utf8, true));
         let file_field = Field::new(
@@ -523,56 +549,24 @@ impl ArrowReader {
             DataType::RunEndEncoded(run_ends_field, values_field),
             false,
         )
-        .with_metadata(HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            RESERVED_FIELD_ID_FILE.to_string(),
-        )]));
-        fields.push(Arc::new(file_field));
+        .with_metadata(Self::create_file_field_metadata());
 
-        let schema = Arc::new(ArrowSchema::new(fields));
-        RecordBatch::try_new(schema, columns).map_err(|e| {
-            Error::new(
-                ErrorKind::Unexpected,
-                "Failed to add _file column to RecordBatch",
-            )
-            .with_source(e)
-        })
+        Self::add_file_path_column_impl(batch, Arc::new(file_array), file_field)
     }
 
     /// Adds a `_file` column to the RecordBatch containing the file path.
     /// Materializes the file path string for each row (no compression).
     pub(crate) fn add_file_path_column(batch: RecordBatch, file_path: &str) -> Result<RecordBatch> {
-        use std::collections::HashMap;
-
-        use arrow_array::StringArray;
-        use arrow_schema::Field;
-
         let num_rows = batch.num_rows();
-
-        let mut columns = batch.columns().to_vec();
-        let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
 
         // Create a StringArray with the file path repeated num_rows times
         let file_array = StringArray::from(vec![file_path; num_rows]);
-        columns.push(Arc::new(file_array) as ArrayRef);
 
         // Per Iceberg spec, the _file column has reserved field ID RESERVED_FIELD_ID_FILE
-        let file_field = Field::new(RESERVED_COL_NAME_FILE, DataType::Utf8, false).with_metadata(
-            HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                RESERVED_FIELD_ID_FILE.to_string(),
-            )]),
-        );
-        fields.push(Arc::new(file_field));
+        let file_field = Field::new(RESERVED_COL_NAME_FILE, DataType::Utf8, false)
+            .with_metadata(Self::create_file_field_metadata());
 
-        let schema = Arc::new(ArrowSchema::new(fields));
-        RecordBatch::try_new(schema, columns).map_err(|e| {
-            Error::new(
-                ErrorKind::Unexpected,
-                "Failed to add _file column to RecordBatch",
-            )
-            .with_source(e)
-        })
+        Self::add_file_path_column_impl(batch, Arc::new(file_array), file_field)
     }
 
     fn build_field_id_set_and_map(
@@ -2161,7 +2155,7 @@ message schema {
     }
 
     #[test]
-    fn test_add_file_path_column_rle() {
+    fn test_add_file_path_column_ree() {
         use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
         use arrow_schema::{DataType, Field, Schema};
 
@@ -2185,9 +2179,9 @@ message schema {
         assert_eq!(batch.num_columns(), 2);
         assert_eq!(batch.num_rows(), 3);
 
-        // Add file path column with RLE
+        // Add file path column with REE
         let file_path = "/path/to/data/file.parquet";
-        let result = ArrowReader::add_file_path_column_rle(batch, file_path);
+        let result = ArrowReader::add_file_path_column_ree(batch, file_path);
         assert!(result.is_ok(), "Should successfully add file path column");
 
         let new_batch = result.unwrap();
@@ -2243,23 +2237,12 @@ message schema {
             .downcast_ref::<arrow_array::RunArray<arrow_array::types::Int32Type>>()
             .expect("Expected RunArray for _file column");
 
-        // Check that all rows have the same file path
-        for i in 0..new_batch.num_rows() {
-            let slice = file_col.slice(i, 1);
-            let run_arr = slice
-                .as_any()
-                .downcast_ref::<arrow_array::RunArray<arrow_array::types::Int32Type>>()
-                .unwrap();
-            let values = run_arr.values();
-            let str_arr = values.as_string::<i32>();
-            assert_eq!(str_arr.value(0), file_path);
-        }
-
         // Verify the run array structure (should be optimally encoded)
         let run_ends = run_array.run_ends();
         assert_eq!(run_ends.values().len(), 1, "Should have only 1 run end");
         assert_eq!(run_ends.values()[0], 3, "Run end should be at position 3");
 
+        // Check that the single value in the RunArray is the expected file path
         let values = run_array.values();
         let string_values = values.as_string::<i32>();
         assert_eq!(string_values.len(), 1, "Should have only 1 value");
@@ -2267,7 +2250,7 @@ message schema {
     }
 
     #[test]
-    fn test_add_file_path_column_rle_empty_batch() {
+    fn test_add_file_path_column_ree_empty_batch() {
         use arrow_array::RecordBatch;
         use arrow_schema::{DataType, Field, Schema};
         use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
@@ -2282,9 +2265,9 @@ message schema {
 
         assert_eq!(batch.num_rows(), 0);
 
-        // Add file path column to empty batch with RLE
+        // Add file path column to empty batch with REE
         let file_path = "/empty/file.parquet";
-        let result = ArrowReader::add_file_path_column_rle(batch, file_path);
+        let result = ArrowReader::add_file_path_column_ree(batch, file_path);
 
         // Should succeed with empty RunArray for empty batches
         assert!(result.is_ok());
