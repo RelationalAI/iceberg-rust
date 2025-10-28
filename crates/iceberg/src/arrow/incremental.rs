@@ -16,17 +16,17 @@
 // under the License.
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
-use roaring::RoaringTreemap;
 
 use crate::arrow::record_batch_transformer::RecordBatchTransformer;
 use crate::arrow::{ArrowReader, StreamsInto};
+use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
 use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
@@ -122,13 +122,10 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                             }
                             IncrementalFileScanTask::Delete(file_path, delete_vector) => {
                                 spawn(async move {
-                                    // Clone the `RoaringTreemap` underlying the delete vector to take ownership.
-                                    let treemap = {
-                                        let guard = delete_vector.lock().unwrap();
-                                        guard.inner.clone()
-                                    };
                                     let record_batch_stream = process_incremental_delete_task(
-                                        file_path, treemap, batch_size,
+                                        file_path,
+                                        delete_vector,
+                                        batch_size,
                                     );
 
                                     match record_batch_stream {
@@ -231,7 +228,7 @@ async fn process_incremental_append_task(
 
 fn process_incremental_delete_task(
     file_path: String,
-    delete_vector: RoaringTreemap,
+    delete_vector: Arc<Mutex<DeleteVector>>,
     batch_size: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
     let schema = Arc::new(ArrowSchema::new(vec![Field::new(
@@ -242,7 +239,19 @@ fn process_incremental_delete_task(
 
     let batch_size = batch_size.unwrap_or(1024);
 
-    let stream = futures::stream::iter(delete_vector)
+    // Try to take ownership of the DeleteVector without cloning
+    // If we're the only Arc holder, this succeeds and we avoid the clone
+    let treemap = match Arc::try_unwrap(delete_vector) {
+        Ok(mutex) => mutex.into_inner().unwrap().inner,
+        Err(arc) => {
+            // If there are other Arc holders, we have to clone
+            // This shouldn't happen in normal operation since each task gets its own Arc
+            let guard = arc.lock().unwrap();
+            guard.inner.clone()
+        }
+    };
+
+    let stream = futures::stream::iter(treemap)
         .chunks(batch_size)
         .map(move |chunk| {
             let array = UInt64Array::from_iter(chunk);
