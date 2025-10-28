@@ -65,16 +65,25 @@ impl IncrementalPlanContext {
         delete_file_idx: DeleteFileIndex,
         delete_file_tx: Sender<ManifestEntryContext>,
     ) -> Result<Box<impl Iterator<Item = Result<ManifestFileContext>> + 'static>> {
+        // Validate that all snapshots are Append or Delete operations
+        for snapshot in self.snapshots.iter() {
+            let operation = &snapshot.summary().operation;
+            if !matches!(operation, Operation::Append | Operation::Delete) {
+                return Err(crate::Error::new(
+                    crate::ErrorKind::FeatureUnsupported,
+                    format!(
+                        "Incremental scan only supports Append and Delete operations, but snapshot {} has operation {:?}",
+                        snapshot.snapshot_id(),
+                        operation
+                    ),
+                ));
+            }
+        }
+
         let (manifest_files, filter_fn) = {
             let snapshot_ids: HashSet<i64> = self
                 .snapshots
                 .iter()
-                .filter(|snapshot| {
-                    matches!(
-                        snapshot.summary().operation,
-                        Operation::Append | Operation::Delete
-                    )
-                })
                 .map(|snapshot| snapshot.snapshot_id())
                 .collect();
 
