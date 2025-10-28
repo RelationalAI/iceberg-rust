@@ -406,7 +406,7 @@ impl IncrementalTableScan {
                             } else if manifest_entry_context.manifest_entry.status()
                                 == ManifestStatus::Deleted
                             {
-                                // TODO: Process deleted files
+                                // TODO (RAI-43291): Process deleted files
                                 Ok(())
                             } else {
                                 Ok(())
