@@ -37,7 +37,7 @@ pub(crate) struct IncrementalPlanContext {
     pub snapshots: Vec<SnapshotRef>,
 
     /// The snapshot to start the incremental scan from.
-    pub from_snapshot: Option<SnapshotRef>,
+    pub from_snapshot: SnapshotRef,
 
     /// The metadata of the table being scanned.
     pub table_metadata: TableMetadataRef,

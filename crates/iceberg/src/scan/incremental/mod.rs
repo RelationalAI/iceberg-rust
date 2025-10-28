@@ -53,7 +53,7 @@ pub struct IncrementalTableScanBuilder<'a> {
     table: &'a Table,
     // Defaults to `None`, which means all columns.
     column_names: Option<Vec<String>>,
-    from_snapshot_id: Option<i64>,
+    from_snapshot_id: i64,
     to_snapshot_id: i64,
     batch_size: Option<usize>,
     concurrency_limit_data_files: usize,
@@ -67,7 +67,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         Self {
             table,
             column_names: None,
-            from_snapshot_id: Some(from_snapshot_id),
+            from_snapshot_id,
             to_snapshot_id,
             batch_size: None,
             concurrency_limit_data_files: num_cpus,
@@ -107,7 +107,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
 
     /// Set the `from_snapshot_id` for the incremental scan.
     pub fn from_snapshot_id(mut self, from_snapshot_id: i64) -> Self {
-        self.from_snapshot_id = Some(from_snapshot_id);
+        self.from_snapshot_id = from_snapshot_id;
         self
     }
 
@@ -137,21 +137,17 @@ impl<'a> IncrementalTableScanBuilder<'a> {
 
     /// Build the incremental table scan.
     pub fn build(self) -> Result<IncrementalTableScan> {
-        let snapshot_from: Option<Arc<Snapshot>> = match self.from_snapshot_id {
-            Some(id) => Some(
-                self.table
-                    .metadata()
-                    .snapshot_by_id(id)
-                    .ok_or_else(|| {
-                        Error::new(
-                            ErrorKind::DataInvalid,
-                            format!("Snapshot with id {} not found", id),
-                        )
-                    })?
-                    .clone(),
-            ),
-            None => None,
-        };
+        let snapshot_from: Arc<Snapshot> = self
+            .table
+            .metadata()
+            .snapshot_by_id(self.from_snapshot_id)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Snapshot with id {} not found", self.from_snapshot_id),
+                )
+            })?
+            .clone();
 
         let snapshot_to: Arc<Snapshot> = self
             .table
@@ -170,7 +166,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         let snapshots = ancestors_between(
             &self.table.metadata_ref(),
             snapshot_to.snapshot_id(),
-            snapshot_from.as_ref().map(|s| s.snapshot_id()),
+            Some(snapshot_from.snapshot_id()),
         )
         .collect_vec();
 
@@ -273,9 +269,9 @@ pub struct IncrementalTableScan {
 }
 
 impl IncrementalTableScan {
-    /// Returns the optional `from` snapshot of this incremental table scan.
-    pub fn snapshot_from(&self) -> Option<&SnapshotRef> {
-        self.plan_context.from_snapshot.as_ref()
+    /// Returns the `from` snapshot of this incremental table scan.
+    pub fn snapshot_from(&self) -> &SnapshotRef {
+        &self.plan_context.from_snapshot
     }
 
     /// Returns the snapshots involved in this incremental table scan.
