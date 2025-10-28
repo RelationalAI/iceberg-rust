@@ -196,7 +196,6 @@ impl PlanContext {
     ) -> Result<Box<impl Iterator<Item = Result<ManifestFileContext>> + 'static>> {
         let manifest_files = manifest_list.entries().iter();
 
-        // TODO: Ideally we could ditch this intermediate Vec as we return an iterator.
         let mut filtered_mfcs = vec![];
         for manifest_file in manifest_files {
             let tx = if manifest_file.content == ManifestContentType::Deletes {
