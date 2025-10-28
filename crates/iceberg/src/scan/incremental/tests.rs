@@ -720,28 +720,14 @@ impl IncrementalTestFixture {
                 .column(0)
                 .as_primitive::<arrow_array::types::UInt64Type>();
 
-            // The file path column is a RunArray (Run-End Encoded), so we need to decode it
-            // RunArray stores repeated values efficiently. To access individual values, we use
-            // the Array trait which handles the run-length decoding automatically.
-            use arrow_array::Array;
+            // The file path column is a StringArray with materialized values
             let file_path_column = delete_batch.column(1);
+            let file_path_array = file_path_column.as_string::<i32>();
 
             let mut deleted_pairs: Vec<(u64, String)> = (0..delete_batch.num_rows())
                 .map(|i| {
                     let pos = pos_array.value(i);
-                    // Use Array::to_data() to get the decoded data, then cast back
-                    let file_path = {
-                        // Get a slice of the run array for this single row
-                        let slice = file_path_column.slice(i, 1);
-                        // Cast the slice to a run array and get its values
-                        let run_arr = slice
-                            .as_any()
-                            .downcast_ref::<arrow_array::RunArray<arrow_array::types::Int32Type>>()
-                            .unwrap();
-                        let values = run_arr.values();
-                        let str_arr = values.as_string::<i32>();
-                        str_arr.value(0).to_string()
-                    };
+                    let file_path = file_path_array.value(i).to_string();
                     (pos, file_path)
                 })
                 .collect();
