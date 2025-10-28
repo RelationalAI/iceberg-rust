@@ -335,7 +335,8 @@ impl IncrementalTableScan {
         let mut channel_for_data_manifest_entry_error = file_scan_task_tx.clone();
         let mut channel_for_delete_manifest_entry_error = file_scan_task_tx.clone();
 
-        // Process the delete file [`ManifestEntry`] stream in parallel
+        // Process the delete file [`ManifestEntry`] stream in parallel. Builds the delete
+        // index below.
         spawn(async move {
             let result = manifest_entry_delete_ctx_rx
                 .map(|me_ctx| Ok((me_ctx, delete_file_tx.clone())))
@@ -371,6 +372,7 @@ impl IncrementalTableScan {
             )
             .await;
 
+        // Build the delete filter from the loaded deletes.
         let delete_filter = match result {
             Ok(loaded_deletes) => loaded_deletes.unwrap(),
             Err(e) => {
