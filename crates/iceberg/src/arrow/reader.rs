@@ -473,6 +473,7 @@ impl ArrowReader {
     /// Adds a `_file` column to the RecordBatch containing the file path.
     /// Uses Run-End Encoding (RLE) for maximum memory efficiency when the same
     /// file path is repeated across all rows.
+    #[allow(dead_code)]
     pub(crate) fn add_file_path_column_rle(
         batch: RecordBatch,
         file_path: &str,
