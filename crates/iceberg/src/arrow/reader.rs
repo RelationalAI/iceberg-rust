@@ -501,7 +501,7 @@ impl ArrowReader {
 
     /// Helper function to add a `_file` column to a RecordBatch.
     /// Takes the array and field to add, reducing code duplication.
-    fn add_file_path_column_impl(
+    fn create_file_field(
         batch: RecordBatch,
         file_array: ArrayRef,
         file_field: Field,
@@ -510,7 +510,10 @@ impl ArrowReader {
         columns.push(file_array);
 
         let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
-        fields.push(Arc::new(file_field));
+        fields.push(Arc::new(file_field.with_metadata(HashMap::from([(
+            PARQUET_FIELD_ID_META_KEY.to_string(),
+            RESERVED_FIELD_ID_FILE.to_string(),
+        )]))));
 
         let schema = Arc::new(ArrowSchema::new(fields));
         RecordBatch::try_new(schema, columns).map_err(|e| {
@@ -520,14 +523,6 @@ impl ArrowReader {
             )
             .with_source(e)
         })
-    }
-
-    /// Creates the metadata for the `_file` field with the reserved field ID.
-    fn create_file_field_metadata() -> HashMap<String, String> {
-        HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            RESERVED_FIELD_ID_FILE.to_string(),
-        )])
     }
 
     /// Adds a `_file` column to the RecordBatch containing the file path.
@@ -574,10 +569,9 @@ impl ArrowReader {
             RESERVED_COL_NAME_FILE,
             DataType::RunEndEncoded(run_ends_field, values_field),
             false,
-        )
-        .with_metadata(Self::create_file_field_metadata());
+        );
 
-        Self::add_file_path_column_impl(batch, Arc::new(file_array), file_field)
+        Self::create_file_field(batch, Arc::new(file_array), file_field)
     }
 
     /// Adds a `_file` column to the RecordBatch containing the file path.
@@ -589,10 +583,9 @@ impl ArrowReader {
         let file_array = StringArray::from(vec![file_path; num_rows]);
 
         // Per Iceberg spec, the _file column has reserved field ID RESERVED_FIELD_ID_FILE
-        let file_field = Field::new(RESERVED_COL_NAME_FILE, DataType::Utf8, false)
-            .with_metadata(Self::create_file_field_metadata());
+        let file_field = Field::new(RESERVED_COL_NAME_FILE, DataType::Utf8, false);
 
-        Self::add_file_path_column_impl(batch, Arc::new(file_array), file_field)
+        Self::create_file_field(batch, Arc::new(file_array), file_field)
     }
 
     fn build_field_id_set_and_map(
