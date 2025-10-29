@@ -241,15 +241,15 @@ fn process_incremental_delete_task(
 
     // Try to take ownership of the DeleteVector without cloning
     // If we're the only Arc holder, this succeeds and we avoid the clone
-    let treemap = match Arc::try_unwrap(delete_vector) {
-        Ok(mutex) => mutex.into_inner().unwrap().inner,
-        Err(arc) => {
-            // If there are other Arc holders, we have to clone
-            // This shouldn't happen in normal operation since each task gets its own Arc
-            let guard = arc.lock().unwrap();
-            guard.inner.clone()
-        }
-    };
+    let treemap = Arc::try_unwrap(delete_vector)
+        .map_err(|_| {
+            Error::new(ErrorKind::Unexpected, "failed to unwrap DeleteVector Arc")
+        })?
+        .into_inner()
+        .map(|dv| dv.inner)
+        .map_err(|e| {
+            Error::new(ErrorKind::Unexpected, "failed to get DeleteVector inner").with_source(e)
+        })?;
 
     let stream = futures::stream::iter(treemap)
         .chunks(batch_size)
