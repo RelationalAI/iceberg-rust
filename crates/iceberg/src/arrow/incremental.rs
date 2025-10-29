@@ -242,9 +242,7 @@ fn process_incremental_delete_task(
     // Try to take ownership of the DeleteVector without cloning
     // If we're the only Arc holder, this succeeds and we avoid the clone
     let treemap = Arc::try_unwrap(delete_vector)
-        .map_err(|_| {
-            Error::new(ErrorKind::Unexpected, "failed to unwrap DeleteVector Arc")
-        })?
+        .map_err(|_| Error::new(ErrorKind::Unexpected, "failed to unwrap DeleteVector Arc"))?
         .into_inner()
         .map(|dv| dv.inner)
         .map_err(|e| {
