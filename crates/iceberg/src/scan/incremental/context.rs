@@ -70,11 +70,14 @@ impl IncrementalPlanContext {
             let mut ids = HashSet::new();
             for snapshot in self.snapshots.iter() {
                 let operation = &snapshot.summary().operation;
-                if !matches!(operation, Operation::Append | Operation::Delete) {
+                if !matches!(
+                    operation,
+                    Operation::Append | Operation::Overwrite | Operation::Delete
+                ) {
                     return Err(crate::Error::new(
                         crate::ErrorKind::FeatureUnsupported,
                         format!(
-                            "Incremental scan only supports Append and Delete operations, but snapshot {} has operation {:?}",
+                            "Incremental scan only supports Append, Overwrite and Delete operations, but snapshot {} has operation {:?}",
                             snapshot.snapshot_id(),
                             operation
                         ),
