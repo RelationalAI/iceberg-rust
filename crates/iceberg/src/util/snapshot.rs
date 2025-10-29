@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Taken from https://github.com/apache/iceberg-rust/pull/1470
+
 use crate::spec::{SnapshotRef, TableMetadataRef};
 
 struct Ancestors {
