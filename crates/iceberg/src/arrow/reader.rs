@@ -63,10 +63,20 @@ use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind};
 
 /// Reserved field ID for the file path (_file) column per Iceberg spec
+/// This is dead code for now but will be used when we add the _file column support.
+#[allow(dead_code)]
 pub(crate) const RESERVED_FIELD_ID_FILE: i32 = 2147483646;
 
 /// Column name for the file path metadata column per Iceberg spec
+/// This is dead code for now but will be used when we add the _file column support.
+#[allow(dead_code)]
 pub(crate) const RESERVED_COL_NAME_FILE: &str = "_file";
+
+/// Reserved field ID for the file path column used in delete file reading.
+pub(crate) const RESERVED_FIELD_ID_FILE_PATH: i32 = 2147483546;
+
+/// Column name for the file path metadata column used in delete file reading.
+pub(crate) const RESERVED_COL_NAME_FILE_PATH: &str = "file_path";
 
 /// Builder to create ArrowReader
 pub struct ArrowReaderBuilder {
@@ -505,6 +515,7 @@ impl ArrowReader {
         batch: RecordBatch,
         file_array: ArrayRef,
         file_field: Field,
+        field_id: i32,
     ) -> Result<RecordBatch> {
         let mut columns = batch.columns().to_vec();
         columns.push(file_array);
@@ -512,7 +523,7 @@ impl ArrowReader {
         let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
         fields.push(Arc::new(file_field.with_metadata(HashMap::from([(
             PARQUET_FIELD_ID_META_KEY.to_string(),
-            RESERVED_FIELD_ID_FILE.to_string(),
+            field_id.to_string(),
         )]))));
 
         let schema = Arc::new(ArrowSchema::new(fields));
@@ -534,6 +545,8 @@ impl ArrowReader {
     pub(crate) fn add_file_path_column_ree(
         batch: RecordBatch,
         file_path: &str,
+        field_name: &str,
+        field_id: i32,
     ) -> Result<RecordBatch> {
         let num_rows = batch.num_rows();
 
@@ -566,26 +579,31 @@ impl ArrowReader {
         let run_ends_field = Arc::new(Field::new("run_ends", DataType::Int32, false));
         let values_field = Arc::new(Field::new("values", DataType::Utf8, true));
         let file_field = Field::new(
-            RESERVED_COL_NAME_FILE,
+            field_name,
             DataType::RunEndEncoded(run_ends_field, values_field),
             false,
         );
 
-        Self::create_file_field(batch, Arc::new(file_array), file_field)
+        Self::create_file_field(batch, Arc::new(file_array), file_field, field_id)
     }
 
     /// Adds a `_file` column to the RecordBatch containing the file path.
     /// Materializes the file path string for each row (no compression).
-    pub(crate) fn add_file_path_column(batch: RecordBatch, file_path: &str) -> Result<RecordBatch> {
+    pub(crate) fn add_file_path_column(
+        batch: RecordBatch,
+        file_path: &str,
+        field_name: &str,
+        field_id: i32,
+    ) -> Result<RecordBatch> {
         let num_rows = batch.num_rows();
 
         // Create a StringArray with the file path repeated num_rows times
         let file_array = StringArray::from(vec![file_path; num_rows]);
 
         // Per Iceberg spec, the _file column has reserved field ID RESERVED_FIELD_ID_FILE
-        let file_field = Field::new(RESERVED_COL_NAME_FILE, DataType::Utf8, false);
+        let file_field = Field::new(field_name, DataType::Utf8, false);
 
-        Self::create_file_field(batch, Arc::new(file_array), file_field)
+        Self::create_file_field(batch, Arc::new(file_array), file_field, field_id)
     }
 
     fn build_field_id_set_and_map(
@@ -1597,7 +1615,9 @@ mod tests {
 
     use crate::ErrorKind;
     use crate::arrow::reader::{CollectFieldIdVisitor, PARQUET_FIELD_ID_META_KEY};
-    use crate::arrow::{ArrowReader, ArrowReaderBuilder};
+    use crate::arrow::{
+        ArrowReader, ArrowReaderBuilder, RESERVED_COL_NAME_FILE, RESERVED_FIELD_ID_FILE,
+    };
     use crate::delete_vector::DeleteVector;
     use crate::expr::visitors::bound_predicate_visitor::visit;
     use crate::expr::{Bind, Predicate, Reference};
@@ -2397,8 +2417,6 @@ message schema {
         use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
         use arrow_schema::{DataType, Field, Schema};
 
-        use crate::arrow::{RESERVED_COL_NAME_FILE, RESERVED_FIELD_ID_FILE};
-
         // Create a simple test batch with 2 columns and 3 rows
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
@@ -2419,7 +2437,12 @@ message schema {
 
         // Add file path column with REE
         let file_path = "/path/to/data/file.parquet";
-        let result = ArrowReader::add_file_path_column_ree(batch, file_path);
+        let result = ArrowReader::add_file_path_column_ree(
+            batch,
+            file_path,
+            RESERVED_COL_NAME_FILE,
+            RESERVED_FIELD_ID_FILE,
+        );
         assert!(result.is_ok(), "Should successfully add file path column");
 
         let new_batch = result.unwrap();
@@ -2493,8 +2516,6 @@ message schema {
         use arrow_schema::{DataType, Field, Schema};
         use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
-        use crate::arrow::{RESERVED_COL_NAME_FILE, RESERVED_FIELD_ID_FILE};
-
         // Create an empty batch
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
@@ -2505,7 +2526,12 @@ message schema {
 
         // Add file path column to empty batch with REE
         let file_path = "/empty/file.parquet";
-        let result = ArrowReader::add_file_path_column_ree(batch, file_path);
+        let result = ArrowReader::add_file_path_column_ree(
+            batch,
+            file_path,
+            RESERVED_COL_NAME_FILE,
+            RESERVED_FIELD_ID_FILE,
+        );
 
         // Should succeed with empty RunArray for empty batches
         assert!(result.is_ok());
@@ -2550,7 +2576,12 @@ message schema {
 
         // Test with file path containing special characters (materialized version)
         let file_path = "/path/with spaces/and-dashes/file_name.parquet";
-        let result = ArrowReader::add_file_path_column(batch, file_path);
+        let result = ArrowReader::add_file_path_column(
+            batch,
+            file_path,
+            RESERVED_COL_NAME_FILE,
+            RESERVED_FIELD_ID_FILE,
+        );
         assert!(result.is_ok());
 
         let new_batch = result.unwrap();
@@ -2565,8 +2596,6 @@ message schema {
     fn test_add_file_path_column() {
         use arrow_array::{Int32Array, RecordBatch, StringArray};
         use arrow_schema::{DataType, Field, Schema};
-
-        use crate::arrow::{RESERVED_COL_NAME_FILE, RESERVED_FIELD_ID_FILE};
 
         // Create a simple test batch with 2 columns and 3 rows
         let schema = Arc::new(Schema::new(vec![
@@ -2588,7 +2617,12 @@ message schema {
 
         // Add file path column with materialization
         let file_path = "/path/to/data/file.parquet";
-        let result = ArrowReader::add_file_path_column(batch, file_path);
+        let result = ArrowReader::add_file_path_column(
+            batch,
+            file_path,
+            RESERVED_COL_NAME_FILE,
+            RESERVED_FIELD_ID_FILE,
+        );
         assert!(result.is_ok(), "Should successfully add file path column");
 
         let new_batch = result.unwrap();
@@ -2639,8 +2673,6 @@ message schema {
         use arrow_schema::{DataType, Field, Schema};
         use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
-        use crate::arrow::{RESERVED_COL_NAME_FILE, RESERVED_FIELD_ID_FILE};
-
         // Create an empty batch
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
@@ -2651,7 +2683,12 @@ message schema {
 
         // Add file path column to empty batch (materialized version)
         let file_path = "/empty/file.parquet";
-        let result = ArrowReader::add_file_path_column(batch, file_path);
+        let result = ArrowReader::add_file_path_column(
+            batch,
+            file_path,
+            RESERVED_COL_NAME_FILE,
+            RESERVED_FIELD_ID_FILE,
+        );
 
         // Should succeed with empty StringArray
         assert!(result.is_ok());

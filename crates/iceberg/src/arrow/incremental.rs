@@ -25,7 +25,9 @@ use futures::stream::select;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 
 use crate::arrow::record_batch_transformer::RecordBatchTransformer;
-use crate::arrow::{ArrowReader, StreamsInto};
+use crate::arrow::{
+    ArrowReader, RESERVED_COL_NAME_FILE_PATH, RESERVED_FIELD_ID_FILE_PATH, StreamsInto,
+};
 use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
 use crate::runtime::spawn;
@@ -263,7 +265,14 @@ fn process_incremental_delete_task(
                     "Failed to create RecordBatch for DeleteVector",
                 )
             })
-            .and_then(|batch| ArrowReader::add_file_path_column(batch, &file_path))
+            .and_then(|batch| {
+                ArrowReader::add_file_path_column(
+                    batch,
+                    &file_path,
+                    RESERVED_COL_NAME_FILE_PATH,
+                    RESERVED_FIELD_ID_FILE_PATH,
+                )
+            })
         });
 
     Ok(Box::pin(stream) as ArrowRecordBatchStream)
