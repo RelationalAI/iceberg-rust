@@ -1602,6 +1602,7 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::{ArrayRef, LargeStringArray, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+    use as_any::Downcast;
     use futures::TryStreamExt;
     use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
     use parquet::arrow::{ArrowWriter, ProjectionMask};
@@ -2512,6 +2513,8 @@ message schema {
         let string_values = values.as_string::<i32>();
         assert_eq!(string_values.len(), 1, "Should have only 1 value");
         assert_eq!(string_values.value(0), file_path);
+
+        assert!(string_values.downcast_ref::<StringArray>().unwrap().iter().all(|v| v == Some(file_path)))
     }
 
     #[test]
