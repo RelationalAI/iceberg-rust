@@ -74,7 +74,7 @@ pub enum IncrementalFileScanTask {
     Append(AppendedFileScanTask),
     /// Deleted records of a data file. First argument is the file path, second the delete
     /// vector.
-    Delete(String, Arc<Mutex<DeleteVector>>),
+    Delete(String, DeleteVector),
 }
 
 impl IncrementalFileScanTask {

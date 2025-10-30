@@ -444,8 +444,12 @@ impl IncrementalTableScan {
         delete_filter.with_read(|state| {
             for (path, delete_vector) in state.delete_vectors().iter() {
                 if !appended_files.contains::<String>(path) {
+                    let delete_vector_inner = {
+                        let guard = delete_vector.lock().unwrap();
+                        guard.clone()
+                    };
                     let delete_task =
-                        IncrementalFileScanTask::Delete(path.clone(), delete_vector.clone());
+                        IncrementalFileScanTask::Delete(path.clone(), delete_vector_inner);
                     tasks.push(delete_task);
                 }
             }

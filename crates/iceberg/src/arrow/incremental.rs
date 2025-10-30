@@ -16,7 +16,7 @@
 // under the License.
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
@@ -230,7 +230,7 @@ async fn process_incremental_append_task(
 
 fn process_incremental_delete_task(
     file_path: String,
-    delete_vector: Arc<Mutex<DeleteVector>>,
+    delete_vector: DeleteVector,
     batch_size: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
     let schema = Arc::new(ArrowSchema::new(vec![Field::new(
@@ -241,15 +241,7 @@ fn process_incremental_delete_task(
 
     let batch_size = batch_size.unwrap_or(1024);
 
-    // Try to take ownership of the DeleteVector without cloning
-    // If we're the only Arc holder, this succeeds and we avoid the clone
-    let treemap = Arc::try_unwrap(delete_vector)
-        .map_err(|_| Error::new(ErrorKind::Unexpected, "failed to unwrap DeleteVector Arc"))?
-        .into_inner()
-        .map(|dv| dv.inner)
-        .map_err(|e| {
-            Error::new(ErrorKind::Unexpected, "failed to get DeleteVector inner").with_source(e)
-        })?;
+    let treemap = delete_vector.inner;
 
     let stream = futures::stream::iter(treemap)
         .chunks(batch_size)
