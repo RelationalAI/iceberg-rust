@@ -575,7 +575,7 @@ impl ArrowReader {
 
         // Per Iceberg spec, the _file column has reserved field ID RESERVED_FIELD_ID_FILE
         // DataType is RunEndEncoded with Int32 run ends and Utf8 values
-        // Note: values field is nullable to match what StringArray::from() creates
+        // Note: values field is nullable to match what RecordBatch::try_new(..) expects.
         let run_ends_field = Arc::new(Field::new("run_ends", DataType::Int32, false));
         let values_field = Arc::new(Field::new("values", DataType::Utf8, true));
         let file_field = Field::new(
