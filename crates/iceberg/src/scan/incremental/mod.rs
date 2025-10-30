@@ -161,8 +161,6 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             })?
             .clone();
 
-        // TODO: What properties do we need to verify about the snapshots? What about
-        // schema changes?
         let snapshots = ancestors_between(
             &self.table.metadata_ref(),
             snapshot_to.snapshot_id(),
