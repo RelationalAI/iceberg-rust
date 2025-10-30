@@ -2514,7 +2514,13 @@ message schema {
         assert_eq!(string_values.len(), 1, "Should have only 1 value");
         assert_eq!(string_values.value(0), file_path);
 
-        assert!(string_values.downcast_ref::<StringArray>().unwrap().iter().all(|v| v == Some(file_path)))
+        assert!(
+            string_values
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .iter()
+                .all(|v| v == Some(file_path))
+        )
     }
 
     #[test]

@@ -44,6 +44,11 @@ impl DeleteFileFilterState {
     pub fn delete_vectors(&self) -> &HashMap<String, Arc<Mutex<DeleteVector>>> {
         &self.delete_vectors
     }
+
+    /// Remove and return the delete vector for the given data file path.
+    pub fn remove_delete_vector(&mut self, path: &str) -> Option<Arc<Mutex<DeleteVector>>> {
+        self.delete_vectors.remove(path)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -80,6 +85,17 @@ impl DeleteFilter {
             )
         })?;
         f(&state)
+    }
+
+    pub(crate) fn with_write<F, G>(&self, f: F) -> Result<G>
+    where F: FnOnce(&mut DeleteFileFilterState) -> Result<G> {
+        let mut state = self.state.write().map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                format!("Failed to acquire write lock: {}", e),
+            )
+        })?;
+        f(&mut state)
     }
 
     pub(crate) fn try_start_eq_del_load(&self, file_path: &str) -> Option<Arc<Notify>> {

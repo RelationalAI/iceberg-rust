@@ -441,20 +441,44 @@ impl IncrementalTableScan {
             .collect::<HashSet<String>>();
 
         // Augment `tasks` with delete tasks.
-        delete_filter.with_read(|state| {
-            for (path, delete_vector) in state.delete_vectors().iter() {
-                if !appended_files.contains::<String>(path) {
-                    let delete_vector_inner = {
-                        let guard = delete_vector.lock().unwrap();
-                        guard.clone()
-                    };
-                    let delete_task =
-                        IncrementalFileScanTask::Delete(path.clone(), delete_vector_inner);
-                    tasks.push(delete_task);
-                }
-            }
-            Ok(())
+        // First collect paths to process (paths that weren't appended in this scan range)
+        let delete_paths: Vec<String> = delete_filter.with_read(|state| {
+            Ok(state
+                .delete_vectors()
+                .keys()
+                .filter(|path| !appended_files.contains::<String>(path))
+                .cloned()
+                .collect())
         })?;
+
+        // Now remove and take ownership of each delete vector
+        for path in delete_paths {
+            let delete_vector_arc = delete_filter.with_write(|state| {
+                state.remove_delete_vector(&path).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        format!("DeleteVector for path {} not found", path),
+                    )
+                })
+            })?;
+
+            // Try to unwrap the Arc to avoid cloning the DeleteVector
+            let delete_vector_inner = Arc::try_unwrap(delete_vector_arc)
+                .map_err(|_| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "DeleteVector Arc has multiple references, cannot take ownership",
+                    )
+                })?
+                .into_inner()
+                .map_err(|e| {
+                    Error::new(ErrorKind::Unexpected, "Failed to unwrap DeleteVector Mutex")
+                        .with_source(e)
+                })?;
+
+            let delete_task = IncrementalFileScanTask::Delete(path, delete_vector_inner);
+            tasks.push(delete_task);
+        }
 
         // We actually would not need a stream here, but we can keep it compatible with
         // other scan types.
