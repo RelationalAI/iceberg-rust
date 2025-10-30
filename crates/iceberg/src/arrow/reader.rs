@@ -2501,7 +2501,11 @@ message schema {
         // Verify the run array structure (should be optimally encoded)
         let run_ends = run_array.run_ends();
         assert_eq!(run_ends.values().len(), 1, "Should have only 1 run end");
-        assert_eq!(run_ends.values()[0], 3, "Run end should be at position 3");
+        assert_eq!(
+            run_ends.values()[0],
+            new_batch.num_rows() as i32,
+            "Run end should equal number of rows"
+        );
 
         // Check that the single value in the RunArray is the expected file path
         let values = run_array.values();
