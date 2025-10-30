@@ -539,10 +539,13 @@ impl IncrementalTableScan {
         }
 
         // Abort if it has been marked as deleted.
-        if !manifest_entry_context.manifest_entry.is_alive() {
+        if !manifest_entry_context.manifest_entry.is_alive()
+            && manifest_entry_context.manifest_entry.content_type()
+                == DataContentType::PositionDeletes
+        {
             return Err(Error::new(
                 ErrorKind::FeatureUnsupported,
-                "Processing deleted delete files is not supported yet in incremental scans",
+                "Processing deleted (position) delete files is not supported yet in incremental scans",
             ));
         }
 
