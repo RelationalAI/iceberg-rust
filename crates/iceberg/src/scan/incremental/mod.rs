@@ -409,7 +409,10 @@ impl IncrementalTableScan {
                                 == ManifestStatus::Deleted
                             {
                                 // TODO (RAI-43291): Process deleted files
-                                Ok(())
+                                Err(Error::new(
+                                    ErrorKind::FeatureUnsupported,
+                                    "Processing deleted data files is not supported yet in incremental scans",
+                                ))
                             } else {
                                 Ok(())
                             }

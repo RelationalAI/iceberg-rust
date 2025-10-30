@@ -50,6 +50,28 @@ pub enum Operation {
     /// Takes a vector of (position, file_name) tuples specifying which position in which file to delete.
     /// Example: `Delete(vec![(0, "data-1.parquet"), (1, "data-1.parquet")])` deletes positions 0 and 1 from data-1.parquet
     Delete(Vec<(i64, String)>),
+
+    /// Overwrite operation that can append new rows, delete specific positions, and remove entire data files.
+    /// This is a combination of append and delete operations in a single atomic snapshot.
+    ///
+    /// Parameters:
+    /// 1. Rows to append: Vec<(n, data)> tuples and the filename to write them to
+    /// 2. Positions to delete: Vec<(position, file_name)> tuples for positional deletes
+    /// 3. Data files to delete: Vec<String> of file names to completely remove
+    ///
+    /// All three parameters can be empty, allowing for various combinations:
+    /// - Pure append: `Overwrite((rows, "file.parquet"), vec![], vec![])`
+    /// - Pure positional delete: `Overwrite((vec![], ""), vec![(pos, "file")], vec![])`
+    /// - Pure file deletion: `Overwrite((vec![], ""), vec![], vec!["file.parquet"])`
+    /// - Delete entire files: `Overwrite((vec![], ""), vec![], vec!["old-file.parquet"])`
+    ///
+    /// Example: `Overwrite((vec![(1, "new".to_string())], "new.parquet"), vec![(0, "old.parquet")], vec!["remove.parquet"])`
+    /// This adds new data to "new.parquet", deletes position 0 from "old.parquet", and removes "remove.parquet" entirely.
+    Overwrite(
+        (Vec<(i32, String)>, String),
+        Vec<(i64, String)>,
+        Vec<String>,
+    ),
 }
 
 /// Tracks the state of data files across snapshots
@@ -88,6 +110,7 @@ pub struct IncrementalTestFixture {
 impl IncrementalTestFixture {
     /// Create a new test fixture with the given operations.
     pub async fn new(operations: Vec<Operation>) -> Self {
+        // Use pwd
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().join("incremental_test_table");
 
@@ -118,6 +141,7 @@ impl IncrementalTestFixture {
             let operation_type = match op {
                 Operation::Add(..) => "append",
                 Operation::Delete(..) => "delete",
+                Operation::Overwrite(..) => "overwrite",
             };
 
             let manifest_list_location =
@@ -576,6 +600,259 @@ impl IncrementalTestFixture {
                     manifest_list_write
                         .add_manifests(vec![data_manifest, delete_manifest].into_iter())
                         .unwrap();
+                    manifest_list_write.close().await.unwrap();
+                }
+
+                Operation::Overwrite((rows, file_name), positions_to_delete, files_to_delete) => {
+                    // Overwrite creates a single snapshot that can:
+                    // 1. Add new data files
+                    // 2. Delete positions from existing files
+                    // 3. Remove entire data files
+
+                    // Create data manifest
+                    let mut data_writer = ManifestWriterBuilder::new(
+                        self.next_manifest_file(),
+                        Some(snapshot_id),
+                        None,
+                        current_schema.clone(),
+                        partition_spec.as_ref().clone(),
+                    )
+                    .build_v2_data();
+
+                    // Determine which files to delete
+                    let files_to_delete_set: std::collections::HashSet<String> = files_to_delete
+                        .iter()
+                        .map(|f| format!("{}/data/{}", &self.table_location, f))
+                        .collect();
+
+                    // Add existing data files (mark deleted ones as DELETED, others as EXISTING)
+                    for data_file in &data_files {
+                        if files_to_delete_set.contains(&data_file.path) {
+                            // Mark file for deletion
+                            data_writer
+                                .add_delete_entry(
+                                    ManifestEntry::builder()
+                                        .status(ManifestStatus::Deleted)
+                                        .snapshot_id(data_file.snapshot_id)
+                                        .sequence_number(data_file.sequence_number)
+                                        .file_sequence_number(data_file.sequence_number)
+                                        .data_file(
+                                            DataFileBuilder::default()
+                                                .partition_spec_id(0)
+                                                .content(DataContentType::Data)
+                                                .file_path(data_file.path.clone())
+                                                .file_format(DataFileFormat::Parquet)
+                                                .file_size_in_bytes(1024)
+                                                .record_count(data_file.n_values.len() as u64)
+                                                .partition(empty_partition.clone())
+                                                .key_metadata(None)
+                                                .build()
+                                                .unwrap(),
+                                        )
+                                        .build(),
+                                )
+                                .unwrap();
+                        } else {
+                            // Keep existing file
+                            data_writer
+                                .add_existing_entry(
+                                    ManifestEntry::builder()
+                                        .status(ManifestStatus::Existing)
+                                        .snapshot_id(data_file.snapshot_id)
+                                        .sequence_number(data_file.sequence_number)
+                                        .file_sequence_number(data_file.sequence_number)
+                                        .data_file(
+                                            DataFileBuilder::default()
+                                                .partition_spec_id(0)
+                                                .content(DataContentType::Data)
+                                                .file_path(data_file.path.clone())
+                                                .file_format(DataFileFormat::Parquet)
+                                                .file_size_in_bytes(1024)
+                                                .record_count(data_file.n_values.len() as u64)
+                                                .partition(empty_partition.clone())
+                                                .key_metadata(None)
+                                                .build()
+                                                .unwrap(),
+                                        )
+                                        .build(),
+                                )
+                                .unwrap();
+                        }
+                    }
+
+                    // Add new data file if rows provided
+                    if !rows.is_empty() {
+                        let n_values: Vec<i32> = rows.iter().map(|(n, _)| *n).collect();
+                        let data_values: Vec<String> =
+                            rows.iter().map(|(_, d)| d.clone()).collect();
+                        let data_file_path = format!("{}/data/{}", &self.table_location, file_name);
+
+                        self.write_parquet_file(&data_file_path, &n_values, &data_values)
+                            .await;
+
+                        data_writer
+                            .add_entry(
+                                ManifestEntry::builder()
+                                    .status(ManifestStatus::Added)
+                                    .data_file(
+                                        DataFileBuilder::default()
+                                            .partition_spec_id(0)
+                                            .content(DataContentType::Data)
+                                            .file_path(data_file_path.clone())
+                                            .file_format(DataFileFormat::Parquet)
+                                            .file_size_in_bytes(1024)
+                                            .record_count(n_values.len() as u64)
+                                            .partition(empty_partition.clone())
+                                            .key_metadata(None)
+                                            .build()
+                                            .unwrap(),
+                                    )
+                                    .build(),
+                            )
+                            .unwrap();
+
+                        // Track this new data file
+                        data_files.push(DataFileInfo {
+                            path: data_file_path,
+                            snapshot_id,
+                            sequence_number,
+                            n_values,
+                        });
+                    }
+
+                    // Remove deleted files from tracking
+                    data_files.retain(|df| !files_to_delete_set.contains(&df.path));
+
+                    let data_manifest = data_writer.write_manifest_file().await.unwrap();
+
+                    // Handle positional deletes if any
+                    let mut manifests = vec![data_manifest];
+
+                    if !positions_to_delete.is_empty() || !delete_files.is_empty() {
+                        let mut delete_writer = ManifestWriterBuilder::new(
+                            self.next_manifest_file(),
+                            Some(snapshot_id),
+                            None,
+                            current_schema.clone(),
+                            partition_spec.as_ref().clone(),
+                        )
+                        .build_v2_deletes();
+
+                        // Add existing delete files
+                        for (delete_path, del_snapshot_id, del_sequence_number, _) in &delete_files
+                        {
+                            let delete_count = delete_files
+                                .iter()
+                                .filter(|(p, _, _, _)| p == delete_path)
+                                .map(|(_, _, _, deletes)| deletes.len())
+                                .sum::<usize>();
+
+                            delete_writer
+                                .add_existing_entry(
+                                    ManifestEntry::builder()
+                                        .status(ManifestStatus::Existing)
+                                        .snapshot_id(*del_snapshot_id)
+                                        .sequence_number(*del_sequence_number)
+                                        .file_sequence_number(*del_sequence_number)
+                                        .data_file(
+                                            DataFileBuilder::default()
+                                                .partition_spec_id(0)
+                                                .content(DataContentType::PositionDeletes)
+                                                .file_path(delete_path.clone())
+                                                .file_format(DataFileFormat::Parquet)
+                                                .file_size_in_bytes(512)
+                                                .record_count(delete_count as u64)
+                                                .partition(empty_partition.clone())
+                                                .key_metadata(None)
+                                                .build()
+                                                .unwrap(),
+                                        )
+                                        .build(),
+                                )
+                                .unwrap();
+                        }
+
+                        // Add new positional delete files
+                        if !positions_to_delete.is_empty() {
+                            // Group deletes by file
+                            let mut deletes_by_file: HashMap<String, Vec<i64>> = HashMap::new();
+                            for (position, file_name) in positions_to_delete {
+                                let data_file_path =
+                                    format!("{}/data/{}", &self.table_location, file_name);
+                                deletes_by_file
+                                    .entry(data_file_path)
+                                    .or_default()
+                                    .push(*position);
+                            }
+
+                            for (data_file_path, positions) in deletes_by_file {
+                                let delete_file_path = format!(
+                                    "{}/data/delete-{}-{}.parquet",
+                                    &self.table_location,
+                                    snapshot_id,
+                                    Uuid::new_v4()
+                                );
+                                self.write_positional_delete_file(
+                                    &delete_file_path,
+                                    &data_file_path,
+                                    &positions,
+                                )
+                                .await;
+
+                                delete_writer
+                                    .add_entry(
+                                        ManifestEntry::builder()
+                                            .status(ManifestStatus::Added)
+                                            .data_file(
+                                                DataFileBuilder::default()
+                                                    .partition_spec_id(0)
+                                                    .content(DataContentType::PositionDeletes)
+                                                    .file_path(delete_file_path.clone())
+                                                    .file_format(DataFileFormat::Parquet)
+                                                    .file_size_in_bytes(512)
+                                                    .record_count(positions.len() as u64)
+                                                    .partition(empty_partition.clone())
+                                                    .key_metadata(None)
+                                                    .build()
+                                                    .unwrap(),
+                                            )
+                                            .build(),
+                                    )
+                                    .unwrap();
+
+                                // Track this delete file
+                                delete_files.push((
+                                    delete_file_path,
+                                    snapshot_id,
+                                    sequence_number,
+                                    positions
+                                        .into_iter()
+                                        .map(|pos| (data_file_path.clone(), pos))
+                                        .collect(),
+                                ));
+                            }
+                        }
+
+                        manifests.push(delete_writer.write_manifest_file().await.unwrap());
+                    }
+
+                    // Write manifest list
+                    let mut manifest_list_write = ManifestListWriter::v2(
+                        self.table
+                            .file_io()
+                            .new_output(format!(
+                                "{}/metadata/snap-{}-manifest-list.avro",
+                                self.table_location, snapshot_id
+                            ))
+                            .unwrap(),
+                        snapshot_id,
+                        parent_snapshot_id,
+                        sequence_number,
+                    );
+                    manifest_list_write
+                        .add_manifests(manifests.into_iter())
+                        .unwrap();
+
                     manifest_list_write.close().await.unwrap();
                 }
             }
@@ -1309,4 +1586,118 @@ async fn test_incremental_scan_builder_options() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_incremental_scan_with_deleted_files_errors() {
+    // This test verifies that incremental scans properly error out when entire data files
+    // are deleted (overwrite operation), since this is not yet supported.
+    //
+    // Test scenario:
+    // Snapshot 1: Add file-1.parquet with data
+    // Snapshot 2: Add file-2.parquet with data
+    // Snapshot 3: Overwrite - delete file-1.parquet entirely
+    // Snapshot 4: Add file-3.parquet with data
+    //
+    // Incremental scan from snapshot 1 to snapshot 3 should error because file-1
+    // was completely removed in the overwrite operation.
+
+    let fixture = IncrementalTestFixture::new(vec![
+        // Snapshot 1: Add file-1 with rows
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+            ],
+            "file-1.parquet".to_string(),
+        ),
+        // Snapshot 2: Add file-2 with rows
+        Operation::Add(
+            vec![(10, "x".to_string()), (20, "y".to_string())],
+            "file-2.parquet".to_string(),
+        ),
+        // Snapshot 3: Overwrite - delete file-1 entirely
+        Operation::Overwrite(
+            (vec![], "".to_string()),           // No new data to add
+            vec![],                             // No positional deletes
+            vec!["file-1.parquet".to_string()], // Delete file-1 completely
+        ),
+        // Snapshot 4: Add file-3 (to have more snapshots)
+        Operation::Add(vec![(100, "p".to_string())], "file-3.parquet".to_string()),
+    ])
+    .await;
+
+    // Test 1: Incremental scan from snapshot 1 to 3 should error when building the stream
+    // because file-1 was deleted entirely in snapshot 3
+    let scan = fixture
+        .table
+        .incremental_scan(1, 3)
+        .build()
+        .expect("Building the scan should succeed");
+
+    let stream_result = scan.to_arrow().await;
+
+    match stream_result {
+        Err(error) => {
+            assert_eq!(
+                error.message(),
+                "Processing deleted data files is not supported yet in incremental scans",
+                "Error message should indicate that deleted files are not supported. Got: {}",
+                error
+            );
+        }
+        Ok(_) => panic!(
+            "Expected error when building stream over a snapshot that deletes entire data files"
+        ),
+    }
+
+    // Test 2: Incremental scan from snapshot 2 to 4 should also error
+    // because it includes snapshot 3 which deletes a file
+    let scan = fixture
+        .table
+        .incremental_scan(2, 4)
+        .build()
+        .expect("Building the scan should succeed");
+
+    let stream_result = scan.to_arrow().await;
+
+    match stream_result {
+        Err(_) => {
+            // Expected error
+        }
+        Ok(_) => panic!("Expected error when scan range includes a snapshot that deletes files"),
+    }
+
+    // Test 3: Incremental scan from snapshot 1 to 2 should work fine
+    // (no files deleted)
+    let scan = fixture
+        .table
+        .incremental_scan(1, 2)
+        .build()
+        .expect("Building the scan should succeed");
+
+    let stream_result = scan.to_arrow().await;
+
+    assert!(
+        stream_result.is_ok(),
+        "Scan should succeed when no files are deleted. Error: {:?}",
+        stream_result.err()
+    );
+
+    // Test 4: Incremental scan from snapshot 3 to 4 should work
+    // (starting from after the deletion)
+    let scan = fixture
+        .table
+        .incremental_scan(3, 4)
+        .build()
+        .expect("Building the scan should succeed");
+
+    let stream_result = scan.to_arrow().await;
+
+    assert!(
+        stream_result.is_ok(),
+        "Scan should succeed when starting after the file deletion. Error: {:?}",
+        stream_result.err()
+    );
 }
