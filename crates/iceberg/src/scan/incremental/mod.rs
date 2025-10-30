@@ -522,11 +522,6 @@ impl IncrementalTableScan {
         mut delete_file_ctx_tx: Sender<DeleteFileContext>,
         manifest_entry_context: ManifestEntryContext,
     ) -> Result<()> {
-        // Skip processing this manifest entry if it has been marked as deleted.
-        if !manifest_entry_context.manifest_entry.is_alive() {
-            return Ok(());
-        }
-
         // Abort the plan if we encounter a manifest entry for a data file or equality
         // deletes.
         if manifest_entry_context.manifest_entry.content_type() == DataContentType::Data {
@@ -540,6 +535,14 @@ impl IncrementalTableScan {
             return Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 "Equality deletes are not supported yet in incremental scans",
+            ));
+        }
+
+        // Abort if it has been marked as deleted.
+        if !manifest_entry_context.manifest_entry.is_alive() {
+            return Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "Processing deleted delete files is not supported yet in incremental scans",
             ));
         }
 
