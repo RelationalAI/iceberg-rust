@@ -23,9 +23,9 @@
 <a href=#23 id=23 data-nosnippet>23</a>
 <a href=#24 id=24 data-nosnippet>24</a><span class="kw">use crate</span>::{Error, ErrorKind, <span class="prelude-ty">Result</span>};
 <a href=#25 id=25 data-nosnippet>25</a>
-<a href=#26 id=26 data-nosnippet>26</a><span class="attr">#[derive(Debug, Default)]
+<a href=#26 id=26 data-nosnippet>26</a><span class="attr">#[derive(Debug, Default, Clone)]
 <a href=#27 id=27 data-nosnippet>27</a></span><span class="kw">pub struct </span>DeleteVector {
-<a href=#28 id=28 data-nosnippet>28</a>    inner: RoaringTreemap,
+<a href=#28 id=28 data-nosnippet>28</a>    <span class="kw">pub </span>inner: RoaringTreemap,
 <a href=#29 id=29 data-nosnippet>29</a>}
 <a href=#30 id=30 data-nosnippet>30</a>
 <a href=#31 id=31 data-nosnippet>31</a><span class="kw">impl </span>DeleteVector {
