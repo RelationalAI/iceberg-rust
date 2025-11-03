@@ -474,13 +474,9 @@ impl IncrementalTableScan {
                 .delete_vectors()
                 .keys()
                 .filter(|path| {
-                    // Only include positional deletes for files that:
-                    // 1. Were not appended in this scan range, OR
-                    // 2. Were appended but also deleted (cancelled out)
-                    // Exclude positional deletes for files that were deleted
+                    // Only include positional deletes for files that were not appended in
+                    // this range and not deleted.
                     !appended_files.contains::<str>(path) && !deleted_files.contains::<str>(path)
-                        || (appended_files.contains::<str>(path)
-                            && deleted_files.contains::<str>(path))
                 })
                 .cloned()
                 .collect())

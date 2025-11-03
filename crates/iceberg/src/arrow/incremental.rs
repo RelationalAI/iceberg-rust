@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -23,10 +24,12 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
+use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
 use crate::arrow::record_batch_transformer::RecordBatchTransformer;
 use crate::arrow::{
-    ArrowReader, RESERVED_COL_NAME_FILE_PATH, RESERVED_FIELD_ID_FILE_PATH, StreamsInto,
+    ArrowReader, RESERVED_COL_NAME_FILE_PATH, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE_PATH,
+    RESERVED_FIELD_ID_POS, StreamsInto,
 };
 use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
@@ -36,6 +39,22 @@ use crate::scan::incremental::{
     AppendedFileScanTask, IncrementalFileScanTask, IncrementalFileScanTaskStream,
 };
 use crate::{Error, ErrorKind, Result};
+
+/// Default batch size for incremental delete operations.
+const DEFAULT_BATCH_SIZE: usize = 1024;
+
+/// Creates the schema for positional delete records containing the "pos" column.
+/// The pos field includes the reserved field ID as metadata.
+fn create_pos_delete_schema() -> Arc<ArrowSchema> {
+    let pos_field =
+        Field::new(RESERVED_COL_NAME_POS, DataType::UInt64, false).with_metadata(HashMap::from([
+            (
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                RESERVED_FIELD_ID_POS.to_string(),
+            ),
+        ]));
+    Arc::new(ArrowSchema::new(vec![pos_field]))
+}
 
 /// The type of incremental batch: appended data or deleted records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,13 +293,9 @@ fn process_incremental_delete_task(
     delete_vector: DeleteVector,
     batch_size: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
-    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-        "pos",
-        DataType::UInt64,
-        false,
-    )]));
+    let schema = create_pos_delete_schema();
 
-    let batch_size = batch_size.unwrap_or(1024);
+    let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
 
     let treemap = delete_vector.inner;
 
@@ -316,13 +331,9 @@ fn process_incremental_deleted_file_task(
     total_records: u64,
     batch_size: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
-    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-        "pos",
-        DataType::UInt64,
-        false,
-    )]));
+    let schema = create_pos_delete_schema();
 
-    let batch_size = batch_size.unwrap_or(1024);
+    let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
 
     // Create a stream of position values from 0 to total_records-1 (0-indexed)
     let stream = futures::stream::iter(0..total_records)

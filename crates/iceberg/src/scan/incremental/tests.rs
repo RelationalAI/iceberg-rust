@@ -1710,24 +1710,16 @@ async fn test_incremental_scan_positional_deletes_then_file_delete() {
 
     // Incremental scan from snapshot 1 to 4
     // Since data-1.parquet was both appended (snapshot 2) and deleted (snapshot 4)
-    // in the scan range, the system uses the POSITIONAL DELETES (from snapshot 3)
-    // rather than the deleted file task. This is because:
-    // - The file qualifies for cancellation (appended && deleted)
-    // - But it has positional deletes, so those are preferred over the deleted file task
-    // - The deleted file task is NOT emitted in this case
+    // in the scan range, BOTH appends and deletes are fully cancelled out.
+    // Even though there were positional deletes in snapshot 3, those are filtered out
+    // because the file qualifies for cancellation (appended && deleted).
     let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
     fixture
         .verify_incremental_scan(
             1,
             4,
-            vec![], // No appends (file was added and fully deleted)
-            vec![
-                // Positions from positional deletes (snapshot 3): 0, 1, 2
-                // The deleted file task (which would emit 0, 1, 2) is NOT emitted
-                (0, data_file_path.as_str()),
-                (1, data_file_path.as_str()),
-                (2, data_file_path.as_str()),
-            ],
+            vec![], // No appends (file was added and fully deleted, cancelled out)
+            vec![], // No deletes (fully cancelled since file was added and deleted in range)
         )
         .await;
 
@@ -1759,19 +1751,22 @@ async fn test_incremental_scan_positional_deletes_then_file_delete() {
 async fn test_incremental_scan_with_deleted_files_cancellation() {
     // This test verifies that incremental scans properly handle file deletions with cancellation logic:
     // - Files added and deleted in the same scan range should cancel out
-    // - Files deleted that weren't added in the scan range should produce Delete tasks with positions 1..N
+    // - Files deleted that weren't added in the scan range should produce Delete tasks
     //
     // Test scenario:
-    // Snapshot 1: Add file-1.parquet with data (3 records)
-    // Snapshot 2: Add file-2.parquet with data (2 records)
-    // Snapshot 3: Overwrite - delete file-1.parquet entirely
-    // Snapshot 4: Add file-3.parquet with data (1 record)
+    // Snapshot 1: Empty starting point
+    // Snapshot 2: Add file-1.parquet with data (3 records)
+    // Snapshot 3: Add file-2.parquet with data (2 records)
+    // Snapshot 4: Overwrite - delete file-1.parquet entirely
+    // Snapshot 5: Add file-3.parquet with data (1 record)
     //
-    // Incremental scan from snapshot 1 to 3: file-1 added and deleted, should cancel out (only file-2 remains)
-    // Incremental scan from snapshot 2 to 4: file-1 deleted but not added in range, produces Delete tasks
+    // Incremental scan from snapshot 1 to 4: file-1 added and deleted, should cancel out (only file-2 remains)
+    // Incremental scan from snapshot 3 to 5: file-1 deleted but not added in range, produces Delete tasks
 
     let fixture = IncrementalTestFixture::new(vec![
-        // Snapshot 1: Add file-1 with rows
+        // Snapshot 1: Empty starting point
+        Operation::Add(vec![], "empty.parquet".to_string()),
+        // Snapshot 2: Add file-1 with rows
         Operation::Add(
             vec![
                 (1, "a".to_string()),
@@ -1780,50 +1775,48 @@ async fn test_incremental_scan_with_deleted_files_cancellation() {
             ],
             "file-1.parquet".to_string(),
         ),
-        // Snapshot 2: Add file-2 with rows
+        // Snapshot 3: Add file-2 with rows
         Operation::Add(
             vec![(10, "x".to_string()), (20, "y".to_string())],
             "file-2.parquet".to_string(),
         ),
-        // Snapshot 3: Overwrite - delete file-1 entirely
+        // Snapshot 4: Overwrite - delete file-1 entirely
         Operation::Overwrite(
             (vec![], "".to_string()),           // No new data to add
             vec![],                             // No positional deletes
             vec!["file-1.parquet".to_string()], // Delete file-1 completely
         ),
-        // Snapshot 4: Add file-3 (to have more snapshots)
+        // Snapshot 5: Add file-3 (to have more snapshots)
         Operation::Add(vec![(100, "p".to_string())], "file-3.parquet".to_string()),
     ])
     .await;
 
-    // Test 1: Incremental scan from snapshot 1 to 3 should succeed
-    // file-1 was added in snapshot 1 and deleted in snapshot 3, so they cancel out
-    // Only file-2 (added in snapshot 2) should remain in the scan
-    let scan = fixture
-        .table
-        .incremental_scan(1, 3)
-        .build()
-        .expect("Building the scan should succeed");
-
-    let stream_result = scan.to_arrow().await;
-
-    assert!(
-        stream_result.is_ok(),
-        "Scan should succeed when file additions and deletions cancel out. Error: {:?}",
-        stream_result.err()
-    );
-
-    // Test 2: Incremental scan from snapshot 2 to 4 should now succeed
-    // file-1 was deleted in snapshot 3 but wasn't added in the scan range (added in snapshot 1)
-    // This produces a net Delete task with positions 0, 1, 2 (all records in file-1)
     let file_1_path = format!("{}/data/file-1.parquet", fixture.table_location);
+
+    // Test 1: Incremental scan from snapshot 1 to 4
+    // file-1 was added in snapshot 2 and deleted in snapshot 4
+    // Both appends and deletes for file-1 are fully cancelled out:
+    // - Appends: only file-2 records (10, x), (20, y)
+    // - Deletes: none (file-1 deletions cancelled since it was added in range)
     fixture
         .verify_incremental_scan(
-            2,
+            1,
             4,
-            vec![(100, "p")], // file-3 added in snapshot 4
+            vec![(10, "x"), (20, "y")], // Only file-2 (file-1 cancelled out)
+            vec![],                     // No deletes (file-1 fully cancelled)
+        )
+        .await;
+
+    // Test 2: Incremental scan from snapshot 3 to 5
+    // file-1 was deleted in snapshot 4 but wasn't added in the scan range (added in snapshot 2)
+    // This produces a net Delete task with positions 0, 1, 2 (all records in file-1)
+    fixture
+        .verify_incremental_scan(
+            3,
+            5,
+            vec![(100, "p")], // file-3 added in snapshot 5
             vec![
-                // file-1 deleted in snapshot 3 (all 3 positions: 0, 1, 2)
+                // file-1 deleted in snapshot 4 (all 3 positions: 0, 1, 2)
                 (0, file_1_path.as_str()),
                 (1, file_1_path.as_str()),
                 (2, file_1_path.as_str()),
@@ -1831,35 +1824,25 @@ async fn test_incremental_scan_with_deleted_files_cancellation() {
         )
         .await;
 
-    // Test 3: Incremental scan from snapshot 1 to 2 should work fine
-    // (no files deleted)
-    let scan = fixture
-        .table
-        .incremental_scan(1, 2)
-        .build()
-        .expect("Building the scan should succeed");
+    // Test 3: Incremental scan from snapshot 1 to 3
+    // Both file-1 and file-2 are added, no deletions
+    fixture
+        .verify_incremental_scan(
+            1,
+            3,
+            vec![(1, "a"), (2, "b"), (3, "c"), (10, "x"), (20, "y")],
+            vec![], // No deletes
+        )
+        .await;
 
-    let stream_result = scan.to_arrow().await;
-
-    assert!(
-        stream_result.is_ok(),
-        "Scan should succeed when no files are deleted. Error: {:?}",
-        stream_result.err()
-    );
-
-    // Test 4: Incremental scan from snapshot 3 to 4 should work
-    // (starting from after the deletion)
-    let scan = fixture
-        .table
-        .incremental_scan(3, 4)
-        .build()
-        .expect("Building the scan should succeed");
-
-    let stream_result = scan.to_arrow().await;
-
-    assert!(
-        stream_result.is_ok(),
-        "Scan should succeed when starting after the file deletion. Error: {:?}",
-        stream_result.err()
-    );
+    // Test 4: Incremental scan from snapshot 4 to 5
+    // Only file-3 is added, starting from after file-1 deletion
+    fixture
+        .verify_incremental_scan(
+            4,
+            5,
+            vec![(100, "p")], // file-3 added
+            vec![],           // No deletes
+        )
+        .await;
 }
