@@ -238,6 +238,7 @@ async fn process_incremental_append_task(
         &task.base.data_file_path,
         file_io,
         true,
+        None, // arrow_reader_options
     )
     .await?;
 
@@ -248,6 +249,7 @@ async fn process_incremental_append_task(
         &task.schema_ref(),
         record_batch_stream_builder.parquet_schema(),
         record_batch_stream_builder.schema(),
+        false, // use_fallback
     )?;
     record_batch_stream_builder = record_batch_stream_builder.with_projection(projection_mask);
 
