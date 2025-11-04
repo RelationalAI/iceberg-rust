@@ -1688,11 +1688,9 @@ async fn test_incremental_scan_positional_deletes_then_file_delete() {
             ],
             "data-1.parquet".to_string(),
         ),
-        // Snapshot 3: Delete all 3 records using positional deletes
+        // Snapshot 3: Delete one record using a positional delete
         Operation::Delete(vec![
             (0, "data-1.parquet".to_string()),
-            (1, "data-1.parquet".to_string()),
-            (2, "data-1.parquet".to_string()),
         ]),
         // Snapshot 4: Delete the file entirely
         Operation::Overwrite(
