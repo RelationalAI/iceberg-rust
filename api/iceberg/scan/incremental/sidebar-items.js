@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["IncrementalFileScanTask"],"struct":["AppendedFileScanTask","IncrementalTableScan","IncrementalTableScanBuilder"],"type":["IncrementalFileScanTaskStream"]};
+window.SIDEBAR_ITEMS = {"enum":["IncrementalFileScanTask"],"struct":["AppendedFileScanTask","BaseIncrementalFileScanTask","DeletedFileScanTask","IncrementalTableScan","IncrementalTableScanBuilder"],"type":["IncrementalFileScanTaskStream"]};
