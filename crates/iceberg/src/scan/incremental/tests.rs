@@ -1760,10 +1760,10 @@ async fn test_incremental_scan_with_deleted_files_cancellation() {
     // Snapshot 4: Overwrite - delete file-1.parquet entirely
     // Snapshot 5: Add file-3.parquet with data (1 record)
     //
-    // Incremental scan from snapshot 1 to 4: file-1 added and deleted, should cancel out (only file-2 remains)
-    // Incremental scan from snapshot 3 to 5: file-1 deleted but not added in range, produces Delete tasks
-    // Incremental scan from snapshot 1 to 3: file-1 and file-2 added before any deletion
-    // Incremental scan from snapshot 4 to 5: file-3 added after file-1 deletion occurred
+    // Incremental scan from snapshot 1 to 4: file-1 added and deleted, should cancel out (only file-2 remains).
+    // Incremental scan from snapshot 3 to 5: file-1 deleted but not added in range, produces Delete tasks.
+    // Incremental scan from snapshot 1 to 3: file-1 and file-2 added before any deletion.
+    // Incremental scan from snapshot 4 to 5: file-3 added after file-1 deletion occurred.
 
     let fixture = IncrementalTestFixture::new(vec![
         // Snapshot 1: Empty starting point
