@@ -33,7 +33,7 @@ use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
 use crate::spec::{DataContentType, ManifestStatus, Snapshot, SnapshotRef};
 use crate::table::Table;
-use crate::util::snapshot::ancestors_between;
+use crate::util::snapshot::{ancestors_between, root_snapshot_id};
 use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind, Result};
 
@@ -53,8 +53,10 @@ pub struct IncrementalTableScanBuilder<'a> {
     table: &'a Table,
     // Defaults to `None`, which means all columns.
     column_names: Option<Vec<String>>,
-    from_snapshot_id: i64,
-    to_snapshot_id: i64,
+    // None means scan from the first snapshot
+    from_snapshot_id: Option<i64>,
+    // None means scan to the current/last snapshot
+    to_snapshot_id: Option<i64>,
     batch_size: Option<usize>,
     concurrency_limit_data_files: usize,
     concurrency_limit_manifest_entries: usize,
@@ -62,7 +64,11 @@ pub struct IncrementalTableScanBuilder<'a> {
 }
 
 impl<'a> IncrementalTableScanBuilder<'a> {
-    pub(crate) fn new(table: &'a Table, from_snapshot_id: i64, to_snapshot_id: i64) -> Self {
+    pub(crate) fn new(
+        table: &'a Table,
+        from_snapshot_id: Option<i64>,
+        to_snapshot_id: Option<i64>,
+    ) -> Self {
         let num_cpus = available_parallelism().get();
         Self {
             table,
@@ -107,13 +113,13 @@ impl<'a> IncrementalTableScanBuilder<'a> {
 
     /// Set the `from_snapshot_id` for the incremental scan.
     pub fn from_snapshot_id(mut self, from_snapshot_id: i64) -> Self {
-        self.from_snapshot_id = from_snapshot_id;
+        self.from_snapshot_id = Some(from_snapshot_id);
         self
     }
 
     /// Set the `to_snapshot_id` for the incremental scan.
     pub fn to_snapshot_id(mut self, to_snapshot_id: i64) -> Self {
-        self.to_snapshot_id = to_snapshot_id;
+        self.to_snapshot_id = Some(to_snapshot_id);
         self
     }
 
@@ -137,26 +143,42 @@ impl<'a> IncrementalTableScanBuilder<'a> {
 
     /// Build the incremental table scan.
     pub fn build(self) -> Result<IncrementalTableScan> {
-        let snapshot_from: Arc<Snapshot> = self
-            .table
-            .metadata()
-            .snapshot_by_id(self.from_snapshot_id)
+        let metadata = self.table.metadata();
+
+        // Resolve from_snapshot_id: if None, use the root (oldest) snapshot
+        let from_snapshot_id = if let Some(id) = self.from_snapshot_id {
+            id
+        } else {
+            root_snapshot_id(&self.table.metadata_ref())
+                .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "No snapshots found in table"))?
+        };
+
+        // Resolve to_snapshot_id: if None, use the current (latest) snapshot
+        let to_snapshot_id = if let Some(id) = self.to_snapshot_id {
+            id
+        } else {
+            metadata
+                .current_snapshot()
+                .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "No current snapshot found"))?
+                .snapshot_id()
+        };
+
+        let snapshot_from: Arc<Snapshot> = metadata
+            .snapshot_by_id(from_snapshot_id)
             .ok_or_else(|| {
                 Error::new(
                     ErrorKind::DataInvalid,
-                    format!("Snapshot with id {} not found", self.from_snapshot_id),
+                    format!("Snapshot with id {} not found", from_snapshot_id),
                 )
             })?
             .clone();
 
-        let snapshot_to: Arc<Snapshot> = self
-            .table
-            .metadata()
-            .snapshot_by_id(self.to_snapshot_id)
+        let snapshot_to: Arc<Snapshot> = metadata
+            .snapshot_by_id(to_snapshot_id)
             .ok_or_else(|| {
                 Error::new(
                     ErrorKind::DataInvalid,
-                    format!("Snapshot with id {} not found", self.to_snapshot_id),
+                    format!("Snapshot with id {} not found", to_snapshot_id),
                 )
             })?
             .clone();

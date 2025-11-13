@@ -1195,7 +1195,7 @@ impl IncrementalTestFixture {
 
         let incremental_scan = self
             .table
-            .incremental_scan(from_snapshot_id, to_snapshot_id)
+            .incremental_scan(Some(from_snapshot_id), Some(to_snapshot_id))
             .build()
             .unwrap();
 
@@ -1638,9 +1638,10 @@ async fn test_incremental_scan_builder_options() {
     .await;
 
     // Test 1: Column projection - select only the "n" column
+    // Scan from root (None) to last (None)
     let scan = fixture
         .table
-        .incremental_scan(1, 4)
+        .incremental_scan(None, None)
         .select(vec!["n"])
         .build()
         .unwrap();
@@ -1672,9 +1673,10 @@ async fn test_incremental_scan_builder_options() {
     }
 
     // Test 2: Column projection - select only the "data" column
+    // Scan from root (None) to last (None)
     let scan = fixture
         .table
-        .incremental_scan(1, 4)
+        .incremental_scan(None, None)
         .select(vec!["data"])
         .build()
         .unwrap();
@@ -1702,9 +1704,10 @@ async fn test_incremental_scan_builder_options() {
     }
 
     // Test 3: Select both columns explicitly
+    // Scan from root (None) to last (None)
     let scan = fixture
         .table
-        .incremental_scan(1, 4)
+        .incremental_scan(None, None)
         .select(vec!["n", "data"])
         .build()
         .unwrap();
@@ -1729,9 +1732,10 @@ async fn test_incremental_scan_builder_options() {
     }
 
     // Test 4: Batch size configuration
+    // Scan from root (None) to snapshot 2
     let scan = fixture
         .table
-        .incremental_scan(1, 2)
+        .incremental_scan(None, Some(2))
         .with_batch_size(Some(3)) // Small batch size to test batching
         .build()
         .unwrap();
@@ -1753,9 +1757,10 @@ async fn test_incremental_scan_builder_options() {
     }
 
     // Test 5: Combining column projection and batch size
+    // Scan from root (None) to last (None)
     let scan = fixture
         .table
-        .incremental_scan(1, 4)
+        .incremental_scan(None, None)
         .select(vec!["n"])
         .with_batch_size(Some(4))
         .build()
@@ -1775,9 +1780,10 @@ async fn test_incremental_scan_builder_options() {
     }
 
     // Test 6: Verify actual data with column projection
+    // Scan from root (None) to snapshot 2
     let scan = fixture
         .table
-        .incremental_scan(1, 2)
+        .incremental_scan(None, Some(2))
         .select(vec!["n"])
         .build()
         .unwrap();
@@ -1813,7 +1819,11 @@ async fn test_incremental_scan_builder_options() {
     }
 
     // Test 7: Delete batches always have the same schema.
-    let scan = fixture.table.incremental_scan(2, 3).build().unwrap();
+    let scan = fixture
+        .table
+        .incremental_scan(Some(2), Some(3))
+        .build()
+        .unwrap();
 
     let stream = scan.to_arrow().await.unwrap();
     let batches: Vec<_> = stream.try_collect().await.unwrap();
