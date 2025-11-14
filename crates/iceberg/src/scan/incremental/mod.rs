@@ -33,7 +33,7 @@ use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
 use crate::spec::{DataContentType, ManifestStatus, Snapshot, SnapshotRef};
 use crate::table::Table;
-use crate::util::snapshot::{ancestors_between, root_snapshot_id};
+use crate::util::snapshot::ancestors_between;
 use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind, Result};
 
@@ -53,7 +53,7 @@ pub struct IncrementalTableScanBuilder<'a> {
     table: &'a Table,
     // Defaults to `None`, which means all columns.
     column_names: Option<Vec<String>>,
-    // None means scan from the first snapshot
+    // None means scan from the first snapshot (inclusive)
     from_snapshot_id: Option<i64>,
     // None means scan to the current/last snapshot
     to_snapshot_id: Option<i64>,
@@ -145,14 +145,6 @@ impl<'a> IncrementalTableScanBuilder<'a> {
     pub fn build(self) -> Result<IncrementalTableScan> {
         let metadata = self.table.metadata();
 
-        // Resolve from_snapshot_id: if None, use the root (oldest) snapshot
-        let from_snapshot_id = if let Some(id) = self.from_snapshot_id {
-            id
-        } else {
-            root_snapshot_id(&self.table.metadata_ref())
-                .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "No snapshots found in table"))?
-        };
-
         // Resolve to_snapshot_id: if None, use the current (latest) snapshot
         let to_snapshot_id = if let Some(id) = self.to_snapshot_id {
             id
@@ -162,16 +154,6 @@ impl<'a> IncrementalTableScanBuilder<'a> {
                 .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "No current snapshot found"))?
                 .snapshot_id()
         };
-
-        let snapshot_from: Arc<Snapshot> = metadata
-            .snapshot_by_id(from_snapshot_id)
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!("Snapshot with id {} not found", from_snapshot_id),
-                )
-            })?
-            .clone();
 
         let snapshot_to: Arc<Snapshot> = metadata
             .snapshot_by_id(to_snapshot_id)
@@ -183,12 +165,47 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             })?
             .clone();
 
+        // Determine oldest_snapshot_id for ancestors_between
+        // If from was None, include root snapshot by passing None to ancestors_between
+        // If from was Some(id), exclude that snapshot by passing Some(id)
+        let oldest_snapshot_id = if let Some(from_id) = self.from_snapshot_id {
+            // Validate the from snapshot exists
+            let _ = metadata.snapshot_by_id(from_id).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Snapshot with id {} not found", from_id),
+                )
+            })?;
+            Some(from_id)
+        } else {
+            None
+        };
+
         let snapshots = ancestors_between(
             &self.table.metadata_ref(),
             snapshot_to.snapshot_id(),
-            Some(snapshot_from.snapshot_id()),
+            oldest_snapshot_id,
         )
         .collect_vec();
+
+        // Get the from_snapshot for the plan context
+        // This is either the user-specified snapshot or the root snapshot
+        let from_snapshot_id = oldest_snapshot_id.unwrap_or_else(|| {
+            snapshots
+                .last()
+                .map(|s| s.snapshot_id())
+                .expect("snapshots should not be empty")
+        });
+
+        let snapshot_from: Arc<Snapshot> = metadata
+            .snapshot_by_id(from_snapshot_id)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Snapshot with id {} not found", from_snapshot_id),
+                )
+            })?
+            .clone();
 
         if !snapshots.is_empty() {
             assert_eq!(
