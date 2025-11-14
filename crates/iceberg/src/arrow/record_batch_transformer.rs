@@ -792,7 +792,8 @@ mod test {
         let projected_iceberg_field_ids = [1, 2, 3];
 
         let mut transformer =
-            RecordBatchTransformerBuilder::new(snapshot_schema, &projected_iceberg_field_ids).build();
+            RecordBatchTransformerBuilder::new(snapshot_schema, &projected_iceberg_field_ids)
+                .build();
 
         let file_schema = Arc::new(ArrowSchema::new(vec![
             simple_field("id", DataType::Int32, false, "1"),
