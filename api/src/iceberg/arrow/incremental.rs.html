@@ -26,7 +26,7 @@
 <a href=#26 id=26 data-nosnippet>26</a><span class="kw">use </span>futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 <a href=#27 id=27 data-nosnippet>27</a><span class="kw">use </span>parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 <a href=#28 id=28 data-nosnippet>28</a>
-<a href=#29 id=29 data-nosnippet>29</a><span class="kw">use </span><span class="kw">crate</span>::arrow::record_batch_transformer::RecordBatchTransformer;
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">use </span><span class="kw">crate</span>::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 <a href=#30 id=30 data-nosnippet>30</a><span class="kw">use </span><span class="kw">crate</span>::arrow::{
 <a href=#31 id=31 data-nosnippet>31</a>    ArrowReader, RESERVED_COL_NAME_FILE_PATH, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE_PATH,
 <a href=#32 id=32 data-nosnippet>32</a>    RESERVED_FIELD_ID_POS, StreamsInto,
@@ -257,7 +257,7 @@
 <a href=#257 id=257 data-nosnippet>257</a>    // that come back from the file, such as type promotion, default column insertion
 <a href=#258 id=258 data-nosnippet>258</a>    // and column re-ordering
 <a href=#259 id=259 data-nosnippet>259</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>record_batch_transformer =
-<a href=#260 id=260 data-nosnippet>260</a>        RecordBatchTransformer::build(task.schema_ref(), <span class="kw-2">&amp;</span>task.base.project_field_ids);
+<a href=#260 id=260 data-nosnippet>260</a>        RecordBatchTransformerBuilder::new(task.schema_ref(), <span class="kw-2">&amp;</span>task.base.project_field_ids).build();
 <a href=#261 id=261 data-nosnippet>261</a>
 <a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(batch_size) = batch_size {
 <a href=#263 id=263 data-nosnippet>263</a>        record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
