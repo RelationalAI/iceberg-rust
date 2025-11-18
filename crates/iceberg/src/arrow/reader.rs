@@ -191,7 +191,7 @@ where
 /// This pattern is used in both reader.rs and incremental.rs.
 pub(crate) async fn process_record_batch_stream<E, S, T>(
     stream: S,
-    mut tx: T,
+    tx: T,
     error_context: &str,
     concurrency_limit: usize,
 ) where
