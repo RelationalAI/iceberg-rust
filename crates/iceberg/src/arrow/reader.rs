@@ -207,7 +207,8 @@ pub(crate) async fn process_record_batch_stream<E, S, T>(
                     let mut tx = tx.clone();
                     let error_context = error_context.to_string();
                     async move {
-                        let batch_result = process_batch_blocking(batch_result, &error_context).await;
+                        let batch_result =
+                            process_batch_blocking(batch_result, &error_context).await;
                         let _ = tx.send(batch_result).await;
                     }
                 })
