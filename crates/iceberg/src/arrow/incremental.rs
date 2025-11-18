@@ -26,6 +26,7 @@ use futures::stream::select;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
+use crate::arrow::reader::process_record_batch_stream;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{
     ArrowReader, RESERVED_COL_NAME_FILE_PATH, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE_PATH,
@@ -33,7 +34,7 @@ use crate::arrow::{
 };
 use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
-use crate::runtime::{spawn, spawn_blocking};
+use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
     AppendedFileScanTask, IncrementalFileScanTask, IncrementalFileScanTaskStream,
@@ -119,30 +120,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
 
                                     match record_batch_stream {
                                         Ok(stream) => {
-                                            // Process batches with spawn_blocking for CPU-heavy operations
-                                            let _: Vec<_> = stream
-                                                .map(|batch_result| {
-                                                    let mut appends_tx = appends_tx.clone();
-                                                    async move {
-                                                        // Use spawn_blocking for CPU-intensive processing
-                                                        let batch_result = spawn_blocking(move || {
-                                                            batch_result.map_err(|e| {
-                                                                Error::new(
-                                                                    ErrorKind::Unexpected,
-                                                                    "failed to read appended record batch",
-                                                                )
-                                                                .with_source(e)
-                                                            })
-                                                        })
-                                                        .await;
-
-                                                        // Send result through channel
-                                                        let _ = appends_tx.send(batch_result).await;
-                                                    }
-                                                })
-                                                .buffer_unordered(concurrency_limit_data_files)
-                                                .collect()
-                                                .await;
+                                            process_record_batch_stream(
+                                                stream,
+                                                appends_tx,
+                                                "failed to read appended record batch",
+                                                concurrency_limit_data_files,
+                                            )
+                                            .await;
                                         }
                                         Err(e) => {
                                             let _ = appends_tx.send(Err(e)).await;
@@ -164,30 +148,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
 
                                     match record_batch_stream {
                                         Ok(stream) => {
-                                            // Process batches with spawn_blocking for CPU-heavy operations
-                                            let _: Vec<_> = stream
-                                                .map(|batch_result| {
-                                                    let mut deletes_tx = deletes_tx.clone();
-                                                    async move {
-                                                        // Use spawn_blocking for CPU-intensive processing
-                                                        let batch_result = spawn_blocking(move || {
-                                                            batch_result.map_err(|e| {
-                                                                Error::new(
-                                                                    ErrorKind::Unexpected,
-                                                                    "failed to read deleted file record batch",
-                                                                )
-                                                                .with_source(e)
-                                                            })
-                                                        })
-                                                        .await;
-
-                                                        // Send result through channel
-                                                        let _ = deletes_tx.send(batch_result).await;
-                                                    }
-                                                })
-                                                .buffer_unordered(concurrency_limit_data_files)
-                                                .collect()
-                                                .await;
+                                            process_record_batch_stream(
+                                                stream,
+                                                deletes_tx,
+                                                "failed to read deleted file record batch",
+                                                concurrency_limit_data_files,
+                                            )
+                                            .await;
                                         }
                                         Err(e) => {
                                             let _ = deletes_tx.send(Err(e)).await;
@@ -209,30 +176,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
 
                                     match record_batch_stream {
                                         Ok(stream) => {
-                                            // Process batches with spawn_blocking for CPU-heavy operations
-                                            let _: Vec<_> = stream
-                                                .map(|batch_result| {
-                                                    let mut deletes_tx = deletes_tx.clone();
-                                                    async move {
-                                                        // Use spawn_blocking for CPU-intensive processing
-                                                        let batch_result = spawn_blocking(move || {
-                                                            batch_result.map_err(|e| {
-                                                                Error::new(
-                                                                    ErrorKind::Unexpected,
-                                                                    "failed to read deleted record batch",
-                                                                )
-                                                                .with_source(e)
-                                                            })
-                                                        })
-                                                        .await;
-
-                                                        // Send result through channel
-                                                        let _ = deletes_tx.send(batch_result).await;
-                                                    }
-                                                })
-                                                .buffer_unordered(concurrency_limit_data_files)
-                                                .collect()
-                                                .await;
+                                            process_record_batch_stream(
+                                                stream,
+                                                deletes_tx,
+                                                "failed to read deleted record batch",
+                                                concurrency_limit_data_files,
+                                            )
+                                            .await;
                                         }
                                         Err(e) => {
                                             let _ = deletes_tx.send(Err(e)).await;
