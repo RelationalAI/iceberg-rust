@@ -245,7 +245,7 @@ impl ArrowReader {
                 .try_for_each_concurrent(concurrency_limit_data_files, |task| {
                     let file_io = file_io.clone();
                     let delete_file_loader = delete_file_loader.clone();
-                    let mut tx = tx.clone();
+                    let tx = tx.clone();
 
                     async move {
                         // Inner spawn for IO-heavy file operations (parallel file processing)

@@ -23,7 +23,7 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use futures::channel::mpsc::channel;
 use futures::stream::select;
-use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
 use crate::arrow::reader::process_record_batch_stream;
@@ -107,8 +107,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
             let _ = self
                 .try_for_each_concurrent(concurrency_limit_data_files, |task| {
                     let file_io = reader.file_io.clone();
-                    let mut appends_tx = appends_tx.clone();
-                    let mut deletes_tx = deletes_tx.clone();
+                    let appends_tx = appends_tx.clone();
+                    let deletes_tx = deletes_tx.clone();
                     async move {
                         match task {
                             IncrementalFileScanTask::Append(append_task) => {
