@@ -58,7 +58,7 @@ use crate::expr::visitors::page_index_evaluator::PageIndexEvaluator;
 use crate::expr::visitors::row_group_metrics_evaluator::RowGroupMetricsEvaluator;
 use crate::expr::{BoundPredicate, BoundReference};
 use crate::io::{FileIO, FileMetadata, FileRead};
-use crate::runtime::spawn;
+use crate::runtime::{spawn, spawn_blocking};
 use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
 use crate::spec::{Datum, NameMapping, NestedField, PrimitiveType, Schema, Type};
 use crate::utils::available_parallelism;
@@ -179,7 +179,7 @@ impl ArrowReader {
     /// - Multiple files are processed in parallel (IO-heavy operations)
     /// - Multiple batches are processed in parallel across all files (CPU-heavy operations)
     pub fn read(self, tasks: FileScanTaskStream) -> Result<ArrowRecordBatchStream> {
-        let (tx, rx) = channel(self.concurrency_limit_data_files);
+        let (tx, rx) = channel::<Result<RecordBatch>>(self.concurrency_limit_data_files);
 
         let file_io = self.file_io;
         let batch_size = self.batch_size;
@@ -211,23 +211,29 @@ impl ArrowReader {
 
                             match record_batch_stream {
                                 Ok(stream) => {
-                                    // Process batches with parallelism for CPU-heavy operations
-                                    // Each batch gets its own spawned task, enabling true parallel processing
+                                    // Process batches with spawn_blocking for CPU-heavy operations
+                                    // Each batch gets its own blocking task for true parallelism
                                     let _: Vec<_> = stream
                                         .map(|batch_result| {
                                             let mut tx = tx.clone();
-                                            spawn(async move {
-                                                // CPU-heavy batch processing happens here in parallel
-                                                let result = batch_result.map_err(|e| {
-                                                    Error::new(
-                                                        ErrorKind::Unexpected,
-                                                        "failed to read record batch",
-                                                    )
-                                                    .with_source(e)
-                                                });
+                                            async move {
+                                                // Use spawn_blocking for CPU-intensive processing
+                                                // This prevents blocking the async executor
+                                                let batch_result = spawn_blocking(move || {
+                                                    // CPU-heavy work happens here on blocking thread pool
+                                                    batch_result.map_err(|e| {
+                                                        Error::new(
+                                                            ErrorKind::Unexpected,
+                                                            "failed to read record batch",
+                                                        )
+                                                        .with_source(e)
+                                                    })
+                                                })
+                                                .await;
 
-                                                let _ = tx.send(result).await;
-                                            })
+                                                // Send result through channel
+                                                let _ = tx.send(batch_result).await;
+                                            }
                                         })
                                         .buffer_unordered(concurrency_limit_data_files)
                                         .collect()
