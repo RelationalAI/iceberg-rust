@@ -29,16 +29,16 @@ use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use crate::arrow::reader::process_record_batch_stream;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{
-    ArrowReader, StreamsInto, RESERVED_COL_NAME_FILE_PATH, RESERVED_COL_NAME_POS,
-    RESERVED_FIELD_ID_FILE_PATH, RESERVED_FIELD_ID_POS,
+    ArrowReader, RESERVED_COL_NAME_FILE_PATH, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE_PATH,
+    RESERVED_FIELD_ID_POS, StreamsInto,
 };
 use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
 use crate::runtime::spawn;
+use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
     AppendedFileScanTask, IncrementalFileScanTask, IncrementalFileScanTaskStream,
 };
-use crate::scan::ArrowRecordBatchStream;
 use crate::{Error, ErrorKind, Result};
 
 /// Default batch size for incremental delete operations.
