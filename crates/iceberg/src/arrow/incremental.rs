@@ -29,16 +29,16 @@ use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use crate::arrow::reader::process_record_batch_stream;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{
-    ArrowReader, RESERVED_COL_NAME_FILE_PATH, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE_PATH,
-    RESERVED_FIELD_ID_POS, StreamsInto,
+    ArrowReader, StreamsInto, RESERVED_COL_NAME_FILE_PATH, RESERVED_COL_NAME_POS,
+    RESERVED_FIELD_ID_FILE_PATH, RESERVED_FIELD_ID_POS,
 };
 use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
 use crate::runtime::spawn;
-use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
     AppendedFileScanTask, IncrementalFileScanTask, IncrementalFileScanTaskStream,
 };
+use crate::scan::ArrowRecordBatchStream;
 use crate::{Error, ErrorKind, Result};
 
 /// Default batch size for incremental delete operations.
@@ -95,8 +95,10 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
     /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns two
     /// separate streams of Arrow `RecordBatch`es containing appended data and deleted records.
     fn stream(self, reader: ArrowReader) -> Result<UnzippedIncrementalBatchRecordStream> {
-        let (appends_tx, appends_rx) = channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
-        let (deletes_tx, deletes_rx) = channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
+        let (appends_tx, appends_rx) =
+            channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
+        let (deletes_tx, deletes_rx) =
+            channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
 
         let batch_size = reader.batch_size;
         let concurrency_limit_data_files = reader.concurrency_limit_data_files;
@@ -138,7 +140,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                             IncrementalFileScanTask::Delete(deleted_file_task) => {
                                 spawn(async move {
                                     let file_path = deleted_file_task.data_file_path().to_string();
-                                    let total_records = deleted_file_task.base.record_count.unwrap_or(0);
+                                    let total_records =
+                                        deleted_file_task.base.record_count.unwrap_or(0);
 
                                     let record_batch_stream = process_incremental_deleted_file_task(
                                         file_path,
