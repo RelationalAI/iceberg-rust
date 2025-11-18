@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 use crate::TableIdent;
 use crate::io::{FileIO, OutputFile};
+use crate::metadata_columns::RESERVED_COL_NAME_FILE;
 use crate::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, ManifestEntry, ManifestListWriter,
     ManifestStatus, ManifestWriterBuilder, PartitionSpec, SchemaRef, Struct, TableMetadata,
@@ -2457,9 +2458,8 @@ async fn test_incremental_scan_includes_root_when_from_is_none() {
 }
 
 #[tokio::test]
-async fn test_incremental_scan_with_file_path_column() {
+async fn test_incremental_scan_with_file_column() {
     // Test that the _file metadata column works correctly in incremental scans
-    use crate::metadata_columns::RESERVED_COL_NAME_FILE;
 
     let fixture = IncrementalTestFixture::new(vec![
         Operation::Add(vec![], "empty.parquet".to_string()),
@@ -2479,7 +2479,7 @@ async fn test_incremental_scan_with_file_path_column() {
         .table
         .incremental_scan(Some(1), Some(3))
         .select(vec!["n", "data"])
-        .with_file_path_column()
+        .with_file_column()
         .build()
         .unwrap();
 

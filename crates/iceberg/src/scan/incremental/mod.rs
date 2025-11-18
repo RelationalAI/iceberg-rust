@@ -28,7 +28,9 @@ use crate::arrow::{
 };
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
-use crate::metadata_columns::{get_metadata_field_id, is_metadata_column_name};
+use crate::metadata_columns::{
+    RESERVED_COL_NAME_FILE, get_metadata_field_id, is_metadata_column_name,
+};
 use crate::scan::DeleteFileContext;
 use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
@@ -126,14 +128,12 @@ impl<'a> IncrementalTableScanBuilder<'a> {
     /// let scan = table
     ///     .incremental_scan(None, None)
     ///     .select(["id", "name"])
-    ///     .with_file_path_column()
+    ///     .with_file_column()
     ///     .build()?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_file_path_column(mut self) -> Self {
-        use crate::metadata_columns::RESERVED_COL_NAME_FILE;
-
+    pub fn with_file_column(mut self) -> Self {
         let mut columns = self.column_names.unwrap_or_else(|| {
             // No explicit selection - get all column names from schema
             self.table
