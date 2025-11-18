@@ -120,20 +120,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                     )
                                     .await;
 
-                                    match record_batch_stream {
-                                        Ok(stream) => {
-                                            process_record_batch_stream(
-                                                stream,
-                                                appends_tx,
-                                                "failed to read appended record batch",
-                                                concurrency_limit_data_files,
-                                            )
-                                            .await;
-                                        }
-                                        Err(e) => {
-                                            let _ = appends_tx.send(Err(e)).await;
-                                        }
-                                    }
+                                    process_record_batch_stream(
+                                        record_batch_stream,
+                                        appends_tx,
+                                        "failed to read appended record batch",
+                                        concurrency_limit_data_files,
+                                    )
+                                    .await;
                                 })
                                 .await
                             }
@@ -149,20 +142,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         batch_size,
                                     );
 
-                                    match record_batch_stream {
-                                        Ok(stream) => {
-                                            process_record_batch_stream(
-                                                stream,
-                                                deletes_tx,
-                                                "failed to read deleted file record batch",
-                                                concurrency_limit_data_files,
-                                            )
-                                            .await;
-                                        }
-                                        Err(e) => {
-                                            let _ = deletes_tx.send(Err(e)).await;
-                                        }
-                                    }
+                                    process_record_batch_stream(
+                                        record_batch_stream,
+                                        deletes_tx,
+                                        "failed to read deleted file record batch",
+                                        concurrency_limit_data_files,
+                                    )
+                                    .await;
                                 })
                                 .await
                             }
@@ -177,20 +163,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         batch_size,
                                     );
 
-                                    match record_batch_stream {
-                                        Ok(stream) => {
-                                            process_record_batch_stream(
-                                                stream,
-                                                deletes_tx,
-                                                "failed to read deleted record batch",
-                                                concurrency_limit_data_files,
-                                            )
-                                            .await;
-                                        }
-                                        Err(e) => {
-                                            let _ = deletes_tx.send(Err(e)).await;
-                                        }
-                                    }
+                                    process_record_batch_stream(
+                                        record_batch_stream,
+                                        deletes_tx,
+                                        "failed to read deleted record batch",
+                                        concurrency_limit_data_files,
+                                    )
+                                    .await;
                                 })
                                 .await
                             }

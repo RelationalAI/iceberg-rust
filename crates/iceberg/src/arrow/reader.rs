@@ -188,10 +188,11 @@ where
 }
 
 /// Helper function to process a stream of record batches with spawn_blocking and send through a channel.
+/// Handles the Result<Stream> pattern, so callers don't need to match on the stream result.
 /// This pattern is used in both reader.rs and incremental.rs.
 pub(crate) async fn process_record_batch_stream<E, S, T>(
-    stream: S,
-    tx: T,
+    record_batch_stream: Result<S>,
+    mut tx: T,
     error_context: &str,
     concurrency_limit: usize,
 ) where
@@ -199,18 +200,25 @@ pub(crate) async fn process_record_batch_stream<E, S, T>(
     S: Stream<Item = std::result::Result<RecordBatch, E>> + Send + 'static,
     T: SinkExt<Result<RecordBatch>> + Unpin + Clone + Send + 'static,
 {
-    let _: Vec<_> = stream
-        .map(|batch_result| {
-            let mut tx = tx.clone();
-            let error_context = error_context.to_string();
-            async move {
-                let batch_result = process_batch_blocking(batch_result, &error_context).await;
-                let _ = tx.send(batch_result).await;
-            }
-        })
-        .buffer_unordered(concurrency_limit)
-        .collect()
-        .await;
+    match record_batch_stream {
+        Ok(stream) => {
+            let _: Vec<_> = stream
+                .map(|batch_result| {
+                    let mut tx = tx.clone();
+                    let error_context = error_context.to_string();
+                    async move {
+                        let batch_result = process_batch_blocking(batch_result, &error_context).await;
+                        let _ = tx.send(batch_result).await;
+                    }
+                })
+                .buffer_unordered(concurrency_limit)
+                .collect()
+                .await;
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e)).await;
+        }
+    }
 }
 
 impl ArrowReader {
@@ -251,21 +259,14 @@ impl ArrowReader {
                             )
                             .await;
 
-                            match record_batch_stream {
-                                Ok(stream) => {
-                                    // Process batches with spawn_blocking for CPU-heavy operations
-                                    process_record_batch_stream(
-                                        stream,
-                                        tx,
-                                        "failed to read record batch",
-                                        concurrency_limit_data_files,
-                                    )
-                                    .await;
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(Err(e)).await;
-                                }
-                            }
+                            // Process batches with spawn_blocking for CPU-heavy operations
+                            process_record_batch_stream(
+                                record_batch_stream,
+                                tx,
+                                "failed to read record batch",
+                                concurrency_limit_data_files,
+                            )
+                            .await;
                         })
                         .await;
 
