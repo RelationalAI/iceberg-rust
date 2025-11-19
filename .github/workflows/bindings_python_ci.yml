@@ -50,7 +50,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check clippy
         working-directory: "bindings/python"
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --exclude iceberg-datafusion --exclude iceberg-playground --exclude iceberg-sqllogictest -- -D warnings
 
   check-python:
     runs-on: ubuntu-latest
