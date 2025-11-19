@@ -127,19 +127,11 @@ pub fn file_path_field() -> &'static Arc<Field> {
 pub fn get_metadata_field(field_id: i32) -> Result<Arc<Field>> {
     match field_id {
         RESERVED_FIELD_ID_FILE => Ok(Arc::clone(file_field())),
-        _ if is_metadata_field(field_id) => {
-            // Future metadata fields can be added here
-            Err(Error::new(
-                ErrorKind::Unexpected,
-                format!(
-                    "Metadata field ID {} recognized but field definition not implemented",
-                    field_id
-                ),
-            ))
-        }
+        RESERVED_FIELD_ID_FILE_PATH => Ok(Arc::clone(file_path_field())),
+        RESERVED_FIELD_ID_POS => Ok(Arc::clone(pos_field())),
         _ => Err(Error::new(
             ErrorKind::Unexpected,
-            format!("Field ID {} is not a metadata field", field_id),
+            format!("Field ID {} is not a (supported) metadata field", field_id),
         )),
     }
 }
