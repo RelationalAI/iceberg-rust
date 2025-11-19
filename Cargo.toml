@@ -16,14 +16,18 @@
 # under the License.
 
 [workspace]
-exclude = ["bindings/python", "crates/integrations/datafusion"]
+exclude = [
+  "bindings/python",
+  "crates/integrations/datafusion",
+  "crates/integrations/playground",
+  "crates/sqllogictest",
+]
 members = [
   "crates/catalog/*",
   "crates/examples",
   "crates/iceberg",
   "crates/integration_tests",
   "crates/integrations/*",
-  "crates/sqllogictest",
   "crates/test_utils",
 ]
 resolver = "2"
