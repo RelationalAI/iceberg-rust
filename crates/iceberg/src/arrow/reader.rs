@@ -180,7 +180,7 @@ pub(crate) async fn process_record_batch_stream<E, S, T>(
 {
     match record_batch_stream {
         Ok(stream) => {
-            let _: Vec<_> = stream
+            stream
                 .map(|batch_result| {
                     let mut tx = tx.clone();
                     let error_context = error_context.to_string();
@@ -191,7 +191,7 @@ pub(crate) async fn process_record_batch_stream<E, S, T>(
                     }
                 })
                 .buffer_unordered(concurrency_limit)
-                .collect()
+                .for_each(|_| async {})
                 .await;
         }
         Err(e) => {
