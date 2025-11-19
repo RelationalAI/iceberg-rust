@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RESERVED_COL_NAME_FILE","RESERVED_COL_NAME_FILE_PATH","RESERVED_COL_NAME_POS","RESERVED_FIELD_ID_FILE","RESERVED_FIELD_ID_FILE_PATH","RESERVED_FIELD_ID_POS"],"fn":["file_field","file_path_field","get_metadata_field","get_metadata_field_id","is_metadata_column_name","is_metadata_field","pos_field"]};
