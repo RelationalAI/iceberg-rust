@@ -346,7 +346,6 @@ impl ParquetWriter {
         Ok(data_files)
     }
 
-
     /// `ParquetMetadata` to data file builder
     pub(crate) fn parquet_to_data_file_builder(
         schema: SchemaRef,

@@ -260,7 +260,10 @@ impl<'a> PageIndexEvaluator<'a> {
                         idx.max_value(page_idx).copied().map(|val| {
                             Datum::new(field_type.clone(), PrimitiveLiteral::Boolean(val))
                         }),
-                        PageNullCount::from_row_and_null_counts(row_count, idx.null_count(page_idx)),
+                        PageNullCount::from_row_and_null_counts(
+                            row_count,
+                            idx.null_count(page_idx),
+                        ),
                     )
                 })
                 .collect(),
@@ -268,11 +271,16 @@ impl<'a> PageIndexEvaluator<'a> {
                 .zip(row_counts.iter())
                 .map(|(page_idx, &row_count)| {
                     predicate(
-                        idx.min_value(page_idx).copied()
+                        idx.min_value(page_idx)
+                            .copied()
                             .map(|val| Datum::new(field_type.clone(), PrimitiveLiteral::Int(val))),
-                        idx.max_value(page_idx).copied()
+                        idx.max_value(page_idx)
+                            .copied()
                             .map(|val| Datum::new(field_type.clone(), PrimitiveLiteral::Int(val))),
-                        PageNullCount::from_row_and_null_counts(row_count, idx.null_count(page_idx)),
+                        PageNullCount::from_row_and_null_counts(
+                            row_count,
+                            idx.null_count(page_idx),
+                        ),
                     )
                 })
                 .collect(),
@@ -280,11 +288,16 @@ impl<'a> PageIndexEvaluator<'a> {
                 .zip(row_counts.iter())
                 .map(|(page_idx, &row_count)| {
                     predicate(
-                        idx.min_value(page_idx).copied()
+                        idx.min_value(page_idx)
+                            .copied()
                             .map(|val| Datum::new(field_type.clone(), PrimitiveLiteral::Long(val))),
-                        idx.max_value(page_idx).copied()
+                        idx.max_value(page_idx)
+                            .copied()
                             .map(|val| Datum::new(field_type.clone(), PrimitiveLiteral::Long(val))),
-                        PageNullCount::from_row_and_null_counts(row_count, idx.null_count(page_idx)),
+                        PageNullCount::from_row_and_null_counts(
+                            row_count,
+                            idx.null_count(page_idx),
+                        ),
                     )
                 })
                 .collect(),
@@ -304,7 +317,10 @@ impl<'a> PageIndexEvaluator<'a> {
                                 PrimitiveLiteral::Float(OrderedFloat::from(val)),
                             )
                         }),
-                        PageNullCount::from_row_and_null_counts(row_count, idx.null_count(page_idx)),
+                        PageNullCount::from_row_and_null_counts(
+                            row_count,
+                            idx.null_count(page_idx),
+                        ),
                     )
                 })
                 .collect(),
@@ -324,7 +340,10 @@ impl<'a> PageIndexEvaluator<'a> {
                                 PrimitiveLiteral::Double(OrderedFloat::from(val)),
                             )
                         }),
-                        PageNullCount::from_row_and_null_counts(row_count, idx.null_count(page_idx)),
+                        PageNullCount::from_row_and_null_counts(
+                            row_count,
+                            idx.null_count(page_idx),
+                        ),
                     )
                 })
                 .collect(),
@@ -335,20 +354,19 @@ impl<'a> PageIndexEvaluator<'a> {
                         idx.min_value(page_idx).map(|val| {
                             Datum::new(
                                 field_type.clone(),
-                                PrimitiveLiteral::String(
-                                    String::from_utf8(val.to_vec()).unwrap(),
-                                ),
+                                PrimitiveLiteral::String(String::from_utf8(val.to_vec()).unwrap()),
                             )
                         }),
                         idx.max_value(page_idx).map(|val| {
                             Datum::new(
                                 field_type.clone(),
-                                PrimitiveLiteral::String(
-                                    String::from_utf8(val.to_vec()).unwrap(),
-                                ),
+                                PrimitiveLiteral::String(String::from_utf8(val.to_vec()).unwrap()),
                             )
                         }),
-                        PageNullCount::from_row_and_null_counts(row_count, idx.null_count(page_idx)),
+                        PageNullCount::from_row_and_null_counts(
+                            row_count,
+                            idx.null_count(page_idx),
+                        ),
                     )
                 })
                 .collect(),
@@ -1302,8 +1320,18 @@ mod tests {
     fn create_page_index() -> Result<(Vec<Index>, Vec<OffsetIndexMetaData>)> {
         let mut idx_float_builder = ColumnIndexBuilder::new(ParquetPhysicalType::FLOAT);
         idx_float_builder.append(true, vec![], vec![], 1024);
-        idx_float_builder.append(false, 0.0f32.to_le_bytes().to_vec(), 10.0f32.to_le_bytes().to_vec(), 0);
-        idx_float_builder.append(false, 10.0f32.to_le_bytes().to_vec(), 20.0f32.to_le_bytes().to_vec(), 1);
+        idx_float_builder.append(
+            false,
+            0.0f32.to_le_bytes().to_vec(),
+            10.0f32.to_le_bytes().to_vec(),
+            0,
+        );
+        idx_float_builder.append(
+            false,
+            10.0f32.to_le_bytes().to_vec(),
+            20.0f32.to_le_bytes().to_vec(),
+            1,
+        );
         idx_float_builder.append(true, vec![], vec![], -1);
         let idx_float = idx_float_builder.build().unwrap();
 
@@ -1316,29 +1344,68 @@ mod tests {
         let idx_string = idx_string_builder.build().unwrap();
 
         let page_locs_float = vec![
-            PageLocation { offset: 0, compressed_page_size: 1024, first_row_index: 0 },
-            PageLocation { offset: 1024, compressed_page_size: 1024, first_row_index: 1024 },
-            PageLocation { offset: 2048, compressed_page_size: 1024, first_row_index: 2048 },
-            PageLocation { offset: 3072, compressed_page_size: 1024, first_row_index: 3072 },
+            PageLocation {
+                offset: 0,
+                compressed_page_size: 1024,
+                first_row_index: 0,
+            },
+            PageLocation {
+                offset: 1024,
+                compressed_page_size: 1024,
+                first_row_index: 1024,
+            },
+            PageLocation {
+                offset: 2048,
+                compressed_page_size: 1024,
+                first_row_index: 2048,
+            },
+            PageLocation {
+                offset: 3072,
+                compressed_page_size: 1024,
+                first_row_index: 3072,
+            },
         ];
 
         let page_locs_string = vec![
-            PageLocation { offset: 0, compressed_page_size: 512, first_row_index: 0 },
-            PageLocation { offset: 512, compressed_page_size: 512, first_row_index: 512 },
-            PageLocation { offset: 1024, compressed_page_size: 2976, first_row_index: 1024 },
-            PageLocation { offset: 4000, compressed_page_size: 48, first_row_index: 4000 },
-            PageLocation { offset: 4048, compressed_page_size: 48, first_row_index: 4048 },
+            PageLocation {
+                offset: 0,
+                compressed_page_size: 512,
+                first_row_index: 0,
+            },
+            PageLocation {
+                offset: 512,
+                compressed_page_size: 512,
+                first_row_index: 512,
+            },
+            PageLocation {
+                offset: 1024,
+                compressed_page_size: 2976,
+                first_row_index: 1024,
+            },
+            PageLocation {
+                offset: 4000,
+                compressed_page_size: 48,
+                first_row_index: 4000,
+            },
+            PageLocation {
+                offset: 4048,
+                compressed_page_size: 48,
+                first_row_index: 4048,
+            },
         ];
 
-        Ok((vec![idx_float, idx_string], vec![
-            OffsetIndexMetaData {
-                page_locations: page_locs_float,
-                unencoded_byte_array_data_bytes: None,
-            },
-            OffsetIndexMetaData {
-                page_locations: page_locs_string,
-                unencoded_byte_array_data_bytes: None,
-            },
-        ]))
+        Ok((
+            vec![idx_float, idx_string],
+            vec![
+                OffsetIndexMetaData {
+                    page_locations: page_locs_float,
+                    unencoded_byte_array_data_bytes: None,
+                },
+                OffsetIndexMetaData {
+                    page_locations: page_locs_string,
+                    unencoded_byte_array_data_bytes: None,
+                },
+            ],
+        ))
     }
 }
