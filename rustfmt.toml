@@ -24,3 +24,9 @@ imports_granularity = "Module"
 overflow_delimited_expr = true
 trailing_comma = "Vertical"
 where_single_line = true
+
+ignore = [
+    "crates/integrations/datafusion",
+    "crates/integrations/playground",
+    "crates/sqllogictest",
+]
