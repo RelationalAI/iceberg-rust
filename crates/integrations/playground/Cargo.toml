@@ -17,14 +17,14 @@
 
 [package]
 description = "Apache iceberg client"
-edition.workspace = true
-homepage.workspace = true
-license.workspace = true
+edition = "2024"
+homepage = "https://rust.iceberg.apache.org/"
+license = "Apache-2.0"
 name = "iceberg-playground"
 readme = "README.md"
-repository.workspace = true
-rust-version.workspace = true
-version.workspace = true
+repository = "https://github.com/apache/iceberg-rust"
+rust-version = "1.87"
+version = "0.7.0"
 
 [dependencies]
 anyhow = { workspace = true }

@@ -16,17 +16,17 @@
 # under the License.
 
 [package]
-edition = { workspace = true }
-homepage = { workspace = true }
+edition = "2024"
+homepage = "https://rust.iceberg.apache.org/"
 name = "iceberg-datafusion"
-rust-version = { workspace = true }
-version = { workspace = true }
+rust-version = "1.87"
+version = "0.7.0"
 
 categories = ["database"]
 description = "Apache Iceberg DataFusion Integration"
 keywords = ["iceberg", "integrations", "datafusion"]
-license = { workspace = true }
-repository = { workspace = true }
+license = "Apache-2.0"
+repository = "https://github.com/apache/iceberg-rust"
 
 [dependencies]
 anyhow = { workspace = true }
