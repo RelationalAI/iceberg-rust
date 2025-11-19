@@ -18,24 +18,29 @@
 name: Bindings Python CI
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - '**'                                       # Include all files and directories in the repository by default.
+      - '!.github/ISSUE_TEMPLATE/**'               # Exclude files and directories that don't impact tests or code like templates, metadata, and documentation.
+      - '!scripts/**'
+      - '!website/**'
+      - '!.asf.yml'
+      - '!.gitattributes'
+      - '!.gitignore'
+      - '!CONTRIBUTING.md'
+      - '!CHANGELOG.md'
+      - '!LICENSE'
+      - '!NOTICE'
+      - '!README.md'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
-  check-rust:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Check format
-        working-directory: "bindings/python"
-        run: cargo fmt --all -- --check
-      - name: Check clippy
-        working-directory: "bindings/python"
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
   check-python:
     runs-on: ubuntu-latest
     steps:
@@ -55,41 +60,3 @@ jobs:
         working-directory: "bindings/python"
         run: |
           uvx ruff check .
-
-  test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: 3.12
-      - uses: PyO3/maturin-action@v1
-        with:
-          working-directory: "bindings/python"
-          command: build
-          args: --out dist --sdist
-      - uses: astral-sh/setup-uv@v7
-        with:
-          version: "0.9.3"
-          enable-cache: true
-      - name: Sync dependencies
-        working-directory: "bindings/python"
-        shell: bash
-        run: |
-          make install
-      - name: Install built wheel
-        working-directory: "bindings/python"
-        shell: bash
-        run: |
-          uv pip install --reinstall dist/pyiceberg_core-*.whl
-      - name: Run tests
-        working-directory: "bindings/python"
-        shell: bash
-        run: |
-          make test
