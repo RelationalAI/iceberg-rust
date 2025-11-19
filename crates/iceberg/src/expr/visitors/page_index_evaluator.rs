@@ -795,7 +795,6 @@ mod tests {
 
     use parquet::arrow::arrow_reader::RowSelector;
     use parquet::basic::{LogicalType as ParquetLogicalType, Type as ParquetPhysicalType};
-    use parquet::data_type::ByteArray;
     use parquet::file::metadata::{ColumnChunkMetaData, ColumnIndexBuilder, RowGroupMetaData};
     use parquet::file::page_index::column_index::ColumnIndexMetaData as Index;
     use parquet::file::page_index::offset_index::{OffsetIndexMetaData, PageLocation};
