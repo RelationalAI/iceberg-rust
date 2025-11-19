@@ -58,7 +58,7 @@ use crate::expr::visitors::row_group_metrics_evaluator::RowGroupMetricsEvaluator
 use crate::expr::{BoundPredicate, BoundReference};
 use crate::io::{FileIO, FileMetadata, FileRead};
 use crate::metadata_columns::{RESERVED_FIELD_ID_FILE, is_metadata_field};
-use crate::runtime::{spawn, spawn_blocking};
+use crate::runtime::spawn;
 use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
 use crate::spec::{Datum, NameMapping, NestedField, PrimitiveLiteral, PrimitiveType, Schema, Type};
 use crate::utils::available_parallelism;
@@ -149,50 +149,25 @@ pub trait StreamsInto<R, S = ArrowRecordBatchStream> {
     fn stream(self, reader: R) -> Result<S>;
 }
 
-/// Helper function to process a batch with spawn_blocking for CPU-heavy work.
-/// Generic over error type to work with both ArrowError and our Error type.
-async fn process_batch_blocking<E>(
-    batch_result: std::result::Result<RecordBatch, E>,
-    error_context: &str,
-) -> Result<RecordBatch>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    let error_context = error_context.to_string();
-    spawn_blocking(move || {
-        batch_result.map_err(|e| Error::new(ErrorKind::Unexpected, error_context).with_source(e))
-    })
-    .await
-}
-
-/// Helper function to process a stream of record batches with spawn_blocking and send through a channel.
+/// Helper function to process a stream of record batches and send through a channel.
 /// Handles the Result<Stream> pattern, so callers don't need to match on the stream result.
 /// This pattern is used in both reader.rs and incremental.rs.
 pub(crate) async fn process_record_batch_stream<E, S, T>(
     record_batch_stream: Result<S>,
     mut tx: T,
     error_context: &str,
-    concurrency_limit: usize,
 ) where
     E: std::error::Error + Send + Sync + 'static,
-    S: Stream<Item = std::result::Result<RecordBatch, E>> + Send + 'static,
-    T: SinkExt<Result<RecordBatch>> + Unpin + Clone + Send + 'static,
+    S: Stream<Item = std::result::Result<RecordBatch, E>> + Send + Unpin + 'static,
+    T: SinkExt<Result<RecordBatch>> + Unpin + Send + 'static,
 {
     match record_batch_stream {
-        Ok(stream) => {
-            stream
-                .map(|batch_result| {
-                    let mut tx = tx.clone();
-                    let error_context = error_context.to_string();
-                    async move {
-                        let batch_result =
-                            process_batch_blocking(batch_result, &error_context).await;
-                        let _ = tx.send(batch_result).await;
-                    }
-                })
-                .buffer_unordered(concurrency_limit)
-                .for_each(|_| async {})
-                .await;
+        Ok(mut stream) => {
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result
+                    .map_err(|e| Error::new(ErrorKind::Unexpected, error_context).with_source(e));
+                let _ = tx.send(batch).await;
+            }
         }
         Err(e) => {
             let _ = tx.send(Err(e)).await;
@@ -238,12 +213,10 @@ impl ArrowReader {
                             )
                             .await;
 
-                            // Process batches with spawn_blocking for CPU-heavy operations
                             process_record_batch_stream(
                                 record_batch_stream,
                                 tx,
                                 "failed to read record batch",
-                                concurrency_limit_data_files,
                             )
                             .await;
                         })

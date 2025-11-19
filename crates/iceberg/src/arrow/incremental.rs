@@ -106,7 +106,6 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         record_batch_stream,
                                         appends_tx,
                                         "failed to read appended record batch",
-                                        concurrency_limit_data_files,
                                     )
                                     .await;
                                 })
@@ -128,7 +127,6 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         record_batch_stream,
                                         deletes_tx,
                                         "failed to read deleted file record batch",
-                                        concurrency_limit_data_files,
                                     )
                                     .await;
                                 })
@@ -149,7 +147,6 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         record_batch_stream,
                                         deletes_tx,
                                         "failed to read deleted record batch",
-                                        concurrency_limit_data_files,
                                     )
                                     .await;
                                 })
