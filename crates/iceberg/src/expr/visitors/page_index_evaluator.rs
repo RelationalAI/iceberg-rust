@@ -776,10 +776,10 @@ mod tests {
     use std::sync::Arc;
 
     use parquet::arrow::arrow_reader::RowSelector;
-    use parquet::basic::{BoundaryOrder, LogicalType as ParquetLogicalType, Type as ParquetPhysicalType};
+    use parquet::basic::{LogicalType as ParquetLogicalType, Type as ParquetPhysicalType};
     use parquet::data_type::ByteArray;
-    use parquet::file::metadata::{ColumnChunkMetaData, RowGroupMetaData};
-    use parquet::file::page_index::column_index::{ColumnIndexBuilder, ColumnIndexMetaData as Index};
+    use parquet::file::metadata::{ColumnChunkMetaData, ColumnIndexBuilder, RowGroupMetaData};
+    use parquet::file::page_index::column_index::ColumnIndexMetaData as Index;
     use parquet::file::page_index::offset_index::{OffsetIndexMetaData, PageLocation};
     use parquet::file::statistics::Statistics;
     use parquet::schema::types::{
@@ -1300,20 +1300,20 @@ mod tests {
     }
 
     fn create_page_index() -> Result<(Vec<Index>, Vec<OffsetIndexMetaData>)> {
-        let mut idx_float_builder = ColumnIndexBuilder::new();
-        idx_float_builder.append(None, None, Some(1024));
-        idx_float_builder.append(Some(&0.0f32), Some(&10.0f32), Some(0));
-        idx_float_builder.append(Some(&10.0f32), Some(&20.0f32), Some(1));
-        idx_float_builder.append(None, None, None);
-        let idx_float = idx_float_builder.build_to_thrift();
+        let mut idx_float_builder = ColumnIndexBuilder::new(ParquetPhysicalType::FLOAT);
+        idx_float_builder.append(true, vec![], vec![], 1024);
+        idx_float_builder.append(false, 0.0f32.to_le_bytes().to_vec(), 10.0f32.to_le_bytes().to_vec(), 0);
+        idx_float_builder.append(false, 10.0f32.to_le_bytes().to_vec(), 20.0f32.to_le_bytes().to_vec(), 1);
+        idx_float_builder.append(true, vec![], vec![], -1);
+        let idx_float = idx_float_builder.build().unwrap();
 
-        let mut idx_string_builder = ColumnIndexBuilder::new();
-        idx_string_builder.append(Some(&ByteArray::from("AA")), Some(&ByteArray::from("DD")), Some(0));
-        idx_string_builder.append(Some(&ByteArray::from("DE")), Some(&ByteArray::from("DE")), Some(0));
-        idx_string_builder.append(Some(&ByteArray::from("DF")), Some(&ByteArray::from("UJ")), Some(1));
-        idx_string_builder.append(None, None, Some(48));
-        idx_string_builder.append(None, None, None);
-        let idx_string = idx_string_builder.build_to_thrift();
+        let mut idx_string_builder = ColumnIndexBuilder::new(ParquetPhysicalType::BYTE_ARRAY);
+        idx_string_builder.append(false, b"AA".to_vec(), b"DD".to_vec(), 0);
+        idx_string_builder.append(false, b"DE".to_vec(), b"DE".to_vec(), 0);
+        idx_string_builder.append(false, b"DF".to_vec(), b"UJ".to_vec(), 1);
+        idx_string_builder.append(false, vec![], vec![], 48);
+        idx_string_builder.append(true, vec![], vec![], -1);
+        let idx_string = idx_string_builder.build().unwrap();
 
         let page_locs_float = vec![
             PageLocation { offset: 0, compressed_page_size: 1024, first_row_index: 0 },
