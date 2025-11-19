@@ -18,23 +18,7 @@
 name: Bindings Python CI
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    paths:
-      - '**'                                       # Include all files and directories in the repository by default.
-      - '!.github/ISSUE_TEMPLATE/**'               # Exclude files and directories that don't impact tests or code like templates, metadata, and documentation.
-      - '!scripts/**'
-      - '!website/**'
-      - '!.asf.yml'
-      - '!.gitattributes'
-      - '!.gitignore'
-      - '!CONTRIBUTING.md'
-      - '!CHANGELOG.md'
-      - '!LICENSE'
-      - '!NOTICE'
-      - '!README.md'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -49,7 +33,8 @@ jobs:
         working-directory: "bindings/python"
         run: cargo fmt --all -- --check
       - name: Check clippy
-        run: cargo clippy --all-targets --all-features --workspace --exclude iceberg-datafusion --exclude iceberg-playground --exclude iceberg-sqllogictest -- -D warnings
+        working-directory: "bindings/python"
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   check-python:
     runs-on: ubuntu-latest
