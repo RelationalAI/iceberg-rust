@@ -590,8 +590,6 @@ impl ArrowReader {
         Ok(results.into())
     }
 
-    /// Helper function to add a `_file` column to a RecordBatch.
-
     /// Adds a file_path column to the RecordBatch containing the file path.
     /// Used for positional delete records to track which file each delete applies to.
     /// Materializes the file path string for each row (no compression).
