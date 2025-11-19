@@ -75,6 +75,48 @@ pub fn file_field() -> &'static Arc<Field> {
     &FILE_FIELD
 }
 
+/// Lazy-initialized Arrow Field definition for the pos metadata column.
+/// Used in positional delete records.
+static POS_FIELD: Lazy<Arc<Field>> = Lazy::new(|| {
+    Arc::new(
+        Field::new(RESERVED_COL_NAME_POS, DataType::UInt64, false).with_metadata(HashMap::from([
+            (
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                RESERVED_FIELD_ID_POS.to_string(),
+            ),
+        ])),
+    )
+});
+
+/// Returns the Arrow Field definition for the pos metadata column.
+///
+/// # Returns
+/// A reference to the pos field definition
+pub fn pos_field() -> &'static Arc<Field> {
+    &POS_FIELD
+}
+
+/// Lazy-initialized Arrow Field definition for the file_path metadata column.
+/// Used in positional delete records to track which file each delete applies to.
+static FILE_PATH_FIELD: Lazy<Arc<Field>> = Lazy::new(|| {
+    Arc::new(
+        Field::new(RESERVED_COL_NAME_FILE_PATH, DataType::Utf8, false).with_metadata(
+            HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                RESERVED_FIELD_ID_FILE_PATH.to_string(),
+            )]),
+        ),
+    )
+});
+
+/// Returns the Arrow Field definition for the file_path metadata column.
+///
+/// # Returns
+/// A reference to the file_path field definition
+pub fn file_path_field() -> &'static Arc<Field> {
+    &FILE_PATH_FIELD
+}
+
 /// Returns the Arrow Field definition for a metadata field ID.
 ///
 /// # Arguments
