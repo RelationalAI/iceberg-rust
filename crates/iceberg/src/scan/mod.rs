@@ -2268,7 +2268,12 @@ pub mod tests {
         let table_scan = fixture
             .table
             .scan()
-            .select(["x", RESERVED_COL_NAME_FILE, "y", RESERVED_COL_NAME_UNDERSCORE_POS])
+            .select([
+                "x",
+                RESERVED_COL_NAME_FILE,
+                "y",
+                RESERVED_COL_NAME_UNDERSCORE_POS,
+            ])
             .with_row_selection_enabled(true)
             .build()
             .unwrap();
@@ -2335,7 +2340,12 @@ pub mod tests {
         let table_scan = fixture
             .table
             .scan()
-            .select(["x", RESERVED_COL_NAME_UNDERSCORE_POS, "y", RESERVED_COL_NAME_FILE])
+            .select([
+                "x",
+                RESERVED_COL_NAME_UNDERSCORE_POS,
+                "y",
+                RESERVED_COL_NAME_FILE,
+            ])
             .with_row_selection_enabled(true)
             .build()
             .unwrap();
@@ -2380,7 +2390,12 @@ pub mod tests {
         let table_scan = fixture
             .table
             .scan()
-            .select([RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_UNDERSCORE_POS, "x", "y"])
+            .select([
+                RESERVED_COL_NAME_FILE,
+                RESERVED_COL_NAME_UNDERSCORE_POS,
+                "x",
+                "y",
+            ])
             .with_row_selection_enabled(true)
             .build()
             .unwrap();
@@ -2407,7 +2422,12 @@ pub mod tests {
         let table_scan = fixture
             .table
             .scan()
-            .select(["x", "y", RESERVED_COL_NAME_UNDERSCORE_POS, RESERVED_COL_NAME_FILE])
+            .select([
+                "x",
+                "y",
+                RESERVED_COL_NAME_UNDERSCORE_POS,
+                RESERVED_COL_NAME_FILE,
+            ])
             .with_row_selection_enabled(true)
             .build()
             .unwrap();

@@ -253,8 +253,7 @@ impl ArrowReader {
         // Check if _pos column is requested and add it as a virtual column
         let has_pos_column = task
             .project_field_ids
-            .iter()
-            .any(|&id| id == RESERVED_FIELD_ID_UNDERSCORE_POS);
+            .contains(&RESERVED_FIELD_ID_UNDERSCORE_POS);
         if has_pos_column {
             // Add _pos as a virtual column to be produced by the Parquet reader
             virtual_columns.push(Arc::clone(row_pos_field()));
@@ -362,7 +361,8 @@ impl ArrowReader {
                 )?;
 
         if has_pos_column {
-            record_batch_transformer_builder = record_batch_transformer_builder.with_virtual_columns(vec![Arc::clone(row_pos_field())]);
+            record_batch_transformer_builder = record_batch_transformer_builder
+                .with_virtual_columns(vec![Arc::clone(row_pos_field())]);
         }
 
         if let (Some(partition_spec), Some(partition_data)) =
