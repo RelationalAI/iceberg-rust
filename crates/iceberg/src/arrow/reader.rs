@@ -265,7 +265,7 @@ impl ArrowReader {
             &task.data_file_path,
             file_io.clone(),
             should_load_page_index,
-            Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?), // TODO @vustef: Did we have to clone? There's too much cloning...
+            Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?),
         )
         .await?;
 
