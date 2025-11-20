@@ -265,7 +265,7 @@ impl ArrowReader {
             &task.data_file_path,
             file_io.clone(),
             should_load_page_index,
-            Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())), // TODO @vustef: Did we have to clone? There's too much cloning...
+            Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?), // TODO @vustef: Did we have to clone? There's too much cloning...
         )
         .await?;
 
@@ -313,7 +313,7 @@ impl ArrowReader {
 
             let options = ArrowReaderOptions::new()
                 .with_schema(arrow_schema)
-                .with_virtual_columns(virtual_columns);
+                .with_virtual_columns(virtual_columns)?;
 
             Self::create_parquet_record_batch_stream_builder(
                 &task.data_file_path,
