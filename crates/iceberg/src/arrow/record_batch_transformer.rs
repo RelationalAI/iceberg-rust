@@ -377,7 +377,7 @@ impl RecordBatchTransformer {
                         Ok(Arc::new(constant_field))
                     }
                 } else {
-                    // Regular field from snapshot schema
+                    // Regular field - use schema as-is
                     Ok(field_id_to_mapped_schema_map
                         .get(field_id)
                         .ok_or(Error::new(ErrorKind::Unexpected, "field not found"))?
