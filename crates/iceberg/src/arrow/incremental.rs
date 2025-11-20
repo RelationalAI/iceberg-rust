@@ -30,9 +30,7 @@ use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
-use crate::metadata_columns::{
-    RESERVED_FIELD_ID_UNDERSCORE_POS, row_pos_field,
-};
+use crate::metadata_columns::{RESERVED_FIELD_ID_UNDERSCORE_POS, row_pos_field};
 use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
@@ -224,8 +222,8 @@ async fn process_incremental_append_task(
             )?;
 
     if has_pos_column {
-        record_batch_transformer_builder = record_batch_transformer_builder
-            .with_virtual_field(Arc::clone(row_pos_field()))?;
+        record_batch_transformer_builder =
+            record_batch_transformer_builder.with_virtual_field(Arc::clone(row_pos_field()))?;
     }
 
     let mut record_batch_transformer = record_batch_transformer_builder.build();

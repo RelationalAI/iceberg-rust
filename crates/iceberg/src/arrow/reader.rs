@@ -361,8 +361,8 @@ impl ArrowReader {
                 )?;
 
         if has_pos_column {
-            record_batch_transformer_builder = record_batch_transformer_builder
-                .with_virtual_field(Arc::clone(row_pos_field()))?;
+            record_batch_transformer_builder =
+                record_batch_transformer_builder.with_virtual_field(Arc::clone(row_pos_field()))?;
         }
 
         if let (Some(partition_spec), Some(partition_data)) =

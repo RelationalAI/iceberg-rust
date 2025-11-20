@@ -2571,11 +2571,7 @@ async fn test_incremental_select_with_pos_column() {
 
     for batch in append_batches {
         // Should have 2 columns: n and _pos
-        assert_eq!(
-            batch.num_columns(),
-            2,
-            "Should have n and _pos columns"
-        );
+        assert_eq!(batch.num_columns(), 2, "Should have n and _pos columns");
 
         // Verify the n column exists
         assert!(batch.column_by_name("n").is_some(), "n column should exist");
@@ -2729,10 +2725,16 @@ async fn test_incremental_select_with_pos_and_file_columns() {
         assert!(batch.column_by_name("n").is_some());
         assert!(batch.column_by_name(RESERVED_COL_NAME_FILE).is_some());
         assert!(batch.column_by_name("data").is_some());
-        assert!(batch.column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS).is_some());
+        assert!(
+            batch
+                .column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS)
+                .is_some()
+        );
 
         // Verify the _pos column has correct data type
-        let pos_col = batch.column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS).unwrap();
+        let pos_col = batch
+            .column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS)
+            .unwrap();
         assert_eq!(
             pos_col.data_type(),
             &arrow_schema::DataType::Int64,
