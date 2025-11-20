@@ -348,7 +348,7 @@ impl RecordBatchTransformer {
 
         // Create a new arrow schema by selecting fields from mapped_unprojected,
         // in the order of the field ids in projected_iceberg_field_ids
-        let fields: Vec<FieldRef> = projected_iceberg_field_ids
+        let fields: Result<Vec<_>> = projected_iceberg_field_ids
             .iter()
             .map(|field_id| {
                 // Check if this is a virtual field from Parquet reader
@@ -385,9 +385,9 @@ impl RecordBatchTransformer {
                         .clone())
                 }
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
 
-        let target_schema = Arc::new(ArrowSchema::new(fields));
+        let target_schema = Arc::new(ArrowSchema::new(fields?));
 
         match Self::compare_schemas(source_schema, &target_schema) {
             SchemaComparison::Equivalent => Ok(BatchTransform::PassThrough),
