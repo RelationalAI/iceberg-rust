@@ -2611,6 +2611,65 @@ async fn test_incremental_select_with_pos_column() {
                 i
             );
         }
+
+        // Test variant 2: Use with_pos_column() method instead of selecting by name
+        let scan = fixture
+            .table
+            .incremental_scan(Some(1), Some(2))
+            .select(["n"])
+            .with_pos_column()
+            .build()
+            .unwrap();
+
+        let stream = scan.to_arrow().await.unwrap();
+        let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+        // Get append batches
+        let append_batches: Vec<_> = batches
+            .iter()
+            .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
+            .map(|(_, b)| b.clone())
+            .collect();
+
+        // Verify we have append batches
+        assert!(!append_batches.is_empty(), "Should have append batches");
+
+        for batch in append_batches {
+            // Should have 2 columns: n and _pos
+            assert_eq!(
+                batch.num_columns(),
+                2,
+                "Should have n and _pos columns when using with_pos_column()"
+            );
+
+            // Verify the _pos column exists
+            let pos_col = batch.column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS);
+            assert!(
+                pos_col.is_some(),
+                "_pos column should be present when using with_pos_column()"
+            );
+
+            // Verify the _pos column has correct data type
+            let pos_col = pos_col.unwrap();
+            assert_eq!(
+                pos_col.data_type(),
+                &arrow_schema::DataType::Int64,
+                "_pos column should use Int64 type"
+            );
+
+            // Verify positions are sequential
+            let pos_array = pos_col.as_primitive::<arrow_array::types::Int64Type>();
+            assert_eq!(pos_array.value(0), 0, "First row should have position 0");
+            for i in 1..pos_array.len() {
+                assert_eq!(
+                    pos_array.value(i),
+                    i as i64,
+                    "Row {} should have position {}",
+                    i,
+                    i
+                );
+            }
+        }
     }
 }
 

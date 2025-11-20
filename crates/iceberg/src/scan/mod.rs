@@ -2255,6 +2255,50 @@ pub mod tests {
                 i
             );
         }
+
+        // Test variant 2: Use with_pos_column() method instead of selecting by name
+        let table_scan = fixture
+            .table
+            .scan()
+            .select(["x"])
+            .with_pos_column()
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        // Verify we have 2 columns: x and _pos
+        assert_eq!(batches[0].num_columns(), 2);
+
+        // Verify the _pos column exists
+        let pos_col = batches[0].column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS);
+        assert!(
+            pos_col.is_some(),
+            "_pos column should be present when using with_pos_column()"
+        );
+
+        // Verify the _pos column has correct data type
+        let pos_col = pos_col.unwrap();
+        assert_eq!(
+            pos_col.data_type(),
+            &arrow_schema::DataType::Int64,
+            "_pos column should use Int64 type"
+        );
+
+        // Verify positions are sequential
+        let pos_array = pos_col.as_primitive::<arrow_array::types::Int64Type>();
+        assert_eq!(pos_array.value(0), 0, "First row should have position 0");
+        for i in 1..pos_array.len().min(10) {
+            assert_eq!(
+                pos_array.value(i),
+                i as i64,
+                "Row {} should have position {}",
+                i,
+                i
+            );
+        }
     }
 
     #[tokio::test]
