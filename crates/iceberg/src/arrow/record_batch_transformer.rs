@@ -154,7 +154,7 @@ pub(crate) struct RecordBatchTransformerBuilder {
     snapshot_schema: Arc<IcebergSchema>,
     projected_iceberg_field_ids: Vec<i32>,
     constant_fields: HashMap<i32, (DataType, PrimitiveLiteral)>,
-    virtual_fields: Vec<FieldRef>,
+    virtual_fields: HashMap<i32, FieldRef>,
 }
 
 impl RecordBatchTransformerBuilder {
@@ -166,7 +166,7 @@ impl RecordBatchTransformerBuilder {
             snapshot_schema,
             projected_iceberg_field_ids: projected_iceberg_field_ids.to_vec(),
             constant_fields: HashMap::new(),
-            virtual_fields: Vec::new(),
+            virtual_fields: HashMap::new(),
         }
     }
 
@@ -182,9 +182,25 @@ impl RecordBatchTransformerBuilder {
         Ok(self)
     }
 
-    pub(crate) fn with_virtual_columns(mut self, virtual_fields: Vec<FieldRef>) -> Self {
-        self.virtual_fields = virtual_fields;
-        self
+    /// Add a virtual field for a specific field ID.
+    /// This is used for virtual/metadata fields like _pos that are produced by the Parquet reader.
+    ///
+    /// # Arguments
+    /// * `field` - The Arrow field representing the virtual column
+    pub(crate) fn with_virtual_field(mut self, field: FieldRef) -> Result<Self> {
+        // Extract field ID from metadata
+        let field_id = field
+            .metadata()
+            .get(PARQUET_FIELD_ID_META_KEY)
+            .and_then(|id_str| id_str.parse::<i32>().ok())
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    "Virtual field must have a field ID in metadata",
+                )
+            })?;
+        self.virtual_fields.insert(field_id, field);
+        Ok(self)
     }
 
     /// Set partition spec and data together for identifying identity-transformed partition columns.
@@ -260,7 +276,8 @@ pub(crate) struct RecordBatchTransformer {
     constant_fields: HashMap<i32, (DataType, PrimitiveLiteral)>,
     // Virtual fields are metadata fields that are not present in the snapshot schema,
     // but are present in the source schema (arrow reader produces them)
-    virtual_fields: Vec<FieldRef>,
+    // Map from field_id to FieldRef
+    virtual_fields: HashMap<i32, FieldRef>,
 
     // BatchTransform gets lazily constructed based on the schema of
     // the first RecordBatch we receive from the file
@@ -323,23 +340,11 @@ impl RecordBatchTransformer {
         snapshot_schema: &IcebergSchema,
         projected_iceberg_field_ids: &[i32],
         constant_fields: &HashMap<i32, (DataType, PrimitiveLiteral)>,
-        virtual_fields: &[FieldRef],
+        virtual_fields: &HashMap<i32, FieldRef>,
     ) -> Result<BatchTransform> {
         let mapped_unprojected_arrow_schema = Arc::new(schema_to_arrow_schema(snapshot_schema)?);
         let field_id_to_mapped_schema_map =
             Self::build_field_id_to_arrow_schema_map(&mapped_unprojected_arrow_schema)?;
-
-        // Build a map of virtual field IDs to virtual fields for quick lookup
-        let virtual_field_map: HashMap<i32, FieldRef> = virtual_fields
-            .iter()
-            .filter_map(|field| {
-                field
-                    .metadata()
-                    .get(PARQUET_FIELD_ID_META_KEY)
-                    .and_then(|id_str| id_str.parse::<i32>().ok())
-                    .map(|field_id| (field_id, Arc::clone(field)))
-            })
-            .collect();
 
         // Create a new arrow schema by selecting fields from mapped_unprojected,
         // in the order of the field ids in projected_iceberg_field_ids
@@ -347,7 +352,7 @@ impl RecordBatchTransformer {
             .iter()
             .map(|field_id| {
                 // Check if this is a virtual field from Parquet reader
-                if let Some(virtual_field) = virtual_field_map.get(field_id) {
+                if let Some(virtual_field) = virtual_fields.get(field_id) {
                     return Ok(Arc::clone(virtual_field));
                 }
 
@@ -384,10 +389,6 @@ impl RecordBatchTransformer {
 
         let target_schema = Arc::new(ArrowSchema::new(fields));
 
-        // Extract virtual field IDs for passing to generate_transform_operations
-        let virtual_field_ids: std::collections::HashSet<i32> =
-            virtual_field_map.keys().copied().collect();
-
         match Self::compare_schemas(source_schema, &target_schema) {
             SchemaComparison::Equivalent => Ok(BatchTransform::PassThrough),
             SchemaComparison::NameChangesOnly => Ok(BatchTransform::ModifySchema { target_schema }),
@@ -398,7 +399,7 @@ impl RecordBatchTransformer {
                     projected_iceberg_field_ids,
                     field_id_to_mapped_schema_map,
                     constant_fields,
-                    &virtual_field_ids,
+                    virtual_fields,
                 )?,
                 target_schema,
             }),
@@ -456,7 +457,7 @@ impl RecordBatchTransformer {
         projected_iceberg_field_ids: &[i32],
         field_id_to_mapped_schema_map: HashMap<i32, (FieldRef, usize)>,
         constant_fields: &HashMap<i32, (DataType, PrimitiveLiteral)>,
-        virtual_field_ids: &std::collections::HashSet<i32>,
+        virtual_fields: &HashMap<i32, FieldRef>,
     ) -> Result<Vec<ColumnSource>> {
         let field_id_to_source_schema_map =
             Self::build_field_id_to_arrow_schema_map(source_schema)?;
@@ -477,7 +478,7 @@ impl RecordBatchTransformer {
 
                 // Check if this is a virtual field from Parquet reader (like _pos)
                 // Virtual fields don't exist in snapshot schema, they come from source
-                if virtual_field_ids.contains(field_id) {
+                if virtual_fields.contains_key(field_id) {
                     let source_index = field_id_to_source_schema_map
                         .get(field_id)
                         .map(|(_, idx)| *idx)
