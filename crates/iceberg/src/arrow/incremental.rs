@@ -87,6 +87,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
         let batch_size = reader.batch_size;
 
         spawn(async move {
+            println!("[incremental] Main task spawn started");
             let _ = self
                 .for_each_concurrent(None, |task_result| {
                     let file_io = reader.file_io.clone();
@@ -105,7 +106,9 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                         };
                         match task {
                             IncrementalFileScanTask::Append(append_task) => {
+                                println!("[incremental] Spawning Append task");
                                 spawn(async move {
+                                    println!("[incremental] Append task started");
                                     let record_batch_stream = process_incremental_append_task(
                                         append_task,
                                         batch_size,
@@ -123,7 +126,9 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                 .await
                             }
                             IncrementalFileScanTask::Delete(deleted_file_task) => {
+                                println!("[incremental] Spawning Delete task");
                                 spawn(async move {
+                                    println!("[incremental] Delete task started");
                                     let file_path = deleted_file_task.data_file_path().to_string();
                                     let total_records =
                                         deleted_file_task.base.record_count.unwrap_or(0);
@@ -147,7 +152,9 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                 file_path,
                                 delete_vector,
                             ) => {
+                                println!("[incremental] Spawning PositionalDeletes task");
                                 spawn(async move {
+                                    println!("[incremental] PositionalDeletes task started");
                                     let record_batch_stream = process_incremental_delete_task(
                                         file_path,
                                         delete_vector,
