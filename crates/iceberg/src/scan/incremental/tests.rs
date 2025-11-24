@@ -2799,8 +2799,10 @@ async fn test_incremental_scan_with_no_deletes() {
     let table = fixture.table.clone();
 
     // Create incremental scan from first to last snapshot (only appends, no deletes)
+    // Use concurrency limit of 1 to stress-test the fix with maximum serialization
     let scan = table
         .incremental_scan(Some(from_snapshot), Some(to_snapshot))
+        .with_concurrency_limit_data_files(1)
         .build()
         .unwrap();
 
