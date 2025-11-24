@@ -174,6 +174,11 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                     }
                 })
                 .await;
+
+            // Drop the original channel senders to signal EOF to the receivers
+            println!("[incremental] All tasks completed, closing channels");
+            drop(appends_tx);
+            drop(deletes_tx);
         });
 
         Ok((
