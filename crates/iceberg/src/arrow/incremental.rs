@@ -22,7 +22,7 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::Schema as ArrowSchema;
 use futures::channel::mpsc::channel;
 use futures::stream::select;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
 
 use crate::arrow::reader::process_record_batch_stream;
@@ -87,28 +87,15 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
         let batch_size = reader.batch_size;
 
         spawn(async move {
-            println!("[incremental] Main task spawn started");
             let _ = self
-                .for_each_concurrent(None, |task_result| {
+                .try_for_each_concurrent(reader.concurrency_limit_data_files, |task| {
                     let file_io = reader.file_io.clone();
-                    let mut appends_tx = appends_tx.clone();
-                    let mut deletes_tx = deletes_tx.clone();
+                    let appends_tx = appends_tx.clone();
+                    let deletes_tx = deletes_tx.clone();
                     async move {
-                        let task = match task_result {
-                            Ok(t) => t,
-                            Err(e) => {
-                                // Convert to string to avoid cloning the non-Clone Error type
-                                let error_msg = format!("{}", e);
-                                let _ = appends_tx.send(Err(Error::new(ErrorKind::Unexpected, error_msg.clone()))).await;
-                                let _ = deletes_tx.send(Err(Error::new(ErrorKind::Unexpected, error_msg))).await;
-                                return;
-                            }
-                        };
                         match task {
                             IncrementalFileScanTask::Append(append_task) => {
-                                println!("[incremental] Spawning Append task");
                                 spawn(async move {
-                                    println!("[incremental] Append task started");
                                     let record_batch_stream = process_incremental_append_task(
                                         append_task,
                                         batch_size,
@@ -122,13 +109,10 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         "failed to read appended record batch",
                                     )
                                     .await;
-                                })
-                                .await
+                                });
                             }
                             IncrementalFileScanTask::Delete(deleted_file_task) => {
-                                println!("[incremental] Spawning Delete task");
                                 spawn(async move {
-                                    println!("[incremental] Delete task started");
                                     let file_path = deleted_file_task.data_file_path().to_string();
                                     let total_records =
                                         deleted_file_task.base.record_count.unwrap_or(0);
@@ -145,16 +129,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         "failed to read deleted file record batch",
                                     )
                                     .await;
-                                })
-                                .await
+                                });
                             }
                             IncrementalFileScanTask::PositionalDeletes(
                                 file_path,
                                 delete_vector,
                             ) => {
-                                println!("[incremental] Spawning PositionalDeletes task");
                                 spawn(async move {
-                                    println!("[incremental] PositionalDeletes task started");
                                     let record_batch_stream = process_incremental_delete_task(
                                         file_path,
                                         delete_vector,
@@ -167,18 +148,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         "failed to read deleted record batch",
                                     )
                                     .await;
-                                })
-                                .await
+                                });
                             }
-                        };
+                        }
+                        Ok(())
                     }
                 })
                 .await;
-
-            // Drop the original channel senders to signal EOF to the receivers
-            println!("[incremental] All tasks completed, closing channels");
-            drop(appends_tx);
-            drop(deletes_tx);
         });
 
         Ok((
