@@ -90,8 +90,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
             let _ = self
                 .for_each_concurrent(None, |task_result| {
                     let file_io = reader.file_io.clone();
-                    let appends_tx = appends_tx.clone();
-                    let deletes_tx = deletes_tx.clone();
+                    let mut appends_tx = appends_tx.clone();
+                    let mut deletes_tx = deletes_tx.clone();
                     async move {
                         let task = match task_result {
                             Ok(t) => t,
