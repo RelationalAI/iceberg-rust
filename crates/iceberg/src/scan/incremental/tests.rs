@@ -2783,7 +2783,7 @@ async fn test_incremental_scan_with_no_deletes() {
         let start = i * 10 + 1;
         let end = (i + 1) * 10;
         let data: Vec<_> = (start..=end)
-            .map(|n| (n as i32, format!("data-{}", n)))
+            .map(|n| (n, format!("data-{}", n)))
             .collect();
         operations.push(Operation::Add(data, format!("data-{}.parquet", i)));
     }
