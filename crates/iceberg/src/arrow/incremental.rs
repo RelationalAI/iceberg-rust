@@ -22,7 +22,7 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::Schema as ArrowSchema;
 use futures::channel::mpsc::channel;
 use futures::stream::select;
-use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{ArrowReader, StreamsInto};
@@ -80,15 +80,24 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
         let (deletes_tx, deletes_rx) = channel(reader.concurrency_limit_data_files);
 
         let batch_size = reader.batch_size;
-        let concurrency_limit_data_files = reader.concurrency_limit_data_files;
 
         spawn(async move {
             let _ = self
-                .try_for_each_concurrent(concurrency_limit_data_files, |task| {
+                .for_each_concurrent(None, |task_result| {
                     let file_io = reader.file_io.clone();
                     let mut appends_tx = appends_tx.clone();
                     let mut deletes_tx = deletes_tx.clone();
                     async move {
+                        let task = match task_result {
+                            Ok(t) => t,
+                            Err(e) => {
+                                // Convert to string to avoid cloning the non-Clone Error type
+                                let error_msg = format!("{}", e);
+                                let _ = appends_tx.send(Err(Error::new(ErrorKind::Unexpected, error_msg.clone()))).await;
+                                let _ = deletes_tx.send(Err(Error::new(ErrorKind::Unexpected, error_msg))).await;
+                                return;
+                            }
+                        };
                         match task {
                             IncrementalFileScanTask::Append(append_task) => {
                                 spawn(async move {
@@ -197,8 +206,6 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                 .await
                             }
                         };
-
-                        Ok(())
                     }
                 })
                 .await;
