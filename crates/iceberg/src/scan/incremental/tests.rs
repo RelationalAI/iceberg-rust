@@ -2809,7 +2809,7 @@ async fn test_incremental_scan_with_no_deletes() {
 
     // IMPORTANT: Try to collect from delete stream FIRST (without consuming append stream)
     // This is the scenario that previously caused a deadlock because the delete stream
-    // would never signal EOF when there are no delete tasks
+    // starved.
     let delete_batches: Vec<_> = delete_stream.try_collect().await.unwrap();
     assert!(delete_batches.is_empty(), "Should have NO delete batches");
 
