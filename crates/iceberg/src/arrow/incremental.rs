@@ -22,12 +22,15 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::Schema as ArrowSchema;
 use futures::channel::mpsc::channel;
 use futures::stream::select;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
+use parquet::arrow::arrow_reader::ArrowReaderOptions;
 
+use crate::arrow::reader::process_record_batch_stream;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
+use crate::metadata_columns::{RESERVED_FIELD_ID_UNDERSCORE_POS, row_pos_field};
 use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
@@ -76,8 +79,10 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
     /// Takes a stream of `IncrementalFileScanTasks` and reads all the files. Returns two
     /// separate streams of Arrow `RecordBatch`es containing appended data and deleted records.
     fn stream(self, reader: ArrowReader) -> Result<UnzippedIncrementalBatchRecordStream> {
-        let (appends_tx, appends_rx) = channel(reader.concurrency_limit_data_files);
-        let (deletes_tx, deletes_rx) = channel(reader.concurrency_limit_data_files);
+        let (appends_tx, appends_rx) =
+            channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
+        let (deletes_tx, deletes_rx) =
+            channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
 
         let batch_size = reader.batch_size;
 
@@ -85,8 +90,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
             let _ = self
                 .for_each_concurrent(None, |task_result| {
                     let file_io = reader.file_io.clone();
-                    let mut appends_tx = appends_tx.clone();
-                    let mut deletes_tx = deletes_tx.clone();
+                    let appends_tx = appends_tx.clone();
+                    let deletes_tx = deletes_tx.clone();
                     async move {
                         let task = match task_result {
                             Ok(t) => t,
@@ -108,35 +113,20 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                     )
                                     .await;
 
-                                    match record_batch_stream {
-                                        Ok(mut stream) => {
-                                            while let Some(batch) = stream.next().await {
-                                                let result = appends_tx
-                                                    .send(batch.map_err(|e| {
-                                                        Error::new(
-                                                            ErrorKind::Unexpected,
-                                                            "failed to read appended record batch",
-                                                        )
-                                                        .with_source(e)
-                                                    }))
-                                                    .await;
-
-                                                if result.is_err() {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = appends_tx.send(Err(e)).await;
-                                        }
-                                    }
+                                    process_record_batch_stream(
+                                        record_batch_stream,
+                                        appends_tx,
+                                        "failed to read appended record batch",
+                                    )
+                                    .await;
                                 })
                                 .await
                             }
                             IncrementalFileScanTask::Delete(deleted_file_task) => {
                                 spawn(async move {
                                     let file_path = deleted_file_task.data_file_path().to_string();
-                                    let total_records = deleted_file_task.base.record_count.unwrap_or(0);
+                                    let total_records =
+                                        deleted_file_task.base.record_count.unwrap_or(0);
 
                                     let record_batch_stream = process_incremental_deleted_file_task(
                                         file_path,
@@ -144,28 +134,12 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         batch_size,
                                     );
 
-                                    match record_batch_stream {
-                                        Ok(mut stream) => {
-                                            while let Some(batch) = stream.next().await {
-                                                let result = deletes_tx
-                                                    .send(batch.map_err(|e| {
-                                                        Error::new(
-                                                            ErrorKind::Unexpected,
-                                                            "failed to read deleted file record batch",
-                                                        )
-                                                        .with_source(e)
-                                                    }))
-                                                    .await;
-
-                                                if result.is_err() {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = deletes_tx.send(Err(e)).await;
-                                        }
-                                    }
+                                    process_record_batch_stream(
+                                        record_batch_stream,
+                                        deletes_tx,
+                                        "failed to read deleted file record batch",
+                                    )
+                                    .await;
                                 })
                                 .await
                             }
@@ -180,28 +154,12 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         batch_size,
                                     );
 
-                                    match record_batch_stream {
-                                        Ok(mut stream) => {
-                                            while let Some(batch) = stream.next().await {
-                                                let result = deletes_tx
-                                                    .send(batch.map_err(|e| {
-                                                        Error::new(
-                                                            ErrorKind::Unexpected,
-                                                            "failed to read deleted record batch",
-                                                        )
-                                                        .with_source(e)
-                                                    }))
-                                                    .await;
-
-                                                if result.is_err() {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = deletes_tx.send(Err(e)).await;
-                                        }
-                                    }
+                                    process_record_batch_stream(
+                                        record_batch_stream,
+                                        deletes_tx,
+                                        "failed to read deleted record batch",
+                                    )
+                                    .await;
                                 })
                                 .await
                             }
@@ -223,11 +181,29 @@ async fn process_incremental_append_task(
     batch_size: Option<usize>,
     file_io: FileIO,
 ) -> Result<ArrowRecordBatchStream> {
+    let mut virtual_columns = Vec::new();
+
+    // Check if _pos column is requested and add it as a virtual column
+    let has_pos_column = task
+        .base
+        .project_field_ids
+        .contains(&RESERVED_FIELD_ID_UNDERSCORE_POS);
+    if has_pos_column {
+        // Add _pos as a virtual column to be produced by the Parquet reader
+        virtual_columns.push(Arc::clone(row_pos_field()));
+    }
+
+    let arrow_reader_options = if !virtual_columns.is_empty() {
+        Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?)
+    } else {
+        None
+    };
+
     let mut record_batch_stream_builder = ArrowReader::create_parquet_record_batch_stream_builder(
         &task.base.data_file_path,
         file_io,
         true,
-        None, // arrow_reader_options
+        arrow_reader_options,
     )
     .await?;
 
@@ -245,13 +221,19 @@ async fn process_incremental_append_task(
     // RecordBatchTransformer performs any transformations required on the RecordBatches
     // that come back from the file, such as type promotion, default column insertion,
     // column re-ordering, and virtual field addition (like _file)
-    let mut record_batch_transformer =
+    let mut record_batch_transformer_builder =
         RecordBatchTransformerBuilder::new(task.schema_ref(), &task.base.project_field_ids)
             .with_constant(
                 crate::metadata_columns::RESERVED_FIELD_ID_FILE,
                 crate::spec::PrimitiveLiteral::String(task.base.data_file_path.clone()),
-            )?
-            .build();
+            )?;
+
+    if has_pos_column {
+        record_batch_transformer_builder =
+            record_batch_transformer_builder.with_virtual_field(Arc::clone(row_pos_field()))?;
+    }
+
+    let mut record_batch_transformer = record_batch_transformer_builder.build();
 
     if let Some(batch_size) = batch_size {
         record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
