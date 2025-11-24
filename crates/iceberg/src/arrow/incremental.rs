@@ -22,7 +22,7 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::Schema as ArrowSchema;
 use futures::channel::mpsc::channel;
 use futures::stream::select;
-use futures::{Stream, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
 
 use crate::arrow::reader::process_record_batch_stream;
