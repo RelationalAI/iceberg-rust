@@ -307,7 +307,7 @@
 <a href=#307 id=307 data-nosnippet>307</a>                Field { "added_delete_files_count": Int32, metadata: {"PARQUET:field_id": "15"} },
 <a href=#308 id=308 data-nosnippet>308</a>                Field { "existing_delete_files_count": Int32, metadata: {"PARQUET:field_id": "16"} },
 <a href=#309 id=309 data-nosnippet>309</a>                Field { "deleted_delete_files_count": Int32, metadata: {"PARQUET:field_id": "17"} },
-<a href=#310 id=310 data-nosnippet>310</a>                Field { "partition_summaries": List(Struct("contains_null": Boolean, metadata: {"PARQUET:field_id": "10"}, "contains_nan": nullable Boolean, metadata: {"PARQUET:field_id": "11"}, "lower_bound": nullable Utf8, metadata: {"PARQUET:field_id": "12"}, "upper_bound": nullable Utf8, metadata: {"PARQUET:field_id": "13"}), metadata: {"PARQUET:field_id": "9"}), metadata: {"PARQUET:field_id": "8"} }"#</span>]],
+<a href=#310 id=310 data-nosnippet>310</a>                Field { "partition_summaries": List(non-null Struct("contains_null": non-null Boolean, metadata: {"PARQUET:field_id": "10"}, "contains_nan": Boolean, metadata: {"PARQUET:field_id": "11"}, "lower_bound": Utf8, metadata: {"PARQUET:field_id": "12"}, "upper_bound": Utf8, metadata: {"PARQUET:field_id": "13"}), metadata: {"PARQUET:field_id": "9"}), metadata: {"PARQUET:field_id": "8"} }"#</span>]],
 <a href=#311 id=311 data-nosnippet>311</a>            <span class="macro">expect!</span>[[<span class="string">r#"
 <a href=#312 id=312 data-nosnippet>312</a>                content: PrimitiveArray&lt;Int32&gt;
 <a href=#313 id=313 data-nosnippet>313</a>                [

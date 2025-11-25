@@ -156,7 +156,7 @@
 <a href=#156 id=156 data-nosnippet>156</a>                Field { "parent_id": nullable Int64, metadata: {"PARQUET:field_id": "3"} },
 <a href=#157 id=157 data-nosnippet>157</a>                Field { "operation": nullable Utf8, metadata: {"PARQUET:field_id": "4"} },
 <a href=#158 id=158 data-nosnippet>158</a>                Field { "manifest_list": nullable Utf8, metadata: {"PARQUET:field_id": "5"} },
-<a href=#159 id=159 data-nosnippet>159</a>                Field { "summary": nullable Map("key_value": Struct("key": Utf8, metadata: {"PARQUET:field_id": "7"}, "value": nullable Utf8, metadata: {"PARQUET:field_id": "8"}), unsorted), metadata: {"PARQUET:field_id": "6"} }"#</span>]],
+<a href=#159 id=159 data-nosnippet>159</a>                Field { "summary": nullable Map("key_value": non-null Struct("key": non-null Utf8, metadata: {"PARQUET:field_id": "7"}, "value": Utf8, metadata: {"PARQUET:field_id": "8"}), unsorted), metadata: {"PARQUET:field_id": "6"} }"#</span>]],
 <a href=#160 id=160 data-nosnippet>160</a>            <span class="macro">expect!</span>[[<span class="string">r#"
 <a href=#161 id=161 data-nosnippet>161</a>                committed_at: PrimitiveArray&lt;Timestamp(µs, "+00:00")&gt;
 <a href=#162 id=162 data-nosnippet>162</a>                [
