@@ -254,6 +254,33 @@ async fn process_incremental_append_task(
     Ok(Box::pin(record_batch_stream) as ArrowRecordBatchStream)
 }
 
+/// Helper function to create a RecordBatch from a chunk of position values.
+/// Creates a batch with file_path column first, then pos column (Int64).
+fn create_delete_batch(
+    schema: &Arc<ArrowSchema>,
+    file_path: &str,
+    chunk: Vec<u64>,
+) -> Result<RecordBatch> {
+    let num_rows = chunk.len();
+
+    // Create file path array (repeated for each row)
+    let file_array = arrow_array::StringArray::from(vec![file_path; num_rows]);
+
+    // Create Int64 array for positions
+    let pos_array = Int64Array::from_iter(chunk.iter().map(|&i| Some(i as i64)));
+
+    RecordBatch::try_new(Arc::clone(schema), vec![
+        Arc::new(file_array),
+        Arc::new(pos_array),
+    ])
+    .map_err(|_| {
+        Error::new(
+            ErrorKind::Unexpected,
+            "Failed to create RecordBatch for delete positions",
+        )
+    })
+}
+
 fn process_incremental_delete_task(
     file_path: String,
     delete_vector: DeleteVector,
@@ -271,26 +298,7 @@ fn process_incremental_delete_task(
 
     let stream = futures::stream::iter(treemap)
         .chunks(batch_size)
-        .map(move |chunk| {
-            let num_rows = chunk.len();
-
-            // Create file path array (repeated for each row)
-            let file_array = arrow_array::StringArray::from(vec![file_path.as_str(); num_rows]);
-
-            // Create Int64 array for positions
-            let pos_array = Int64Array::from_iter(chunk.iter().map(|&i| Some(i as i64)));
-
-            RecordBatch::try_new(Arc::clone(&schema), vec![
-                Arc::new(file_array),
-                Arc::new(pos_array),
-            ])
-            .map_err(|_| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    "Failed to create RecordBatch for DeleteVector",
-                )
-            })
-        });
+        .map(move |chunk| create_delete_batch(&schema, &file_path, chunk));
 
     Ok(Box::pin(stream) as ArrowRecordBatchStream)
 }
@@ -311,26 +319,7 @@ fn process_incremental_deleted_file_task(
     // Create a stream of position values from 0 to total_records-1 (0-indexed)
     let stream = futures::stream::iter(0..total_records)
         .chunks(batch_size)
-        .map(move |chunk| {
-            let num_rows = chunk.len();
-
-            // Create file path array (repeated for each row)
-            let file_array = arrow_array::StringArray::from(vec![file_path.as_str(); num_rows]);
-
-            // Create Int64 array for positions
-            let pos_array = Int64Array::from_iter(chunk.iter().map(|&i| Some(i as i64)));
-
-            RecordBatch::try_new(Arc::clone(&schema), vec![
-                Arc::new(file_array),
-                Arc::new(pos_array),
-            ])
-            .map_err(|_| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    "Failed to create RecordBatch for deleted file",
-                )
-            })
-        });
+        .map(move |chunk| create_delete_batch(&schema, &file_path, chunk));
 
     Ok(Box::pin(stream) as ArrowRecordBatchStream)
 }
