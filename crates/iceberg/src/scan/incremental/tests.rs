@@ -1246,17 +1246,18 @@ impl IncrementalTestFixture {
             let delete_batch =
                 concat_batches(&delete_batches[0].schema(), delete_batches.iter()).unwrap();
 
-            let pos_array = delete_batch
-                .column(0)
-                .as_primitive::<arrow_array::types::UInt64Type>();
-
-            // The file path column is a StringArray with materialized values
-            let file_path_column = delete_batch.column(1);
+            // The file path column is first (column 0)
+            let file_path_column = delete_batch.column(0);
             let file_path_array = file_path_column.as_string::<i32>();
+
+            // The pos column is second (column 1) and is Int64
+            let pos_array = delete_batch
+                .column(1)
+                .as_primitive::<arrow_array::types::Int64Type>();
 
             let mut deleted_pairs: Vec<(u64, String)> = (0..delete_batch.num_rows())
                 .map(|i| {
-                    let pos = pos_array.value(i);
+                    let pos = pos_array.value(i) as u64;
                     let file_path = file_path_array.value(i).to_string();
                     (pos, file_path)
                 })
