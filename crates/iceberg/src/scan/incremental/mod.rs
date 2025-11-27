@@ -427,20 +427,27 @@ impl IncrementalTableScan {
 
     /// Plans the files to be read in this incremental table scan.
     pub async fn plan_files(&self) -> Result<IncrementalFileScanTaskStream> {
+        eprintln!("[plan_files] START");
         let concurrency_limit_manifest_files = self.concurrency_limit_manifest_files;
         let concurrency_limit_manifest_entries = self.concurrency_limit_manifest_entries;
+        eprintln!("[plan_files] concurrency limits: manifest_files={}, manifest_entries={}",
+                  concurrency_limit_manifest_files, concurrency_limit_manifest_entries);
 
         // Used to stream `ManifestEntryContexts` between stages of the planning operation.
         let (manifest_entry_data_ctx_tx, manifest_entry_data_ctx_rx) =
             channel(concurrency_limit_manifest_files);
         let (manifest_entry_delete_ctx_tx, manifest_entry_delete_ctx_rx) =
             channel(concurrency_limit_manifest_files);
+        eprintln!("[plan_files] Created manifest entry channels");
 
         // Used to stream the results back to the caller.
         let (file_scan_task_tx, file_scan_task_rx) = channel(concurrency_limit_manifest_entries);
+        eprintln!("[plan_files] Created file scan task channel");
 
         let (delete_file_idx, delete_file_tx) = DeleteFileIndex::new();
+        eprintln!("[plan_files] Created delete file index");
 
+        eprintln!("[plan_files] Building manifest file contexts...");
         let manifest_file_contexts = self
             .plan_context
             .build_manifest_file_contexts(
@@ -449,28 +456,39 @@ impl IncrementalTableScan {
                 manifest_entry_delete_ctx_tx,
             )
             .await?;
+        eprintln!("[plan_files] Built manifest file contexts");
 
         let mut channel_for_manifest_error: Sender<Result<_>> = file_scan_task_tx.clone();
+        eprintln!("[plan_files] Cloned channel_for_manifest_error");
 
         // Concurrently load all [`Manifest`]s and stream their [`ManifestEntry`]s
+        eprintln!("[plan_files] Spawning manifest fetching task...");
         spawn(async move {
+            eprintln!("[manifest_fetch] Task started");
             let result = futures::stream::iter(manifest_file_contexts)
                 .try_for_each_concurrent(concurrency_limit_manifest_files, |ctx| async move {
+                    eprintln!("[manifest_fetch] Processing manifest context");
                     ctx.fetch_manifest_and_stream_manifest_entries().await
                 })
                 .await;
 
             if let Err(error) = result {
+                eprintln!("[manifest_fetch] ERROR: {:?}", error);
                 let _ = channel_for_manifest_error.send(Err(error)).await;
             }
+            eprintln!("[manifest_fetch] Task completed");
         });
+        eprintln!("[plan_files] Manifest fetching task spawned");
 
         let mut channel_for_data_manifest_entry_error = file_scan_task_tx.clone();
         let mut channel_for_delete_manifest_entry_error = file_scan_task_tx.clone();
+        eprintln!("[plan_files] Cloned error channels");
 
         // Process the delete file [`ManifestEntry`] stream in parallel. Builds the delete
         // index below.
+        eprintln!("[plan_files] Spawning delete processing task...");
         spawn(async move {
+            eprintln!("[delete_process] Task started");
             let result = manifest_entry_delete_ctx_rx
                 .map(|me_ctx| Ok((me_ctx, delete_file_tx.clone())))
                 .try_for_each_concurrent(
@@ -485,17 +503,24 @@ impl IncrementalTableScan {
                 .await;
 
             if let Err(error) = result {
+                eprintln!("[delete_process] ERROR: {:?}", error);
                 let _ = channel_for_delete_manifest_entry_error
                     .send(Err(error))
                     .await;
             }
+            eprintln!("[delete_process] Task completed");
         })
         .await;
+        eprintln!("[plan_files] Delete processing task completed");
 
         // TODO: Streaming this into the delete index seems somewhat redundant, as we
         // could directly stream into the CachingDeleteFileLoader and instantly load the
         // delete files.
+        eprintln!("[plan_files] Getting positional deletes from index...");
         let positional_deletes = delete_file_idx.positional_deletes().await;
+        eprintln!("[plan_files] Got {} positional delete entries", positional_deletes.len());
+
+        eprintln!("[plan_files] Loading delete files...");
         let result = self
             .plan_context
             .caching_delete_file_loader
@@ -504,11 +529,16 @@ impl IncrementalTableScan {
                 self.plan_context.to_snapshot_schema.clone(),
             )
             .await;
+        eprintln!("[plan_files] Delete files loaded");
 
         // Build the delete filter from the loaded deletes.
         let delete_filter = match result {
-            Ok(loaded_deletes) => loaded_deletes.unwrap(),
+            Ok(loaded_deletes) => {
+                eprintln!("[plan_files] Delete filter built successfully");
+                loaded_deletes.unwrap()
+            }
             Err(e) => {
+                eprintln!("[plan_files] ERROR loading deletes: {}", e);
                 return Err(Error::new(
                     ErrorKind::Unexpected,
                     format!("Failed to load positional deletes: {}", e),
@@ -517,8 +547,10 @@ impl IncrementalTableScan {
         };
 
         // Process the data file [`ManifestEntry`] stream in parallel
+        eprintln!("[plan_files] Spawning data processing task...");
         let filter = delete_filter.clone();
         spawn(async move {
+            eprintln!("[data_process] Task started");
             let result = manifest_entry_data_ctx_rx
                 .map(|me_ctx| Ok((me_ctx, file_scan_task_tx.clone())))
                 .try_for_each_concurrent(
@@ -558,13 +590,17 @@ impl IncrementalTableScan {
                 .await;
 
             if let Err(error) = result {
+                eprintln!("[data_process] ERROR: {:?}", error);
                 let _ = channel_for_data_manifest_entry_error.send(Err(error)).await;
             }
-        })
-        .await;
+            eprintln!("[data_process] Task completed");
+        });
+        eprintln!("[plan_files] Data processing task completed");
 
         // Collect all tasks from manifest processing.
+        eprintln!("[plan_files] Starting to collect all tasks from receiver...");
         let all_tasks = file_scan_task_rx.try_collect::<Vec<_>>().await?;
+        eprintln!("[plan_files] Collected {} tasks", all_tasks.len());
 
         // Separate tasks by type and compute file path sets in a single pass
         let mut append_tasks = Vec::new();
