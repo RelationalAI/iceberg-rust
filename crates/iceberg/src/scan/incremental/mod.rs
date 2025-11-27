@@ -509,8 +509,7 @@ impl IncrementalTableScan {
                     .await;
             }
             eprintln!("[delete_process] Task completed");
-        })
-        .await;
+        });
         eprintln!("[plan_files] Delete processing task completed");
 
         // TODO: Streaming this into the delete index seems somewhat redundant, as we
