@@ -560,7 +560,8 @@ impl IncrementalTableScan {
             if let Err(error) = result {
                 let _ = channel_for_data_manifest_entry_error.send(Err(error)).await;
             }
-        });
+        })
+        .await;
 
         // Collect all tasks from manifest processing.
         let all_tasks = file_scan_task_rx.try_collect::<Vec<_>>().await?;
