@@ -155,6 +155,10 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                     }
                 })
                 .await;
+            // Drop the senders to signal EOF to the receivers.
+            // This ensures both streams will properly terminate even if they have no data.
+            drop(appends_tx);
+            drop(deletes_tx);
         });
 
         Ok((
