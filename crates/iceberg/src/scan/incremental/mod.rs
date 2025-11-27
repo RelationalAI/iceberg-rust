@@ -489,18 +489,33 @@ impl IncrementalTableScan {
         eprintln!("[plan_files] Spawning delete processing task...");
         spawn(async move {
             eprintln!("[delete_process] Task started");
+            let mut count = 0;
             let result = manifest_entry_delete_ctx_rx
-                .map(|me_ctx| Ok((me_ctx, delete_file_tx.clone())))
+                .map(|me_ctx| {
+                    count += 1;
+                    eprintln!("[delete_process] Received entry #{}", count);
+                    Ok((me_ctx, delete_file_tx.clone()))
+                })
                 .try_for_each_concurrent(
                     concurrency_limit_manifest_entries,
                     |(manifest_entry_context, tx)| async move {
-                        spawn(async move {
-                            Self::process_delete_manifest_entry(tx, manifest_entry_context).await
+                        eprintln!("[delete_process] Spawning subtask for entry");
+                        let result = spawn(async move {
+                            eprintln!("[delete_process_subtask] Started");
+                            let res = Self::process_delete_manifest_entry(tx, manifest_entry_context).await;
+                            eprintln!("[delete_process_subtask] Completed: {:?}", res.is_ok());
+                            res
                         })
-                        .await
+                        .await;
+                        eprintln!("[delete_process] Subtask joined");
+                        result
                     },
                 )
                 .await;
+
+            // Drop the original sender so DeleteFileIndex.collect() can complete
+            drop(delete_file_tx);
+            eprintln!("[delete_process] Dropped original delete_file_tx");
 
             if let Err(error) = result {
                 eprintln!("[delete_process] ERROR: {:?}", error);
@@ -508,7 +523,7 @@ impl IncrementalTableScan {
                     .send(Err(error))
                     .await;
             }
-            eprintln!("[delete_process] Task completed");
+            eprintln!("[delete_process] Task completed, processed {} entries", count);
         });
         eprintln!("[plan_files] Delete processing task completed");
 
