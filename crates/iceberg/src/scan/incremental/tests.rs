@@ -2801,7 +2801,7 @@ async fn test_incremental_scan_with_no_deletes() {
     // Use concurrency limit of 1 to stress-test the fix with maximum serialization
     let scan = table
         .incremental_scan(Some(from_snapshot), Some(to_snapshot))
-        .with_concurrency_limit_data_files(1)
+        .with_data_file_concurrency_limit(1)
         .build()
         .unwrap();
 
@@ -2862,9 +2862,9 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
     let scan = fixture
         .table
         .incremental_scan(None, None)
-        .with_concurrency_limit_manifest_files(2)
-        .with_concurrency_limit_data_files(1024)
-        .with_concurrency_limit_manifest_entries(256)
+        .with_manifest_file_concurrency_limit(2)
+        .with_data_file_concurrency_limit(1024)
+        .with_manifest_entry_concurrency_limit(256)
         .with_batch_size(Some(50))
         .build()
         .unwrap();
