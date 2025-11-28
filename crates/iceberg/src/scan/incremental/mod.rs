@@ -484,9 +484,6 @@ impl IncrementalTableScan {
                 )
                 .await;
 
-            // Drop the original sender so DeleteFileIndex.collect() can complete
-            drop(delete_file_tx);
-
             if let Err(error) = result {
                 let _ = channel_for_delete_manifest_entry_error
                     .send(Err(error))
@@ -498,7 +495,6 @@ impl IncrementalTableScan {
         // could directly stream into the CachingDeleteFileLoader and instantly load the
         // delete files.
         let positional_deletes = delete_file_idx.positional_deletes().await;
-
         let result = self
             .plan_context
             .caching_delete_file_loader
