@@ -2842,7 +2842,7 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
     let snapshot3_data: Vec<_> = (201..=300).map(|n| (n, format!("third-{}", n))).collect();
 
     // Snapshot 4: Positional delete of 2 rows from first file
-    let deletes = vec![(0, "data-1.parquet"), (1, "data-1.parquet")];
+    let deletes = [(0, "data-1.parquet"), (1, "data-1.parquet")];
 
     let fixture = IncrementalTestFixture::new(vec![
         Operation::Add(snapshot1_data, "data-1.parquet".to_string()),
