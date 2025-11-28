@@ -484,18 +484,18 @@ impl IncrementalTableScan {
         let mut channel_for_delete_manifest_entry_error = file_scan_task_tx.clone();
         eprintln!("[plan_files] Cloned error channels");
 
-        // Spawn a task to buffer all data entries so manifest fetching doesn't block.
-        // We need to do this before waiting on delete processing to avoid deadlock:
-        // manifest fetching sends to both data and delete channels, but data processing
-        // can't start until delete processing completes (to build the delete filter).
-        eprintln!("[plan_files] Spawning data buffering task...");
-        let data_entries_handle = spawn(async move {
-            eprintln!("[data_buffer] Task started");
-            let entries = manifest_entry_data_ctx_rx.collect::<Vec<_>>().await;
-            eprintln!("[data_buffer] Buffered {} data entries", entries.len());
-            entries
-        });
-        eprintln!("[plan_files] Data buffering task spawned");
+        // // Spawn a task to buffer all data entries so manifest fetching doesn't block.
+        // // We need to do this before waiting on delete processing to avoid deadlock:
+        // // manifest fetching sends to both data and delete channels, but data processing
+        // // can't start until delete processing completes (to build the delete filter).
+        // eprintln!("[plan_files] Spawning data buffering task...");
+        // let data_entries_handle = spawn(async move {
+        //     eprintln!("[data_buffer] Task started");
+        //     let entries = manifest_entry_data_ctx_rx.collect::<Vec<_>>().await;
+        //     eprintln!("[data_buffer] Buffered {} data entries", entries.len());
+        //     entries
+        // });
+        // eprintln!("[plan_files] Data buffering task spawned");
 
         // Process the delete file [`ManifestEntry`] stream in parallel. Builds the delete
         // index below.
@@ -573,17 +573,17 @@ impl IncrementalTableScan {
             }
         };
 
-        // Get the buffered data entries and process them with the delete filter
-        eprintln!("[plan_files] Waiting for buffered data entries...");
-        let data_entries = data_entries_handle.await;
-        eprintln!("[plan_files] Got {} buffered data entries", data_entries.len());
+        // // Get the buffered data entries and process them with the delete filter
+        // eprintln!("[plan_files] Waiting for buffered data entries...");
+        // let data_entries = data_entries_handle.await;
+        // eprintln!("[plan_files] Got {} buffered data entries", data_entries.len());
 
         // Process the data file [`ManifestEntry`] stream in parallel
         eprintln!("[plan_files] Spawning data processing task...");
         let filter = delete_filter.clone();
         spawn(async move {
             eprintln!("[data_process] Task started");
-            let result = futures::stream::iter(data_entries)
+            let result = manifest_entry_data_ctx_rx
                 .map(|me_ctx| Ok((me_ctx, file_scan_task_tx.clone())))
                 .try_for_each_concurrent(
                     concurrency_limit_manifest_entries,
