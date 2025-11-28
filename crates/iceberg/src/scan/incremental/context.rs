@@ -104,7 +104,10 @@ impl IncrementalPlanContext {
 
         let mut mfcs = vec![];
         // Process delete manifests first, then data manifests
-        for manifest_file in delete_manifests.into_iter().chain(data_manifests.into_iter()) {
+        for manifest_file in delete_manifests
+            .into_iter()
+            .chain(data_manifests.into_iter())
+        {
             let tx = if manifest_file.content == ManifestContentType::Deletes {
                 delete_file_tx.clone()
             } else {

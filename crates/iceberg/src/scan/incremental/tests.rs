@@ -2848,7 +2848,12 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
         Operation::Add(snapshot1_data, "data-1.parquet".to_string()),
         Operation::Add(snapshot2_data, "data-2.parquet".to_string()),
         Operation::Add(snapshot3_data, "data-3.parquet".to_string()),
-        Operation::Delete(deletes.iter().map(|(pos, file)| (*pos, file.to_string())).collect()),
+        Operation::Delete(
+            deletes
+                .iter()
+                .map(|(pos, file)| (*pos, file.to_string()))
+                .collect(),
+        ),
     ])
     .await;
 
@@ -2870,12 +2875,18 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
     // Read deletes first (this is important for triggering the deadlock)
     eprintln!("Starting to read delete stream...");
     let delete_batches: Vec<_> = delete_stream.try_collect().await.unwrap();
-    eprintln!("Finished reading delete stream, got {} batches", delete_batches.len());
+    eprintln!(
+        "Finished reading delete stream, got {} batches",
+        delete_batches.len()
+    );
 
     // Then read appends
     eprintln!("Starting to read append stream...");
     let append_batches: Vec<_> = append_stream.try_collect().await.unwrap();
-    eprintln!("Finished reading append stream, got {} batches", append_batches.len());
+    eprintln!(
+        "Finished reading append stream, got {} batches",
+        append_batches.len()
+    );
 
     // Verify we got the expected data
     assert!(delete_batches.is_empty(), "Should not have delete batches");
@@ -2885,7 +2896,10 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
     let total_delete_rows: usize = delete_batches.iter().map(|b| b.num_rows()).sum();
     let total_append_rows: usize = append_batches.iter().map(|b| b.num_rows()).sum();
 
-    eprintln!("Total delete rows: {}, total append rows: {}", total_delete_rows, total_append_rows);
+    eprintln!(
+        "Total delete rows: {}, total append rows: {}",
+        total_delete_rows, total_append_rows
+    );
 
     // We expect 2 deletes and 300 appends
     assert_eq!(total_delete_rows, 0, "Should have 0 deleted rows");

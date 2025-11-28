@@ -110,7 +110,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                     .await;
                                 });
                                 Ok(())
-                            }) as Pin<Box<dyn futures::Future<Output = Result<()>> + Send>>
+                            })
+                                as Pin<Box<dyn futures::Future<Output = Result<()>> + Send>>
                         }
                         IncrementalFileScanTask::Delete(deleted_file_task) => {
                             let deletes_tx = deletes_tx.clone();
@@ -134,12 +135,10 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                     .await;
                                 });
                                 Ok(())
-                            }) as Pin<Box<dyn futures::Future<Output = Result<()>> + Send>>
+                            })
+                                as Pin<Box<dyn futures::Future<Output = Result<()>> + Send>>
                         }
-                        IncrementalFileScanTask::PositionalDeletes(
-                            file_path,
-                            delete_vector,
-                        ) => {
+                        IncrementalFileScanTask::PositionalDeletes(file_path, delete_vector) => {
                             let deletes_tx = deletes_tx.clone();
                             Box::pin(async move {
                                 spawn(async move {
@@ -157,7 +156,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                     .await;
                                 });
                                 Ok(())
-                            }) as Pin<Box<dyn futures::Future<Output = Result<()>> + Send>>
+                            })
+                                as Pin<Box<dyn futures::Future<Output = Result<()>> + Send>>
                         }
                     }
                 })
