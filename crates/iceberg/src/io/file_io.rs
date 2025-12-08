@@ -290,6 +290,24 @@ impl FileIOBuilder {
         self
     }
 
+    /// Creates an operator for the given path without building a full FileIO.
+    /// This is useful for creating a cached operator to pass to `with_operator`.
+    ///
+    /// # Arguments
+    ///
+    /// * path: A sample path to create the operator for. The operator will be configured
+    ///         based on the scheme and properties of this builder.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple of (Operator, relative_path) where the Operator can be used
+    /// with `with_operator` and relative_path is the path relative to the operator's root.
+    pub fn create_operator(&self, path: impl AsRef<str>) -> Result<(Operator, String)> {
+        let storage = Storage::build(self.clone())?;
+        let (op, relative_path) = storage.create_operator(&path)?;
+        Ok((op, relative_path.to_string()))
+    }
+
     /// Builds [`FileIO`].
     pub fn build(self) -> Result<FileIO> {
         let storage = Storage::build(self.clone())?;
@@ -493,7 +511,7 @@ mod tests {
     use futures::io::AllowStdIo;
     use tempfile::TempDir;
 
-    use super::{FileIO, FileIOBuilder, Storage};
+    use super::{FileIO, FileIOBuilder};
 
     fn create_local_file_io() -> FileIO {
         FileIOBuilder::new_fs_io().build().unwrap()
@@ -648,10 +666,9 @@ mod tests {
 
         write_to_file(content, &full_path);
 
-        // Create a local filesystem operator
+        // Create a local filesystem operator using the public API
         let fs_builder = FileIOBuilder::new_fs_io();
-        let fs_storage = Storage::build(fs_builder.clone()).unwrap();
-        let (operator, _) = fs_storage.create_operator(&full_path).unwrap();
+        let (operator, _) = fs_builder.create_operator(&full_path).unwrap();
 
         // Create an S3 storage builder and FileIO with the cached local operator
         // This allows us to pass S3 paths, but use the local filesystem operator
