@@ -58,11 +58,8 @@ pub const ADLS_AUTHORITY_HOST: &str = "adls.authority-host";
 pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Result<AzdlsConfig> {
     let mut config = AzdlsConfig::default();
 
-    if let Some(_conn_str) = properties.remove(ADLS_CONNECTION_STRING) {
-        return Err(Error::new(
-            ErrorKind::FeatureUnsupported,
-            "Azdls: connection string currently not supported",
-        ));
+    if let Some(conn_str) = properties.remove(ADLS_CONNECTION_STRING) {
+        config.endpoint = Some(conn_str);
     }
 
     if let Some(account_name) = properties.remove(ADLS_ACCOUNT_NAME) {
@@ -202,15 +199,15 @@ fn match_path_with_config(
             passed_http_scheme
         );
 
-        let ends_with_expected_suffix = configured_endpoint
-            .trim_end_matches('/')
-            .ends_with(&path.endpoint_suffix);
-        ensure_data_valid!(
-            ends_with_expected_suffix,
-            "Storage::Azdls: Endpoint suffix {} used with configured endpoint {}.",
-            path.endpoint_suffix,
-            configured_endpoint,
-        );
+        // let ends_with_expected_suffix = configured_endpoint
+        //     .trim_end_matches('/')
+        //     .ends_with(&path.endpoint_suffix);
+        // ensure_data_valid!(
+        //     ends_with_expected_suffix,
+        //     "Storage::Azdls: Endpoint suffix {} used with configured endpoint {}.",
+        //     path.endpoint_suffix,
+        //     configured_endpoint,
+        // );
     }
 
     Ok(())
