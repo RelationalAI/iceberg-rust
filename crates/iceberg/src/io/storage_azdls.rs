@@ -210,7 +210,8 @@ fn match_path_with_config(
         );
 
         // Skip endpoint suffix check for local endpoints (e.g., Azurite)
-        let is_local = configured_endpoint.contains("127.0.0.1") || configured_endpoint.contains("localhost");
+        let is_local =
+            configured_endpoint.contains("127.0.0.1") || configured_endpoint.contains("localhost");
         if !is_local {
             let ends_with_expected_suffix = configured_endpoint
                 .trim_end_matches('/')
@@ -377,8 +378,14 @@ mod tests {
             (
                 "endpoint pointing to azurite",
                 HashMap::from([
-                    (super::ADLS_ENDPOINT.to_string(), "http://127.0.0.1:10000/devstoreaccount1".to_string()),
-                    (super::ADLS_ACCOUNT_NAME.to_string(), "devstoreaccount1".to_string()),
+                    (
+                        super::ADLS_ENDPOINT.to_string(),
+                        "http://127.0.0.1:10000/devstoreaccount1".to_string(),
+                    ),
+                    (
+                        super::ADLS_ACCOUNT_NAME.to_string(),
+                        "devstoreaccount1".to_string(),
+                    ),
                     (super::ADLS_ACCOUNT_KEY.to_string(), "secret".to_string()),
                 ]),
                 Some(AzdlsConfig {
