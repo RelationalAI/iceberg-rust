@@ -41,6 +41,10 @@ pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Res
         ));
     }
 
+    if let Some(endpoint) = properties.remove(ADLS_ENDPOINT) {
+        config.endpoint = Some(endpoint);
+    }
+
     if let Some(account_name) = properties.remove(ADLS_ACCOUNT_NAME) {
         config.account_name = Some(account_name);
     }
@@ -210,15 +214,20 @@ fn match_path_with_config(
             passed_http_scheme
         );
 
-        let ends_with_expected_suffix = configured_endpoint
-            .trim_end_matches('/')
-            .ends_with(&path.endpoint_suffix);
-        ensure_data_valid!(
-            ends_with_expected_suffix,
-            "Storage::Azdls: Endpoint suffix {} used with configured endpoint {}.",
-            path.endpoint_suffix,
-            configured_endpoint,
-        );
+        // Skip endpoint suffix check for local endpoints (e.g., Azurite)
+        let is_local =
+            configured_endpoint.contains("127.0.0.1") || configured_endpoint.contains("localhost");
+        if !is_local {
+            let ends_with_expected_suffix = configured_endpoint
+                .trim_end_matches('/')
+                .ends_with(&path.endpoint_suffix);
+            ensure_data_valid!(
+                ends_with_expected_suffix,
+                "Storage::Azdls: Endpoint suffix {} used with configured endpoint {}.",
+                path.endpoint_suffix,
+                configured_endpoint,
+            );
+        }
     }
 
     Ok(())
@@ -361,6 +370,26 @@ mod tests {
                 ]),
                 Some(AzdlsConfig {
                     account_name: Some("test".to_string()),
+                    account_key: Some("secret".to_string()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "endpoint pointing to azurite",
+                HashMap::from([
+                    (
+                        super::ADLS_ENDPOINT.to_string(),
+                        "http://127.0.0.1:10000/devstoreaccount1".to_string(),
+                    ),
+                    (
+                        super::ADLS_ACCOUNT_NAME.to_string(),
+                        "devstoreaccount1".to_string(),
+                    ),
+                    (super::ADLS_ACCOUNT_KEY.to_string(), "secret".to_string()),
+                ]),
+                Some(AzdlsConfig {
+                    endpoint: Some("http://127.0.0.1:10000/devstoreaccount1".to_string()),
+                    account_name: Some("devstoreaccount1".to_string()),
                     account_key: Some("secret".to_string()),
                     ..Default::default()
                 }),
@@ -551,6 +580,20 @@ mod tests {
                     AzureStorageScheme::Abfs,
                 ),
                 Some(("myfs", "/path/to/file.parquet")),
+            ),
+            (
+                "azurite endpoint with explicit configuration",
+                (
+                    "wasb://testfs@devstoreaccount1.blob.core.windows.net/path/to/data.parquet",
+                    AzdlsConfig {
+                        account_name: Some("devstoreaccount1".to_string()),
+                        endpoint: Some("http://127.0.0.1:10000/devstoreaccount1".to_string()),
+                        account_key: Some("secret".to_string()),
+                        ..Default::default()
+                    },
+                    AzureStorageScheme::Wasb,
+                ),
+                Some(("testfs", "/path/to/data.parquet")),
             ),
         ];
 

@@ -46,6 +46,8 @@ pub const ADLS_CLIENT_SECRET: &str = "adls.client-secret";
 /// - required for client_credentials authentication
 /// - default value: `https://login.microsoftonline.com`
 pub const ADLS_AUTHORITY_HOST: &str = "adls.authority-host";
+/// The endpoint of the storage account.
+pub const ADLS_ENDPOINT: &str = "adls.endpoint";
 
 /// Azure Data Lake Storage configuration.
 ///
