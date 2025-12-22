@@ -618,7 +618,12 @@ async fn test_authenticator_persists_across_operations() {
 
     // List the namespace (should use the same authenticator)
     let list_result = catalog_with_auth.list_namespaces(None).await.unwrap();
-    assert!(list_result.contains(ns.name()), "Namespace {:?} not found in list {:?}", ns.name(), list_result);
+    assert!(
+        list_result.contains(ns.name()),
+        "Namespace {:?} not found in list {:?}",
+        ns.name(),
+        list_result
+    );
 
     let count_after_list = *operation_count.lock().unwrap();
 
