@@ -21,6 +21,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use iceberg::io::{self, FileIO};
@@ -34,11 +35,12 @@ use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, {self},
 };
 use reqwest::{Client, Method, StatusCode, Url};
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 use typed_builder::TypedBuilder;
 
 use crate::client::{
-    HttpClient, deserialize_catalog_response, deserialize_unexpected_catalog_error,
+    HttpClient, TokenAuthenticator, deserialize_catalog_response,
+    deserialize_unexpected_catalog_error,
 };
 use crate::types::{
     CatalogConfig, CommitTableRequest, CommitTableResponse, CreateTableRequest,
@@ -327,6 +329,8 @@ pub struct RestCatalog {
     ctx: OnceCell<RestContext>,
     /// Extensions for the FileIOBuilder.
     file_io_extensions: io::Extensions,
+    /// Custom token authenticator (must be set before first use)
+    authenticator: Mutex<Option<Arc<dyn TokenAuthenticator>>>,
 }
 
 impl RestCatalog {
@@ -336,6 +340,7 @@ impl RestCatalog {
             user_config: config,
             ctx: OnceCell::new(),
             file_io_extensions: io::Extensions::default(),
+            authenticator: Mutex::new(None),
         }
     }
 
@@ -345,11 +350,35 @@ impl RestCatalog {
         self
     }
 
+    /// Set a custom token authenticator.
+    ///
+    /// The authenticator will be used to obtain tokens instead of using static tokens
+    /// or OAuth credentials. This must be called before any catalog operations.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let authenticator = Arc::new(MyTokenAuthenticator::new());
+    /// let catalog = RestCatalogBuilder::default()
+    ///     .load("rest", config)
+    ///     .await?
+    ///     .with_token_authenticator(authenticator);
+    /// ```
+    pub async fn with_token_authenticator(self, authenticator: Arc<dyn TokenAuthenticator>) -> Self {
+        *self.authenticator.lock().await = Some(authenticator);
+        self
+    }
+
     /// Gets the [`RestContext`] from the catalog.
     async fn context(&self) -> Result<&RestContext> {
         self.ctx
             .get_or_try_init(|| async {
-                let client = HttpClient::new(&self.user_config)?;
+                let mut client = HttpClient::new(&self.user_config)?;
+
+                // Set authenticator if one was configured
+                if let Some(authenticator) = self.authenticator.lock().await.clone() {
+                    client = client.with_authenticator(authenticator);
+                }
+
                 let catalog_config = RestCatalog::load_config(&client, &self.user_config).await?;
                 let config = self.user_config.clone().merge_with_config(catalog_config);
                 let client = client.update_with(&config)?;
