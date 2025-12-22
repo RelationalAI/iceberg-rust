@@ -201,16 +201,12 @@ impl HttpClient {
     }
 
     /// Add bearer token to request authorization header.
-    fn set_bearer_token(req: &mut Request, token: &str) -> Result<()> {
+    fn set_bearer_token(req: &mut Request, token: &str, error_msg: &str) -> Result<()> {
         req.headers_mut().insert(
             http::header::AUTHORIZATION,
-            format!("Bearer {token}").parse().map_err(|e| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    "Invalid token received from catalog server!",
-                )
-                .with_source(e)
-            })?,
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|e| Error::new(ErrorKind::DataInvalid, error_msg).with_source(e))?,
         );
         Ok(())
     }
@@ -248,7 +244,7 @@ impl HttpClient {
         // Try authenticator first (highest priority)
         if let Some(authenticator) = &self.authenticator {
             let token = authenticator.get_token().await?;
-            Self::set_bearer_token(req, &token)?;
+            Self::set_bearer_token(req, &token, "Invalid custom token")?;
             return Ok(());
         }
 
@@ -271,7 +267,7 @@ impl HttpClient {
             }
         };
 
-        Self::set_bearer_token(req, &token)?;
+        Self::set_bearer_token(req, &token, "Invalid token received from catalog server!")?;
         Ok(())
     }
 

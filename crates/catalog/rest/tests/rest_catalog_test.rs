@@ -456,8 +456,24 @@ async fn test_register_table() {
     );
 }
 
-#[tokio::test]
-async fn test_authenticator_token_refresh() {
+#[derive(Debug)]
+struct CountingAuthenticator {
+    count: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl CustomAuthenticator for CountingAuthenticator {
+    async fn get_token(&self) -> IcebergResult<String> {
+        let mut c = self.count.lock().unwrap();
+        *c += 1;
+        // Return a unique token each time to ensure dynamic generation
+        Ok(format!("token_{}", *c))
+    }
+}
+
+async fn get_catalog_with_authenticator(
+    authenticator: Arc<dyn CustomAuthenticator>,
+) -> RestCatalog {
     set_up();
 
     let rest_catalog_ip = {
@@ -472,30 +488,7 @@ async fn test_authenticator_token_refresh() {
         sleep(std::time::Duration::from_millis(1000)).await;
     }
 
-    // Track how many times tokens were requested
-    let token_request_count = Arc::new(Mutex::new(0));
-    let token_request_count_clone = token_request_count.clone();
-
-    #[derive(Debug)]
-    struct CountingAuthenticator {
-        count: Arc<Mutex<usize>>,
-    }
-
-    #[async_trait]
-    impl CustomAuthenticator for CountingAuthenticator {
-        async fn get_token(&self) -> IcebergResult<String> {
-            let mut c = self.count.lock().unwrap();
-            *c += 1;
-            // Return a unique token each time to ensure dynamic generation
-            Ok(format!("token_{}", *c))
-        }
-    }
-
-    let authenticator = Arc::new(CountingAuthenticator {
-        count: token_request_count_clone,
-    });
-
-    let catalog_with_auth = RestCatalogBuilder::default()
+    RestCatalogBuilder::default()
         .with_token_authenticator(authenticator)
         .load(
             "rest",
@@ -505,7 +498,20 @@ async fn test_authenticator_token_refresh() {
             )]),
         )
         .await
-        .unwrap();
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_authenticator_token_refresh() {
+    // Track how many times tokens were requested
+    let token_request_count = Arc::new(Mutex::new(0));
+    let token_request_count_clone = token_request_count.clone();
+
+    let authenticator = Arc::new(CountingAuthenticator {
+        count: token_request_count_clone,
+    });
+
+    let catalog_with_auth = get_catalog_with_authenticator(authenticator).await;
 
     // Perform multiple operations that should trigger token requests
     let ns1 = Namespace::with_properties(
@@ -537,52 +543,14 @@ async fn test_authenticator_token_refresh() {
 
 #[tokio::test]
 async fn test_authenticator_persists_across_operations() {
-    set_up();
-
-    let rest_catalog_ip = {
-        let guard = DOCKER_COMPOSE_ENV.read().unwrap();
-        let docker_compose = guard.as_ref().unwrap();
-        docker_compose.get_container_ip("rest")
-    };
-
-    let rest_socket_addr = SocketAddr::new(rest_catalog_ip, REST_CATALOG_PORT);
-    while !scan_port_addr(rest_socket_addr) {
-        info!("Waiting for 1s rest catalog to ready...");
-        sleep(std::time::Duration::from_millis(1000)).await;
-    }
-
     let operation_count = Arc::new(Mutex::new(0));
     let operation_count_clone = operation_count.clone();
-
-    #[derive(Debug)]
-    struct CountingAuthenticator {
-        count: Arc<Mutex<usize>>,
-    }
-
-    #[async_trait]
-    impl CustomAuthenticator for CountingAuthenticator {
-        async fn get_token(&self) -> IcebergResult<String> {
-            let mut c = self.count.lock().unwrap();
-            *c += 1;
-            Ok("persistent_token".to_string())
-        }
-    }
 
     let authenticator = Arc::new(CountingAuthenticator {
         count: operation_count_clone,
     });
 
-    let catalog_with_auth = RestCatalogBuilder::default()
-        .with_token_authenticator(authenticator)
-        .load(
-            "rest",
-            HashMap::from([(
-                REST_CATALOG_PROP_URI.to_string(),
-                format!("http://{rest_socket_addr}"),
-            )]),
-        )
-        .await
-        .unwrap();
+    let catalog_with_auth = get_catalog_with_authenticator(authenticator).await;
 
     // Create a namespace
     let ns = Namespace::with_properties(
