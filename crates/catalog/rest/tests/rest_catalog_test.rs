@@ -19,13 +19,19 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
+use async_trait::async_trait;
 use ctor::{ctor, dtor};
 use iceberg::spec::{FormatVersion, NestedField, PrimitiveType, Schema, Type};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
-use iceberg::{Catalog, CatalogBuilder, Namespace, NamespaceIdent, TableCreation, TableIdent};
-use iceberg_catalog_rest::{REST_CATALOG_PROP_URI, RestCatalog, RestCatalogBuilder};
+use iceberg::{
+    Catalog, CatalogBuilder, Namespace, NamespaceIdent, Result as IcebergResult, TableCreation,
+    TableIdent,
+};
+use iceberg_catalog_rest::{
+    REST_CATALOG_PROP_URI, RestCatalog, RestCatalogBuilder, TokenAuthenticator,
+};
 use iceberg_test_utils::docker::DockerCompose;
 use iceberg_test_utils::{normalize_test_name, set_up};
 use port_scanner::scan_port_addr;
@@ -455,12 +461,6 @@ async fn test_catalog_with_custom_token_authenticator() {
     let catalog = get_catalog().await;
 
     // Create a mock authenticator that returns a fixed token
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-    use iceberg::Result;
-    use iceberg_catalog_rest::TokenAuthenticator;
-
     #[derive(Debug)]
     struct TestAuthenticator {
         token: String,
@@ -469,7 +469,7 @@ async fn test_catalog_with_custom_token_authenticator() {
 
     #[async_trait]
     impl TokenAuthenticator for TestAuthenticator {
-        async fn get_token(&self) -> Result<String> {
+        async fn get_token(&self) -> IcebergResult<String> {
             let mut count = self.call_count.lock().unwrap();
             *count += 1;
             Ok(self.token.clone())
@@ -512,12 +512,6 @@ async fn test_catalog_with_custom_token_authenticator() {
 async fn test_authenticator_token_refresh() {
     let catalog = get_catalog().await;
 
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-    use iceberg::Result;
-    use iceberg_catalog_rest::TokenAuthenticator;
-
     // Track how many times tokens were requested
     let token_request_count = Arc::new(Mutex::new(0));
     let token_request_count_clone = token_request_count.clone();
@@ -529,7 +523,7 @@ async fn test_authenticator_token_refresh() {
 
     #[async_trait]
     impl TokenAuthenticator for CountingAuthenticator {
-        async fn get_token(&self) -> Result<String> {
+        async fn get_token(&self) -> IcebergResult<String> {
             let mut c = self.count.lock().unwrap();
             *c += 1;
             // Return a unique token each time to ensure dynamic generation
@@ -575,12 +569,6 @@ async fn test_authenticator_token_refresh() {
 async fn test_authenticator_persists_across_operations() {
     let catalog = get_catalog().await;
 
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-    use iceberg::Result;
-    use iceberg_catalog_rest::TokenAuthenticator;
-
     let operation_count = Arc::new(Mutex::new(0));
     let operation_count_clone = operation_count.clone();
 
@@ -591,7 +579,7 @@ async fn test_authenticator_persists_across_operations() {
 
     #[async_trait]
     impl TokenAuthenticator for CountingAuthenticator {
-        async fn get_token(&self) -> Result<String> {
+        async fn get_token(&self) -> IcebergResult<String> {
             let mut c = self.count.lock().unwrap();
             *c += 1;
             Ok("persistent_token".to_string())
