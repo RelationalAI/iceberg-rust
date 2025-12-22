@@ -35,7 +35,7 @@ use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, {self},
 };
 use reqwest::{Client, Method, StatusCode, Url};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::OnceCell;
 use typed_builder::TypedBuilder;
 
 use crate::client::{
@@ -330,7 +330,7 @@ pub struct RestCatalog {
     /// Extensions for the FileIOBuilder.
     file_io_extensions: io::Extensions,
     /// Custom token authenticator (must be set before first use)
-    authenticator: Mutex<Option<Arc<dyn TokenAuthenticator>>>,
+    authenticator: OnceCell<Arc<dyn TokenAuthenticator>>,
 }
 
 impl RestCatalog {
@@ -340,7 +340,7 @@ impl RestCatalog {
             user_config: config,
             ctx: OnceCell::new(),
             file_io_extensions: io::Extensions::default(),
-            authenticator: Mutex::new(None),
+            authenticator: OnceCell::new(),
         }
     }
 
@@ -363,11 +363,11 @@ impl RestCatalog {
     ///     .await?
     ///     .with_token_authenticator(authenticator);
     /// ```
-    pub async fn with_token_authenticator(
+    pub fn with_token_authenticator(
         self,
         authenticator: Arc<dyn TokenAuthenticator>,
     ) -> Self {
-        *self.authenticator.lock().await = Some(authenticator);
+        let _ = self.authenticator.set(authenticator);
         self
     }
 
@@ -378,8 +378,8 @@ impl RestCatalog {
                 let mut client = HttpClient::new(&self.user_config)?;
 
                 // Set authenticator if one was configured
-                if let Some(authenticator) = self.authenticator.lock().await.clone() {
-                    client = client.with_authenticator(authenticator);
+                if let Some(authenticator) = self.authenticator.get() {
+                    client = client.with_authenticator(authenticator.clone());
                 }
 
                 let catalog_config = RestCatalog::load_config(&client, &self.user_config).await?;
