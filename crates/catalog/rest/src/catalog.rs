@@ -363,10 +363,7 @@ impl RestCatalog {
     ///     .await?
     ///     .with_token_authenticator(authenticator);
     /// ```
-    pub fn with_token_authenticator(
-        self,
-        authenticator: Arc<dyn TokenAuthenticator>,
-    ) -> Self {
+    pub fn with_token_authenticator(self, authenticator: Arc<dyn TokenAuthenticator>) -> Self {
         let _ = self.authenticator.set(authenticator);
         self
     }
