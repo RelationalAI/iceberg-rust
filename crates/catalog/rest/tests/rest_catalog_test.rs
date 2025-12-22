@@ -449,3 +449,186 @@ async fn test_register_table() {
         table_registered.identifier().to_string()
     );
 }
+
+#[tokio::test]
+async fn test_catalog_with_custom_token_authenticator() {
+    let catalog = get_catalog().await;
+
+    // Create a mock authenticator that returns a fixed token
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use iceberg::Result;
+    use iceberg_catalog_rest::TokenAuthenticator;
+
+    #[derive(Debug)]
+    struct TestAuthenticator {
+        token: String,
+        call_count: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl TokenAuthenticator for TestAuthenticator {
+        async fn get_token(&self) -> Result<String> {
+            let mut count = self.call_count.lock().unwrap();
+            *count += 1;
+            Ok(self.token.clone())
+        }
+    }
+
+    let call_count = Arc::new(Mutex::new(0));
+    let authenticator = Arc::new(TestAuthenticator {
+        token: "test_token_123".to_string(),
+        call_count: call_count.clone(),
+    });
+
+    // Apply authenticator before first use
+    let catalog_with_auth = catalog.with_token_authenticator(authenticator);
+
+    // Create a namespace to trigger a catalog operation
+    let ns = Namespace::with_properties(
+        NamespaceIdent::from_strs(["test_custom_auth", "namespace"]).unwrap(),
+        HashMap::from([("owner".to_string(), "test_user".to_string())]),
+    );
+
+    let created_ns = catalog_with_auth
+        .create_namespace(ns.name(), ns.properties().clone())
+        .await
+        .unwrap();
+
+    assert_eq!(ns.name(), created_ns.name());
+    assert_map_contains(ns.properties(), created_ns.properties());
+
+    // Verify authenticator was called
+    let count = *call_count.lock().unwrap();
+    assert!(
+        count > 0,
+        "Authenticator should have been called at least once, but was called {} times",
+        count
+    );
+}
+
+#[tokio::test]
+async fn test_authenticator_token_refresh() {
+    let catalog = get_catalog().await;
+
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use iceberg::Result;
+    use iceberg_catalog_rest::TokenAuthenticator;
+
+    // Track how many times tokens were requested
+    let token_request_count = Arc::new(Mutex::new(0));
+    let token_request_count_clone = token_request_count.clone();
+
+    #[derive(Debug)]
+    struct CountingAuthenticator {
+        count: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl TokenAuthenticator for CountingAuthenticator {
+        async fn get_token(&self) -> Result<String> {
+            let mut c = self.count.lock().unwrap();
+            *c += 1;
+            // Return a unique token each time to ensure dynamic generation
+            Ok(format!("token_{}", *c))
+        }
+    }
+
+    let authenticator = Arc::new(CountingAuthenticator {
+        count: token_request_count_clone,
+    });
+
+    let catalog_with_auth = catalog.with_token_authenticator(authenticator);
+
+    // Perform multiple operations that should trigger token requests
+    let ns1 = Namespace::with_properties(
+        NamespaceIdent::from_strs(["test_refresh_1"]).unwrap(),
+        HashMap::new(),
+    );
+    catalog_with_auth
+        .create_namespace(ns1.name(), HashMap::new())
+        .await
+        .unwrap();
+
+    let ns2 = Namespace::with_properties(
+        NamespaceIdent::from_strs(["test_refresh_2"]).unwrap(),
+        HashMap::new(),
+    );
+    catalog_with_auth
+        .create_namespace(ns2.name(), HashMap::new())
+        .await
+        .unwrap();
+
+    // Verify authenticator was called multiple times
+    let count = *token_request_count.lock().unwrap();
+    assert!(
+        count >= 2,
+        "Authenticator should have been called at least twice, but was called {} times",
+        count
+    );
+}
+
+#[tokio::test]
+async fn test_authenticator_persists_across_operations() {
+    let catalog = get_catalog().await;
+
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use iceberg::Result;
+    use iceberg_catalog_rest::TokenAuthenticator;
+
+    let operation_count = Arc::new(Mutex::new(0));
+    let operation_count_clone = operation_count.clone();
+
+    #[derive(Debug)]
+    struct CountingAuthenticator {
+        count: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl TokenAuthenticator for CountingAuthenticator {
+        async fn get_token(&self) -> Result<String> {
+            let mut c = self.count.lock().unwrap();
+            *c += 1;
+            Ok("persistent_token".to_string())
+        }
+    }
+
+    let authenticator = Arc::new(CountingAuthenticator {
+        count: operation_count_clone,
+    });
+
+    let catalog_with_auth = catalog.with_token_authenticator(authenticator);
+
+    // Create a namespace
+    let ns = Namespace::with_properties(
+        NamespaceIdent::from_strs(["test_persist", "auth"]).unwrap(),
+        HashMap::new(),
+    );
+    catalog_with_auth
+        .create_namespace(ns.name(), HashMap::new())
+        .await
+        .unwrap();
+
+    let count_after_create = *operation_count.lock().unwrap();
+
+    // List the namespace (should use the same authenticator)
+    let list_result = catalog_with_auth.list_namespaces(None).await.unwrap();
+    assert!(list_result.contains(ns.name()));
+
+    let count_after_list = *operation_count.lock().unwrap();
+
+    // Verify authenticator was used for both operations
+    assert!(
+        count_after_create > 0,
+        "Authenticator should be used for create"
+    );
+    assert!(
+        count_after_list > count_after_create,
+        "Authenticator should be used for list operation too"
+    );
+}
