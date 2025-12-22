@@ -30,7 +30,7 @@ use iceberg::{
     TableIdent,
 };
 use iceberg_catalog_rest::{
-    REST_CATALOG_PROP_URI, RestCatalog, RestCatalogBuilder, TokenAuthenticator,
+    CustomAuthenticator, REST_CATALOG_PROP_URI, RestCatalog, RestCatalogBuilder,
 };
 use iceberg_test_utils::docker::DockerCompose;
 use iceberg_test_utils::{normalize_test_name, set_up};
