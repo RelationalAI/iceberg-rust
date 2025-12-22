@@ -616,10 +616,14 @@ async fn test_authenticator_persists_across_operations() {
 
     let count_after_create = *operation_count.lock().unwrap();
 
-    // List the namespace (should use the same authenticator)
-    let list_result = catalog_with_auth.list_namespaces(None).await.unwrap();
+    // List the namespace children (should use the same authenticator)
+    // We need to list children of "test_persist" to find "auth"
+    let list_result = catalog_with_auth
+        .list_namespaces(Some(&NamespaceIdent::from_strs(["test_persist"]).unwrap()))
+        .await
+        .unwrap();
     assert!(
-        list_result.contains(ns.name()),
+        list_result.contains(&NamespaceIdent::from_strs(["test_persist", "auth"]).unwrap()),
         "Namespace {:?} not found in list {:?}",
         ns.name(),
         list_result
