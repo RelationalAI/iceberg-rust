@@ -457,60 +457,20 @@ async fn test_register_table() {
 }
 
 #[tokio::test]
-async fn test_catalog_with_custom_token_authenticator() {
-    let catalog = get_catalog().await;
-
-    // Create a mock authenticator that returns a fixed token
-    #[derive(Debug)]
-    struct TestAuthenticator {
-        token: String,
-        call_count: Arc<Mutex<usize>>,
-    }
-
-    #[async_trait]
-    impl TokenAuthenticator for TestAuthenticator {
-        async fn get_token(&self) -> IcebergResult<String> {
-            let mut count = self.call_count.lock().unwrap();
-            *count += 1;
-            Ok(self.token.clone())
-        }
-    }
-
-    let call_count = Arc::new(Mutex::new(0));
-    let authenticator = Arc::new(TestAuthenticator {
-        token: "test_token_123".to_string(),
-        call_count: call_count.clone(),
-    });
-
-    // Apply authenticator before first use
-    let catalog_with_auth = catalog.with_token_authenticator(authenticator);
-
-    // Create a namespace to trigger a catalog operation
-    let ns = Namespace::with_properties(
-        NamespaceIdent::from_strs(["test_custom_auth", "namespace"]).unwrap(),
-        HashMap::from([("owner".to_string(), "test_user".to_string())]),
-    );
-
-    let created_ns = catalog_with_auth
-        .create_namespace(ns.name(), ns.properties().clone())
-        .await
-        .unwrap();
-
-    assert_eq!(ns.name(), created_ns.name());
-    assert_map_contains(ns.properties(), created_ns.properties());
-
-    // Verify authenticator was called
-    let count = *call_count.lock().unwrap();
-    assert!(
-        count > 0,
-        "Authenticator should have been called at least once, but was called {} times",
-        count
-    );
-}
-
-#[tokio::test]
 async fn test_authenticator_token_refresh() {
-    let catalog = get_catalog().await;
+    set_up();
+
+    let rest_catalog_ip = {
+        let guard = DOCKER_COMPOSE_ENV.read().unwrap();
+        let docker_compose = guard.as_ref().unwrap();
+        docker_compose.get_container_ip("rest")
+    };
+
+    let rest_socket_addr = SocketAddr::new(rest_catalog_ip, REST_CATALOG_PORT);
+    while !scan_port_addr(rest_socket_addr) {
+        info!("Waiting for 1s rest catalog to ready...");
+        sleep(std::time::Duration::from_millis(1000)).await;
+    }
 
     // Track how many times tokens were requested
     let token_request_count = Arc::new(Mutex::new(0));
@@ -522,7 +482,7 @@ async fn test_authenticator_token_refresh() {
     }
 
     #[async_trait]
-    impl TokenAuthenticator for CountingAuthenticator {
+    impl CustomAuthenticator for CountingAuthenticator {
         async fn get_token(&self) -> IcebergResult<String> {
             let mut c = self.count.lock().unwrap();
             *c += 1;
@@ -535,7 +495,17 @@ async fn test_authenticator_token_refresh() {
         count: token_request_count_clone,
     });
 
-    let catalog_with_auth = catalog.with_token_authenticator(authenticator);
+    let catalog_with_auth = RestCatalogBuilder::default()
+        .with_token_authenticator(authenticator)
+        .load(
+            "rest",
+            HashMap::from([(
+                REST_CATALOG_PROP_URI.to_string(),
+                format!("http://{rest_socket_addr}"),
+            )]),
+        )
+        .await
+        .unwrap();
 
     // Perform multiple operations that should trigger token requests
     let ns1 = Namespace::with_properties(
@@ -559,7 +529,7 @@ async fn test_authenticator_token_refresh() {
     // Verify authenticator was called multiple times
     let count = *token_request_count.lock().unwrap();
     assert!(
-        count >= 2,
+        count == 2,
         "Authenticator should have been called at least twice, but was called {} times",
         count
     );
@@ -567,7 +537,19 @@ async fn test_authenticator_token_refresh() {
 
 #[tokio::test]
 async fn test_authenticator_persists_across_operations() {
-    let catalog = get_catalog().await;
+    set_up();
+
+    let rest_catalog_ip = {
+        let guard = DOCKER_COMPOSE_ENV.read().unwrap();
+        let docker_compose = guard.as_ref().unwrap();
+        docker_compose.get_container_ip("rest")
+    };
+
+    let rest_socket_addr = SocketAddr::new(rest_catalog_ip, REST_CATALOG_PORT);
+    while !scan_port_addr(rest_socket_addr) {
+        info!("Waiting for 1s rest catalog to ready...");
+        sleep(std::time::Duration::from_millis(1000)).await;
+    }
 
     let operation_count = Arc::new(Mutex::new(0));
     let operation_count_clone = operation_count.clone();
@@ -578,7 +560,7 @@ async fn test_authenticator_persists_across_operations() {
     }
 
     #[async_trait]
-    impl TokenAuthenticator for CountingAuthenticator {
+    impl CustomAuthenticator for CountingAuthenticator {
         async fn get_token(&self) -> IcebergResult<String> {
             let mut c = self.count.lock().unwrap();
             *c += 1;
@@ -590,7 +572,17 @@ async fn test_authenticator_persists_across_operations() {
         count: operation_count_clone,
     });
 
-    let catalog_with_auth = catalog.with_token_authenticator(authenticator);
+    let catalog_with_auth = RestCatalogBuilder::default()
+        .with_token_authenticator(authenticator)
+        .load(
+            "rest",
+            HashMap::from([(
+                REST_CATALOG_PROP_URI.to_string(),
+                format!("http://{rest_socket_addr}"),
+            )]),
+        )
+        .await
+        .unwrap();
 
     // Create a namespace
     let ns = Namespace::with_properties(

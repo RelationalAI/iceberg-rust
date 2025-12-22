@@ -39,7 +39,7 @@ use tokio::sync::OnceCell;
 use typed_builder::TypedBuilder;
 
 use crate::client::{
-    HttpClient, TokenAuthenticator, deserialize_catalog_response,
+    CustomAuthenticator, HttpClient, deserialize_catalog_response,
     deserialize_unexpected_catalog_error,
 };
 use crate::types::{
@@ -69,6 +69,7 @@ impl Default for RestCatalogBuilder {
             warehouse: None,
             props: HashMap::new(),
             client: None,
+            authenticator: None,
         })
     }
 }
@@ -126,6 +127,24 @@ impl RestCatalogBuilder {
         self.0.client = Some(client);
         self
     }
+
+    /// Set a custom token authenticator.
+    ///
+    /// The authenticator will be used to obtain tokens instead of using static tokens
+    /// or OAuth credentials.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let authenticator = Arc::new(MyAuthenticator::new());
+    /// let catalog = RestCatalogBuilder::default()
+    ///     .with_token_authenticator(authenticator)
+    ///     .load("rest", config)
+    ///     .await?;
+    /// ```
+    pub fn with_token_authenticator(mut self, authenticator: Arc<dyn CustomAuthenticator>) -> Self {
+        self.0.authenticator = Some(authenticator);
+        self
+    }
 }
 
 /// Rest catalog configuration.
@@ -144,6 +163,9 @@ pub(crate) struct RestCatalogConfig {
 
     #[builder(default)]
     client: Option<Client>,
+
+    #[builder(default)]
+    authenticator: Option<Arc<dyn CustomAuthenticator>>,
 }
 
 impl RestCatalogConfig {
@@ -329,8 +351,6 @@ pub struct RestCatalog {
     ctx: OnceCell<RestContext>,
     /// Extensions for the FileIOBuilder.
     file_io_extensions: io::Extensions,
-    /// Custom token authenticator (must be set before first use)
-    authenticator: OnceCell<Arc<dyn TokenAuthenticator>>,
 }
 
 impl RestCatalog {
@@ -340,31 +360,12 @@ impl RestCatalog {
             user_config: config,
             ctx: OnceCell::new(),
             file_io_extensions: io::Extensions::default(),
-            authenticator: OnceCell::new(),
         }
     }
 
     /// Add an extension to the file IO builder.
     pub fn with_file_io_extension<T: Any + Send + Sync>(mut self, ext: T) -> Self {
         self.file_io_extensions.add(ext);
-        self
-    }
-
-    /// Set a custom token authenticator.
-    ///
-    /// The authenticator will be used to obtain tokens instead of using static tokens
-    /// or OAuth credentials. This must be called before any catalog operations.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let authenticator = Arc::new(MyTokenAuthenticator::new());
-    /// let catalog = RestCatalogBuilder::default()
-    ///     .load("rest", config)
-    ///     .await?
-    ///     .with_token_authenticator(authenticator);
-    /// ```
-    pub fn with_token_authenticator(self, authenticator: Arc<dyn TokenAuthenticator>) -> Self {
-        let _ = self.authenticator.set(authenticator);
         self
     }
 
@@ -375,7 +376,7 @@ impl RestCatalog {
                 let mut client = HttpClient::new(&self.user_config)?;
 
                 // Set authenticator if one was configured
-                if let Some(authenticator) = self.authenticator.get() {
+                if let Some(authenticator) = &self.user_config.authenticator {
                     client = client.with_authenticator(authenticator.clone());
                 }
 

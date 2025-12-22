@@ -56,4 +56,4 @@ mod client;
 mod types;
 
 pub use catalog::*;
-pub use client::TokenAuthenticator;
+pub use client::CustomAuthenticator;

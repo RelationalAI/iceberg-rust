@@ -34,7 +34,7 @@ use crate::types::{ErrorResponse, TokenResponse};
 /// Implement this trait to provide custom token generation/refresh logic
 /// instead of using OAuth credentials.
 #[async_trait::async_trait]
-pub trait TokenAuthenticator: Send + Sync + Debug {
+pub trait CustomAuthenticator: Send + Sync + Debug {
     /// Get or refresh the authentication token.
     /// Called when the client needs a token for authentication.
     async fn get_token(&self) -> Result<String>;
@@ -52,7 +52,7 @@ pub(crate) struct HttpClient {
     /// The credential to be used for authentication.
     credential: Option<(Option<String>, String)>,
     /// Custom token authenticator (takes precedence over credential/token)
-    authenticator: Option<Arc<dyn TokenAuthenticator>>,
+    authenticator: Option<Arc<dyn CustomAuthenticator>>,
     /// Extra headers to be added to each request.
     extra_headers: HeaderMap,
     /// Extra oauth parameters to be added to each authentication request.
@@ -195,9 +195,24 @@ impl HttpClient {
     /// When set, the authenticator will be called to get tokens instead of using
     /// static tokens or OAuth credentials. This allows for custom token management
     /// such as reading from files, APIs, or other custom sources.
-    pub fn with_authenticator(mut self, authenticator: Arc<dyn TokenAuthenticator>) -> Self {
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn CustomAuthenticator>) -> Self {
         self.authenticator = Some(authenticator);
         self
+    }
+
+    /// Add bearer token to request authorization header.
+    fn set_bearer_token(req: &mut Request, token: &str) -> Result<()> {
+        req.headers_mut().insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    "Invalid token received from catalog server!",
+                )
+                .with_source(e)
+            })?,
+        );
+        Ok(())
     }
 
     /// Invalidate the current token without generating a new one. On the next request, the client
@@ -223,7 +238,7 @@ impl HttpClient {
     ///
     /// This method supports four authentication modes (in order of precedence):
     ///
-    /// 1. **Custom authenticator** - If set, use the custom TokenAuthenticator to get tokens.
+    /// 1. **Custom authenticator** - If set, use the custom CustomAuthenticator to get tokens.
     /// 2. **Token authentication** - Use the provided static `token` directly.
     /// 3. **OAuth authentication** - Exchange `credential` for a token, cache it, then use it.
     /// 4. **No authentication** - Skip authentication when none of the above are available.
@@ -233,13 +248,7 @@ impl HttpClient {
         // Try authenticator first (highest priority)
         if let Some(authenticator) = &self.authenticator {
             let token = authenticator.get_token().await?;
-            req.headers_mut().insert(
-                http::header::AUTHORIZATION,
-                format!("Bearer {token}").parse().map_err(|e| {
-                    Error::new(ErrorKind::DataInvalid, "Invalid token from authenticator!")
-                        .with_source(e)
-                })?,
-            );
+            Self::set_bearer_token(req, &token)?;
             return Ok(());
         }
 
@@ -262,18 +271,7 @@ impl HttpClient {
             }
         };
 
-        // Insert token in request.
-        req.headers_mut().insert(
-            http::header::AUTHORIZATION,
-            format!("Bearer {token}").parse().map_err(|e| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    "Invalid token received from catalog server!",
-                )
-                .with_source(e)
-            })?,
-        );
-
+        Self::set_bearer_token(req, &token)?;
         Ok(())
     }
 
