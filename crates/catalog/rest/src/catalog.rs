@@ -463,7 +463,11 @@ impl RestCatalog {
     }
 
     /// The actual logic for loading table, that supports loading vended credentials if requested.
-    async fn load_table_internal(&self, table_ident: &TableIdent, load_credentials: bool) -> Result<Table> {
+    async fn load_table_internal(
+        &self,
+        table_ident: &TableIdent,
+        load_credentials: bool,
+    ) -> Result<Table> {
         let context = self.context().await?;
 
         let mut request_builder = context
@@ -471,7 +475,8 @@ impl RestCatalog {
             .request(Method::GET, context.config.table_endpoint(table_ident));
 
         if load_credentials {
-            request_builder = request_builder.header("X-Iceberg-Access-Delegation", "vended-credentials");
+            request_builder =
+                request_builder.header("X-Iceberg-Access-Delegation", "vended-credentials");
         }
 
         let request = request_builder.build()?;
@@ -534,10 +539,7 @@ impl RestCatalog {
     ) -> Result<LoadCredentialsResponse> {
         let context = self.context().await?;
 
-        let endpoint = format!(
-            "{}/credentials",
-            context.config.table_endpoint(table_ident)
-        );
+        let endpoint = format!("{}/credentials", context.config.table_endpoint(table_ident));
 
         let request = context.client.request(Method::GET, endpoint).build()?;
 
@@ -1052,12 +1054,12 @@ impl Catalog for RestCatalog {
 
 #[cfg(test)]
 mod tests {
-    use futures::stream::StreamExt;
     use std::fs::File;
     use std::io::BufReader;
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
+    use futures::stream::StreamExt;
     use iceberg::spec::{
         FormatVersion, NestedField, NullOrder, Operation, PrimitiveType, Schema, Snapshot,
         SnapshotLog, SortDirection, SortField, SortOrder, Summary, Transform, Type,
@@ -2829,10 +2831,10 @@ mod tests {
     async fn test_load_table_credentials_integration() {
         use std::env;
 
-        let client_id = env::var("POLARIS_USER")
-            .expect("POLARIS_USER environment variable must be set");
-        let client_secret = env::var("POLARIS_SECRET")
-            .expect("POLARIS_SECRET environment variable must be set");
+        let client_id =
+            env::var("POLARIS_USER").expect("POLARIS_USER environment variable must be set");
+        let client_secret =
+            env::var("POLARIS_SECRET").expect("POLARIS_SECRET environment variable must be set");
         let catalog_uri = env::var("POLARIS_URI")
             .unwrap_or_else(|_| "http://localhost:8181/api/catalog".to_string());
 
@@ -2842,7 +2844,10 @@ mod tests {
             format!("{}:{}", client_id, client_secret),
         );
         props.insert("scope".to_string(), "PRINCIPAL_ROLE:ALL".to_string());
-        props.insert("s3.endpoint".to_string(), "http://localhost:9000".to_string());
+        props.insert(
+            "s3.endpoint".to_string(),
+            "http://localhost:9000".to_string(),
+        );
 
         let catalog = RestCatalog::new(
             RestCatalogConfig::builder()
@@ -2862,7 +2867,10 @@ mod tests {
         match credentials_result {
             Ok(credentials) => {
                 println!("Successfully loaded credentials");
-                println!("Number of storage credentials: {}", credentials.storage_credentials.len());
+                println!(
+                    "Number of storage credentials: {}",
+                    credentials.storage_credentials.len()
+                );
                 // println!("Full response: {:#?}", credentials);
                 assert!(!credentials.storage_credentials.is_empty());
             }
@@ -2887,7 +2895,10 @@ mod tests {
                 let scan = table.scan().build().expect("Failed to build scan");
                 let mut row_count = 0;
 
-                let mut stream = scan.to_arrow().await.expect("Failed to create arrow stream");
+                let mut stream = scan
+                    .to_arrow()
+                    .await
+                    .expect("Failed to create arrow stream");
 
                 while let Some(batch_result) = stream.next().await {
                     match batch_result {
@@ -2927,7 +2938,9 @@ mod tests {
                 // Try to create arrow stream - this should fail when accessing manifest list
                 match scan.to_arrow().await {
                     Ok(_stream) => {
-                        panic!("Stream creation succeeded without vended credentials - this should not happen!");
+                        panic!(
+                            "Stream creation succeeded without vended credentials - this should not happen!"
+                        );
                     }
                     Err(e) => {
                         println!("✓ Scan failed as expected without vended credentials");
@@ -2935,10 +2948,11 @@ mod tests {
                         // Verify it's a permission/authentication error
                         let error_msg = e.to_string();
                         assert!(
-                            error_msg.contains("PermissionDenied") &&
-                            error_msg.contains("InvalidAccessKeyId") &&
-                            error_msg.contains("403"),
-                            "Expected permission/authentication error, got: {}", error_msg
+                            error_msg.contains("PermissionDenied")
+                                && error_msg.contains("InvalidAccessKeyId")
+                                && error_msg.contains("403"),
+                            "Expected permission/authentication error, got: {}",
+                            error_msg
                         );
                     }
                 }
