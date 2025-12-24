@@ -164,6 +164,7 @@ pub(super) struct LoadTableResponse {
     pub(super) metadata_location: Option<String>,
     pub(super) metadata: TableMetadata,
     pub(super) config: Option<HashMap<String, String>>,
+    pub(super) storage_credentials: Option<Vec<StorageCredential>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
