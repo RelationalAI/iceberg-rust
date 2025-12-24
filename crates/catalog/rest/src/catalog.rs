@@ -2866,7 +2866,7 @@ mod tests {
                     "Number of storage credentials: {}",
                     credentials.storage_credentials.len()
                 );
-                println!("Full response: {:#?}", credentials);
+                // println!("Full response: {:#?}", credentials);
                 assert!(!credentials.storage_credentials.is_empty());
             }
             Err(e) => {
