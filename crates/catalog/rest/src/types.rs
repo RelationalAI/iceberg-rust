@@ -199,3 +199,15 @@ pub(super) struct RegisterTableRequest {
     pub(super) metadata_location: String,
     pub(super) overwrite: Option<bool>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageCredential {
+    pub prefix: String,
+    pub config: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct LoadCredentialsResponse {
+    pub storage_credentials: Vec<StorageCredential>,
+}

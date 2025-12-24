@@ -44,8 +44,8 @@ use crate::client::{
 };
 use crate::types::{
     CatalogConfig, CommitTableRequest, CommitTableResponse, CreateTableRequest,
-    ListNamespaceResponse, ListTableResponse, LoadTableResponse, NamespaceSerde,
-    RegisterTableRequest, RenameTableRequest,
+    ListNamespaceResponse, ListTableResponse, LoadCredentialsResponse, LoadTableResponse,
+    NamespaceSerde, RegisterTableRequest, RenameTableRequest,
 };
 
 /// REST catalog URI
@@ -460,6 +460,32 @@ impl RestCatalog {
     /// the current token unchanged.
     pub async fn regenerate_token(&self) -> Result<()> {
         self.context().await?.client.regenerate_token().await
+    }
+
+    /// Load vended credentials for a table from the catalog.
+    pub async fn load_table_credentials(
+        &self,
+        table_ident: &TableIdent,
+    ) -> Result<LoadCredentialsResponse> {
+        let context = self.context().await?;
+
+        let endpoint = format!(
+            "{}/credentials",
+            context.config.table_endpoint(table_ident)
+        );
+
+        let request = context.client.request(Method::GET, endpoint).build()?;
+
+        let http_response = context.client.query_catalog(request).await?;
+
+        match http_response.status() {
+            StatusCode::OK => deserialize_catalog_response(http_response).await,
+            StatusCode::NOT_FOUND => Err(Error::new(
+                ErrorKind::Unexpected,
+                "Tried to load credentials for a table that does not exist",
+            )),
+            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+        }
     }
 }
 
