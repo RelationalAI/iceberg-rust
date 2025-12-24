@@ -110,14 +110,15 @@ pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Res
 /// 2. If not found, fall back to searching for keys matching `adls.sas-token` prefix
 /// 3. Return the shortest matching key (least specific)
 /// 4. Trim leading '?' from the token if present
-fn find_sas_token(properties: &HashMap<String, String>, account_name: Option<&str>) -> Option<String> {
+fn find_sas_token(
+    properties: &HashMap<String, String>,
+    account_name: Option<&str>,
+) -> Option<String> {
     // Helper function to search for token with a given prefix
     let find_with_prefix = |prefix: &str| {
         properties
             .iter()
-            .filter(|(key, _)| {
-                key.as_str() == prefix || key.starts_with(&format!("{}.", prefix))
-            })
+            .filter(|(key, _)| key.as_str() == prefix || key.starts_with(&format!("{}.", prefix)))
             .min_by_key(|(key, _)| key.len())
             .map(|(_, value)| value.strip_prefix('?').unwrap_or(value).to_string())
     };
@@ -458,14 +459,17 @@ mod tests {
             (
                 "account-specific SAS token with full domain",
                 HashMap::from([
-                    (super::ADLS_ACCOUNT_NAME.to_string(), "vukasineusstorage1".to_string()),
+                    (
+                        super::ADLS_ACCOUNT_NAME.to_string(),
+                        "vukasineusstorage1".to_string(),
+                    ),
                     (
                         "adls.sas-token.vukasineusstorage1.blob.core.windows.net".to_string(),
-                        "token-full".to_string()
+                        "token-full".to_string(),
                     ),
                     (
                         "adls.sas-token.vukasineusstorage1".to_string(),
-                        "token-account".to_string()
+                        "token-account".to_string(),
                     ),
                 ]),
                 Some(AzdlsConfig {
@@ -477,10 +481,13 @@ mod tests {
             (
                 "account-specific SAS token with only full domain",
                 HashMap::from([
-                    (super::ADLS_ACCOUNT_NAME.to_string(), "myaccount".to_string()),
+                    (
+                        super::ADLS_ACCOUNT_NAME.to_string(),
+                        "myaccount".to_string(),
+                    ),
                     (
                         "adls.sas-token.myaccount.blob.core.windows.net".to_string(),
-                        "token-specific".to_string()
+                        "token-specific".to_string(),
                     ),
                 ]),
                 Some(AzdlsConfig {
@@ -492,14 +499,17 @@ mod tests {
             (
                 "SAS token without account name picks shortest",
                 HashMap::from([
-                    (super::ADLS_SAS_TOKEN.to_string(), "token-generic".to_string()),
+                    (
+                        super::ADLS_SAS_TOKEN.to_string(),
+                        "token-generic".to_string(),
+                    ),
                     (
                         "adls.sas-token.someaccount".to_string(),
-                        "token-account".to_string()
+                        "token-account".to_string(),
                     ),
                     (
                         "adls.sas-token.someaccount.blob.core.windows.net".to_string(),
-                        "token-specific".to_string()
+                        "token-specific".to_string(),
                     ),
                 ]),
                 Some(AzdlsConfig {

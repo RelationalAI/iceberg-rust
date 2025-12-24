@@ -463,7 +463,11 @@ impl RestCatalog {
     }
 
     /// The actual logic for loading table, that supports loading vended credentials if requested.
-    async fn load_table_internal(&self, table_ident: &TableIdent, load_credentials: bool) -> Result<Table> {
+    async fn load_table_internal(
+        &self,
+        table_ident: &TableIdent,
+        load_credentials: bool,
+    ) -> Result<Table> {
         let context = self.context().await?;
 
         let mut request_builder = context
@@ -471,7 +475,8 @@ impl RestCatalog {
             .request(Method::GET, context.config.table_endpoint(table_ident));
 
         if load_credentials {
-            request_builder = request_builder.header("X-Iceberg-Access-Delegation", "vended-credentials");
+            request_builder =
+                request_builder.header("X-Iceberg-Access-Delegation", "vended-credentials");
         }
 
         let request = request_builder.build()?;
@@ -534,10 +539,7 @@ impl RestCatalog {
     ) -> Result<LoadCredentialsResponse> {
         let context = self.context().await?;
 
-        let endpoint = format!(
-            "{}/credentials",
-            context.config.table_endpoint(table_ident)
-        );
+        let endpoint = format!("{}/credentials", context.config.table_endpoint(table_ident));
 
         let request = context.client.request(Method::GET, endpoint).build()?;
 
@@ -1052,12 +1054,12 @@ impl Catalog for RestCatalog {
 
 #[cfg(test)]
 mod tests {
-    use futures::stream::StreamExt;
     use std::fs::File;
     use std::io::BufReader;
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
+    use futures::stream::StreamExt;
     use iceberg::spec::{
         FormatVersion, NestedField, NullOrder, Operation, PrimitiveType, Schema, Snapshot,
         SnapshotLog, SortDirection, SortField, SortOrder, Summary, Transform, Type,
@@ -2829,12 +2831,13 @@ mod tests {
     async fn test_load_table_credentials_integration() {
         use std::env;
 
-        let client_id = env::var("POLARIS_USER")
-            .expect("POLARIS_USER environment variable must be set");
-        let client_secret = env::var("POLARIS_SECRET")
-            .expect("POLARIS_SECRET environment variable must be set");
-        let catalog_uri = env::var("POLARIS_URI")
-            .unwrap_or_else(|_| "https://apb52872.snowflakecomputing.com/polaris/api/catalog".to_string());
+        let client_id =
+            env::var("POLARIS_USER").expect("POLARIS_USER environment variable must be set");
+        let client_secret =
+            env::var("POLARIS_SECRET").expect("POLARIS_SECRET environment variable must be set");
+        let catalog_uri = env::var("POLARIS_URI").unwrap_or_else(|_| {
+            "https://apb52872.snowflakecomputing.com/polaris/api/catalog".to_string()
+        });
 
         let mut props = HashMap::new();
         props.insert(
@@ -2852,17 +2855,17 @@ mod tests {
                 .build(),
         );
 
-        let table_ident = TableIdent::new(
-            NamespaceIdent::new("ns1".to_string()),
-            "T2".to_string(),
-        );
+        let table_ident = TableIdent::new(NamespaceIdent::new("ns1".to_string()), "T2".to_string());
 
         let credentials_result = catalog.load_table_credentials(&table_ident).await;
 
         match credentials_result {
             Ok(credentials) => {
                 println!("Successfully loaded credentials");
-                println!("Number of storage credentials: {}", credentials.storage_credentials.len());
+                println!(
+                    "Number of storage credentials: {}",
+                    credentials.storage_credentials.len()
+                );
                 println!("Full response: {:#?}", credentials);
                 assert!(!credentials.storage_credentials.is_empty());
             }
@@ -2887,7 +2890,10 @@ mod tests {
                 let scan = table.scan().build().expect("Failed to build scan");
                 let mut row_count = 0;
 
-                let mut stream = scan.to_arrow().await.expect("Failed to create arrow stream");
+                let mut stream = scan
+                    .to_arrow()
+                    .await
+                    .expect("Failed to create arrow stream");
 
                 while let Some(batch_result) = stream.next().await {
                     match batch_result {
