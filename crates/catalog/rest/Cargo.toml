@@ -28,6 +28,9 @@ keywords = ["iceberg", "rest", "catalog"]
 license = { workspace = true }
 repository = { workspace = true }
 
+[features]
+storage-azdls = ["iceberg/storage-azdls"]
+
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
