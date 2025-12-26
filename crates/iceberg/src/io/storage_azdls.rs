@@ -363,6 +363,13 @@ fn validate_storage_and_scheme(
     scheme_str: &str,
 ) -> Result<AzureStorageScheme> {
     let scheme = scheme_str.parse::<AzureStorageScheme>()?;
+    // Azure actually is oblivious to what we use for the scheme here.
+    // It actually supports both dfs and blob endpoints for all storage kinds.
+    // We should route those to different OpenDAL operators, but given that we don't
+    // do that today but map both schemes/endpoints to the same ADLS OpenDAL operator
+    // (which uses dfs endpoint), we might as well accept wasb URL for dfs endpoint,
+    // and abfs URL for blob endpoint. Especially since some implementations (e.g. Snowflake)
+    // always use abfs in URL, regardless of the endpoint.
     ensure_data_valid!(
         storage_service == "dfs" || storage_service == "blob",
         "AzureStoragePath: Unexpected storage service for abfs[s]: {}",
@@ -448,19 +455,19 @@ mod tests {
                 HashMap::from([
                     (
                         super::ADLS_ACCOUNT_NAME.to_string(),
-                        "vukasineusstorage1".to_string(),
+                        "azteststorage".to_string(),
                     ),
                     (
-                        "adls.sas-token.vukasineusstorage1.blob.core.windows.net".to_string(),
+                        "adls.sas-token.azteststorage.blob.core.windows.net".to_string(),
                         "token-full".to_string(),
                     ),
                     (
-                        "adls.sas-token.vukasineusstorage1".to_string(),
+                        "adls.sas-token.azteststorage".to_string(),
                         "token-account".to_string(),
                     ),
                 ]),
                 Some(AzdlsConfig {
-                    account_name: Some("vukasineusstorage1".to_string()),
+                    account_name: Some("azteststorage".to_string()),
                     sas_token: Some("token-account".to_string()), // Should pick the shorter one
                     ..Default::default()
                 }),
