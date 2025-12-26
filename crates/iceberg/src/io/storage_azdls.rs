@@ -359,29 +359,28 @@ fn parse_azure_storage_endpoint(url: &Url) -> Result<(&str, &str, &str)> {
 }
 
 fn validate_storage_and_scheme(
-    _storage_service: &str,
+    storage_service: &str,
     scheme_str: &str,
 ) -> Result<AzureStorageScheme> {
     let scheme = scheme_str.parse::<AzureStorageScheme>()?;
-    Ok(scheme)
-    // match scheme {
-    //     AzureStorageScheme::Abfss | AzureStorageScheme::Abfs => {
-    //         ensure_data_valid!(
-    //             storage_service == "dfs",
-    //             "AzureStoragePath: Unexpected storage service for abfs[s]: {}",
-    //             storage_service
-    //         );
-    //         Ok(scheme)
-    //     }
-    //     AzureStorageScheme::Wasbs | AzureStorageScheme::Wasb => {
-    //         ensure_data_valid!(
-    //             storage_service == "blob",
-    //             "AzureStoragePath: Unexpected storage service for wasb[s]: {}",
-    //             storage_service
-    //         );
-    //         Ok(scheme)
-    //     }
-    // }
+    match scheme {
+        AzureStorageScheme::Abfss | AzureStorageScheme::Abfs => {
+            ensure_data_valid!(
+                storage_service == "dfs" || storage_service == "blob",
+                "AzureStoragePath: Unexpected storage service for abfs[s]: {}",
+                storage_service
+            );
+            Ok(scheme)
+        }
+        AzureStorageScheme::Wasbs | AzureStorageScheme::Wasb => {
+            ensure_data_valid!(
+                storage_service == "blob" || storage_service == "dfs",
+                "AzureStoragePath: Unexpected storage service for wasb[s]: {}",
+                storage_service
+            );
+            Ok(scheme)
+        }
+    }
 }
 
 #[cfg(test)]
