@@ -162,7 +162,10 @@ impl RestCatalogBuilder {
 #[async_trait::async_trait]
 pub trait StorageCredentialsLoader: Send + Sync + Debug {
     /// Load storage credentials using custom user-defined logic.
-    async fn load_credentials(&self, existing_credentials: Option<&StorageCredential>) -> Result<StorageCredential>;
+    async fn load_credentials(
+        &self,
+        existing_credentials: Option<&StorageCredential>,
+    ) -> Result<StorageCredential>;
 }
 
 /// Rest catalog configuration.
@@ -554,7 +557,9 @@ impl RestCatalog {
 
             if let Some(ref metadata_location) = response.metadata_location {
                 for cred in &storage_credentials {
-                    if metadata_location.starts_with(&cred.prefix) && cred.prefix.len() > longest_prefix_len {
+                    if metadata_location.starts_with(&cred.prefix)
+                        && cred.prefix.len() > longest_prefix_len
+                    {
                         longest_prefix_len = cred.prefix.len();
                         best_match = Some(cred);
                     }
@@ -572,8 +577,12 @@ impl RestCatalog {
         };
 
         // Finally, use custom storage credential loader if set, giving it a chance to override the previous configurations.
-        let final_credential = if let Some(storage_credentials_loader) = &self.user_config.storage_credentials_loader {
-            let credential = storage_credentials_loader.load_credentials(matched_credential.as_ref()).await?;
+        let final_credential = if let Some(storage_credentials_loader) =
+            &self.user_config.storage_credentials_loader
+        {
+            let credential = storage_credentials_loader
+                .load_credentials(matched_credential.as_ref())
+                .await?;
             config.extend(credential.config.clone());
             Some(credential)
         } else {
@@ -581,7 +590,11 @@ impl RestCatalog {
         };
 
         let file_io = self
-            .load_file_io(response.metadata_location.as_deref(), Some(config), final_credential)
+            .load_file_io(
+                response.metadata_location.as_deref(),
+                Some(config),
+                final_credential,
+            )
             .await?;
 
         let table_builder = Table::builder()
@@ -1041,7 +1054,9 @@ impl Catalog for RestCatalog {
         ))?;
 
         // TODO @vustef: Do we support vended credentials here?
-        let file_io = self.load_file_io(Some(metadata_location), None, None).await?;
+        let file_io = self
+            .load_file_io(Some(metadata_location), None, None)
+            .await?;
 
         Table::builder()
             .identifier(table_ident.clone())
