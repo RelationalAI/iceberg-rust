@@ -201,11 +201,8 @@ pub(super) struct RegisterTableRequest {
     pub(super) overwrite: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageCredential {
-    pub prefix: String,
-    pub config: HashMap<String, String>,
-}
+// Re-export from iceberg
+pub use iceberg::io::StorageCredential;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

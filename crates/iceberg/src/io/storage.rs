@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use opendal::layers::RetryLayer;
@@ -33,6 +34,7 @@ use super::AzureStorageScheme;
 use super::FileIOBuilder;
 #[cfg(feature = "storage-s3")]
 use crate::io::CustomAwsCredentialLoader;
+use crate::io::{StorageCredential, StorageCredentialsLoader};
 use crate::{Error, ErrorKind};
 
 /// The storage carries all supported storage services in iceberg
@@ -65,12 +67,35 @@ pub(crate) enum Storage {
         configured_scheme: AzureStorageScheme,
         config: Arc<AzdlsConfig>,
     },
+    /// Wraps any storage with credential refresh capability.
+    ///
+    /// This variant refreshes credentials before each `create_operator` call
+    /// by invoking a `StorageCredentialsLoader`.
+    Refreshable(Box<super::refreshable_storage::RefreshableStorage>),
 }
 
 impl Storage {
     /// Convert iceberg config to opendal config.
     pub(crate) fn build(file_io_builder: FileIOBuilder) -> crate::Result<Self> {
         let (scheme_str, props, extensions) = file_io_builder.into_parts();
+
+        // Check if credential refresh is requested
+        let credentials_loader = extensions.get::<Arc<dyn StorageCredentialsLoader>>();
+        let existing_credentials = extensions.get::<StorageCredential>();
+
+        // If loader is present, create RefreshableStorage
+        if let Some(loader) = credentials_loader {
+            return Ok(Storage::Refreshable(Box::new(
+                super::refreshable_storage::RefreshableStorage::new(
+                    props,  // Pass all props as base_props
+                    scheme_str,
+                    Arc::clone(&loader),
+                    existing_credentials.map(|c| (*c).clone()),
+                ),
+            )));
+        }
+
+        // Otherwise, build storage normally
         let scheme = Self::parse_scheme(&scheme_str)?;
 
         match scheme {
@@ -110,6 +135,51 @@ impl Storage {
         }
     }
 
+    /// Build storage from scheme and properties (used by RefreshableStorage).
+    ///
+    /// This is similar to `build()` but takes scheme and properties directly
+    /// without handling extensions. Used for rebuilding storage with refreshed credentials.
+    pub(crate) fn build_from_props(
+        scheme_str: &str,
+        props: HashMap<String, String>,
+    ) -> crate::Result<Self> {
+        let scheme = Self::parse_scheme(scheme_str)?;
+
+        match scheme {
+            #[cfg(feature = "storage-memory")]
+            Scheme::Memory => Ok(Self::Memory(super::memory_config_build()?)),
+            #[cfg(feature = "storage-fs")]
+            Scheme::Fs => Ok(Self::LocalFs),
+            #[cfg(feature = "storage-s3")]
+            Scheme::S3 => Ok(Self::S3 {
+                configured_scheme: scheme_str.to_string(),
+                config: super::s3_config_parse(props)?.into(),
+                customized_credential_load: None,  // Not used in refreshable path
+            }),
+            #[cfg(feature = "storage-gcs")]
+            Scheme::Gcs => Ok(Self::Gcs {
+                config: super::gcs_config_parse(props)?.into(),
+            }),
+            #[cfg(feature = "storage-oss")]
+            Scheme::Oss => Ok(Self::Oss {
+                config: super::oss_config_parse(props)?.into(),
+            }),
+            #[cfg(feature = "storage-azdls")]
+            Scheme::Azdls => {
+                let scheme = scheme_str.parse::<AzureStorageScheme>()?;
+                Ok(Self::Azdls {
+                    config: super::azdls_config_parse(props)?.into(),
+                    configured_scheme: scheme,
+                })
+            }
+            // Update doc on [`FileIO`] when adding new schemes.
+            _ => Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                format!("Constructing file io from scheme: {scheme} not supported now",),
+            )),
+        }
+    }
+
     /// Creates operator from path.
     ///
     /// # Arguments
@@ -123,7 +193,7 @@ impl Storage {
     /// * An [`opendal::Operator`] instance used to operate on file.
     /// * Relative path to the root uri of [`opendal::Operator`].
     pub(crate) fn create_operator<'a>(
-        &self,
+        &'a self,
         path: &'a impl AsRef<str>,
     ) -> crate::Result<(Operator, &'a str)> {
         let path = path.as_ref();
@@ -199,6 +269,19 @@ impl Storage {
                 configured_scheme,
                 config,
             } => super::azdls_create_operator(path, config, configured_scheme),
+            Storage::Refreshable(refreshable) => {
+                // Delegate to RefreshableStorage which will refresh credentials
+                let path_str = path.as_ref();
+                let (operator, relative_path_string) = refreshable.create_operator(path_str)?;
+                // Find the relative path in the original path to maintain the lifetime
+                let relative_path = if let Some(pos) = path_str.rfind(&relative_path_string) {
+                    &path_str[pos..]
+                } else {
+                    // Fallback: return the whole path if we can't find the relative part
+                    path_str
+                };
+                return Ok((operator, relative_path));
+            }
             #[cfg(all(
                 not(feature = "storage-s3"),
                 not(feature = "storage-fs"),
@@ -229,6 +312,101 @@ impl Storage {
             "oss" => Ok(Scheme::Oss),
             "abfss" | "abfs" | "wasbs" | "wasb" => Ok(Scheme::Azdls),
             s => Ok(s.parse::<Scheme>()?),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::{FileIOBuilder, StorageCredential, StorageCredentialsLoader};
+
+    #[derive(Debug)]
+    struct TestCredentialLoader;
+
+    #[async_trait::async_trait]
+    impl StorageCredentialsLoader for TestCredentialLoader {
+        async fn load_credentials(
+            &self,
+            _location: &str,
+            _existing_credentials: Option<&StorageCredential>,
+        ) -> crate::Result<StorageCredential> {
+            Ok(StorageCredential {
+                prefix: "s3://test/".to_string(),
+                config: HashMap::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn test_storage_build_with_credentials_loader_creates_refreshable() {
+        let loader: Arc<dyn StorageCredentialsLoader> = Arc::new(TestCredentialLoader);
+
+        let file_io_builder = FileIOBuilder::new("s3")
+            .with_prop("bucket", "test-bucket")
+            .with_extension(loader);
+
+        let storage = Storage::build(file_io_builder).unwrap();
+
+        // Verify it created a Refreshable variant
+        match storage {
+            Storage::Refreshable(_) => {} // Success
+            _ => panic!("Expected Refreshable variant"),
+        }
+    }
+
+    #[test]
+    fn test_storage_build_without_loader_creates_normal_storage() {
+        #[cfg(feature = "storage-memory")]
+        {
+            let file_io_builder = FileIOBuilder::new("memory");
+            let storage = Storage::build(file_io_builder).unwrap();
+
+            // Verify it created a normal Memory variant
+            match storage {
+                Storage::Memory(_) => {} // Success
+                _ => panic!("Expected Memory variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_build_with_both_loader_and_initial_credentials() {
+        let loader: Arc<dyn StorageCredentialsLoader> = Arc::new(TestCredentialLoader);
+        let initial_cred = StorageCredential {
+            prefix: "s3://initial/".to_string(),
+            config: HashMap::new(),
+        };
+
+        let file_io_builder = FileIOBuilder::new("s3")
+            .with_prop("bucket", "test-bucket")
+            .with_extension(loader)
+            .with_extension(initial_cred);
+
+        let storage = Storage::build(file_io_builder).unwrap();
+
+        // Verify it created a Refreshable variant
+        match storage {
+            Storage::Refreshable(_) => {} // Success
+            _ => panic!("Expected Refreshable variant"),
+        }
+    }
+
+    #[test]
+    fn test_storage_build_from_props_never_creates_refreshable() {
+        let mut props = HashMap::new();
+        props.insert("bucket".to_string(), "test-bucket".to_string());
+
+        #[cfg(feature = "storage-s3")]
+        {
+            let storage = Storage::build_from_props("s3", props).unwrap();
+
+            // Verify it created a normal S3 variant, not Refreshable
+            match storage {
+                Storage::S3 { .. } => {} // Success
+                Storage::Refreshable(_) => panic!("build_from_props should not create Refreshable"),
+                _ => panic!("Expected S3 variant"),
+            }
         }
     }
 }

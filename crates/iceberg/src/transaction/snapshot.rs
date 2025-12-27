@@ -183,7 +183,7 @@ impl<'a> SnapshotProducer<'a> {
         snapshot_id
     }
 
-    fn new_manifest_writer(&mut self, content: ManifestContentType) -> Result<ManifestWriter> {
+    async fn new_manifest_writer(&mut self, content: ManifestContentType) -> Result<ManifestWriter> {
         let new_manifest_path = format!(
             "{}/{}/{}-m{}.{}",
             self.table.metadata().location(),
@@ -272,7 +272,7 @@ impl<'a> SnapshotProducer<'a> {
                 builder.build()
             }
         });
-        let mut writer = self.new_manifest_writer(ManifestContentType::Data)?;
+        let mut writer = self.new_manifest_writer(ManifestContentType::Data).await?;
         for entry in manifest_entries {
             writer.add_entry(entry)?;
         }

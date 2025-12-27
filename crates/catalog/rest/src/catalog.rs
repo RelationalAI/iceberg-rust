@@ -159,14 +159,8 @@ impl RestCatalogBuilder {
 ///
 /// Implement this trait to provide custom storage credential loading logic
 /// instead of passing credentials directly or expecting them to be vended from the catalog.
-#[async_trait::async_trait]
-pub trait StorageCredentialsLoader: Send + Sync + Debug {
-    /// Load storage credentials using custom user-defined logic.
-    async fn load_credentials(
-        &self,
-        existing_credentials: Option<&StorageCredential>,
-    ) -> Result<StorageCredential>;
-}
+// Re-export from iceberg
+pub use iceberg::io::StorageCredentialsLoader;
 
 /// Rest catalog configuration.
 #[derive(Clone, Debug, TypedBuilder)]
@@ -581,7 +575,10 @@ impl RestCatalog {
             &self.user_config.storage_credentials_loader
         {
             let credential = storage_credentials_loader
-                .load_credentials(matched_credential.as_ref())
+                .load_credentials(
+                    response.metadata_location.as_deref().unwrap_or(""),
+                    matched_credential.as_ref(),
+                )
                 .await?;
             config.extend(credential.config.clone());
             Some(credential)
@@ -3059,6 +3056,7 @@ mod tests {
         impl StorageCredentialsLoader for DummyCredentialLoader {
             async fn load_credentials(
                 &self,
+                _location: &str,
                 _existing_credentials: Option<&StorageCredential>,
             ) -> Result<StorageCredential> {
                 self.was_called.store(true, Ordering::SeqCst);
