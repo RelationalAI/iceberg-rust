@@ -532,15 +532,6 @@ impl RestCatalog {
         }
     }
 
-    /// Load a table with vended credentials from the catalog.
-    ///
-    /// This method loads the table and automatically fetches short-lived credentials
-    /// for accessing the table's data files. The credentials are merged into the
-    /// FileIO configuration.
-    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
-        self.load_table_internal(table_ident, true).await
-    }
-
     /// Load vended credentials for a table from the catalog.
     pub async fn load_table_credentials(
         &self,
@@ -562,6 +553,15 @@ impl RestCatalog {
             )),
             _ => Err(deserialize_unexpected_catalog_error(http_response).await),
         }
+    }
+
+    /// Load a table with vended credentials from the catalog.
+    ///
+    /// This method loads the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
+        self.load_table_internal(table_ident, true).await
     }
 }
 
@@ -1059,7 +1059,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
-    use futures_util::stream::StreamExt;
+    use futures::stream::StreamExt;
     use iceberg::spec::{
         FormatVersion, NestedField, NullOrder, Operation, PrimitiveType, Schema, Snapshot,
         SnapshotLog, SortDirection, SortField, SortOrder, Summary, Transform, Type,
