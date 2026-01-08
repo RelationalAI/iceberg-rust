@@ -27,6 +27,7 @@ members = [
   "crates/examples",
   "crates/iceberg",
   "crates/integration_tests",
+  "crates/integrations/*",
   "crates/test_utils",
 ]
 resolver = "2"
