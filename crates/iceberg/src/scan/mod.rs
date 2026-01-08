@@ -1910,7 +1910,6 @@ pub mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_select_with_file_column() {
         use arrow_array::cast::AsArray;
 

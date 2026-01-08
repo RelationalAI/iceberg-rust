@@ -1326,7 +1326,6 @@ mod test {
     /// - Iceberg spec: format/spec.md "Column Projection"
     /// - Java impl: core/src/main/java/org/apache/iceberg/util/PartitionUtil.java
     #[test]
-    #[ignore]
     fn identity_partition_uses_constant_from_metadata() {
         use crate::spec::{Struct, Transform};
 
