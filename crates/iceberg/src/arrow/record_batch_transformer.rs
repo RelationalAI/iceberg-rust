@@ -218,8 +218,11 @@ impl RecordBatchTransformerBuilder {
         self
     }
 
-    /// Add a virtual field to be included in the output.
-    /// Virtual fields are Arrow fields that are produced by the Parquet reader (e.g., _pos for row position).
+    /// Add a virtual field for a specific field ID.
+    /// This is used for virtual/metadata fields like _pos that are produced by the Parquet reader.
+    ///
+    /// # Arguments
+    /// * `field` - The Arrow field representing the virtual column
     pub(crate) fn with_virtual_field(mut self, field: FieldRef) -> Result<Self> {
         // Extract field ID from metadata
         let field_id = field
