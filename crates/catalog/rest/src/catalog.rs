@@ -519,15 +519,6 @@ impl RestCatalog {
         }
     }
 
-    /// Load a table with vended credentials from the catalog.
-    ///
-    /// This method loads the table and automatically fetches short-lived credentials
-    /// for accessing the table's data files. The credentials are merged into the
-    /// FileIO configuration.
-    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
-        self.load_table_internal(table_ident, true).await
-    }
-
     /// Load vended credentials for a table from the catalog.
     pub async fn load_table_credentials(
         &self,
@@ -549,6 +540,15 @@ impl RestCatalog {
             )),
             _ => Err(deserialize_unexpected_catalog_error(http_response).await),
         }
+    }
+
+    /// Load a table with vended credentials from the catalog.
+    ///
+    /// This method loads the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
+        self.load_table_internal(table_ident, true).await
     }
 }
 
@@ -1035,6 +1035,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
+    use futures::stream::StreamExt;
     use iceberg::spec::{
         FormatVersion, NestedField, NullOrder, Operation, PrimitiveType, Schema, Snapshot,
         SnapshotLog, SortDirection, SortField, SortOrder, Summary, Transform, Type,
@@ -2799,5 +2800,79 @@ mod tests {
             assert_eq!(err.kind(), ErrorKind::DataInvalid);
             assert_eq!(err.message(), "Catalog uri is required");
         }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_load_table_credentials_integration() {
+        // This test requires a running Polaris server with proper setup
+        // It tests the vended credentials feature for loading tables with short-lived credentials
+
+        let catalog_uri = "http://localhost:8181/api/catalog";
+
+        let props = {
+            let mut m = HashMap::new();
+            m.insert(REST_CATALOG_PROP_URI.to_string(), catalog_uri.to_string());
+            m.insert(
+                REST_CATALOG_PROP_WAREHOUSE.to_string(),
+                "s3://warehouse".to_string(),
+            );
+            m.insert("credential".to_string(), "root:s3cr3t".to_string());
+            m.insert("scope".to_string(), "PRINCIPAL_ROLE:ALL".to_string());
+            m.insert(
+                "s3.endpoint".to_string(),
+                "http://localhost:9000".to_string(),
+            );
+            m.insert("s3.region".to_string(), "us-east-1".to_string());
+            m
+        };
+
+        let catalog = RestCatalogBuilder::default()
+            .load("rest", props)
+            .await
+            .expect("Failed to create catalog");
+
+        // Test loading table with credentials
+        let table_ident = TableIdent::new(
+            NamespaceIdent::from_vec(vec!["tpch".to_string(), "sf01".to_string()]).unwrap(),
+            "customer".to_string(),
+        );
+
+        println!("\n--- Testing load_table_credentials ---");
+        let credentials = catalog
+            .load_table_credentials(&table_ident)
+            .await
+            .expect("Failed to load credentials");
+
+        assert!(
+            !credentials.storage_credentials.is_empty(),
+            "No credentials returned"
+        );
+        println!("✅ Successfully loaded credentials for table");
+        for cred in &credentials.storage_credentials {
+            println!("  - Prefix: {}", cred.prefix);
+            assert!(!cred.config.is_empty(), "Credential config is empty");
+        }
+
+        println!("\n--- Testing load_table_with_credentials ---");
+        let table = catalog
+            .load_table_with_credentials(&table_ident)
+            .await
+            .expect("Failed to load table with credentials");
+
+        assert_eq!(table.identifier(), &table_ident);
+        println!("✅ Successfully loaded table with vended credentials");
+
+        // Try to scan the table to verify credentials work
+        println!("\n--- Testing table scan with vended credentials ---");
+        let scan = table.scan().expect("Failed to create scan");
+        let mut stream = scan.plan_files().await.expect("Failed to plan files");
+
+        let mut file_count = 0;
+        while let Some(_file) = stream.next().await {
+            file_count += 1;
+        }
+        println!("✅ Successfully scanned table with vended credentials");
+        println!("  - Found {} files", file_count);
     }
 }
