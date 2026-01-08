@@ -106,7 +106,7 @@ impl DeleteFilter {
         let state = self.state.read().map_err(|e| {
             Error::new(
                 ErrorKind::Unexpected,
-                format!("Failed to acquire read lock: {}", e),
+                format!("Failed to acquire read lock: {e}"),
             )
         })?;
         f(&state)
@@ -117,7 +117,7 @@ impl DeleteFilter {
         let mut state = self.state.write().map_err(|e| {
             Error::new(
                 ErrorKind::Unexpected,
-                format!("Failed to acquire write lock: {}", e),
+                format!("Failed to acquire write lock: {e}"),
             )
         })?;
         f(&mut state)
