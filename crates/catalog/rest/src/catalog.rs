@@ -2829,7 +2829,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert(
             "credential".to_string(),
-            format!("{}:{}", client_id, client_secret),
+            format!("{client_id}:{client_secret}"),
         );
         props.insert("scope".to_string(), "PRINCIPAL_ROLE:ALL".to_string());
         props.insert(
@@ -2863,7 +2863,7 @@ mod tests {
                 assert!(!credentials.storage_credentials.is_empty());
             }
             Err(e) => {
-                panic!("Failed to load table credentials: {:?}", e);
+                panic!("Failed to load table credentials: {e:?}");
             }
         }
 
@@ -2895,17 +2895,17 @@ mod tests {
                             println!("  Batch: {} rows", batch.num_rows());
                         }
                         Err(e) => {
-                            panic!("Failed to read batch: {:?}", e);
+                            panic!("Failed to read batch: {e:?}");
                         }
                     }
                 }
 
-                println!("Total rows scanned: {}", row_count);
+                println!("Total rows scanned: {row_count}");
                 assert_eq!(row_count, 25, "Expected 25 rows in nation table");
                 println!("✓ Successfully verified 25 rows in table");
             }
             Err(e) => {
-                panic!("Failed to load table with vended credentials: {:?}", e);
+                panic!("Failed to load table with vended credentials: {e:?}");
             }
         }
 
@@ -2932,21 +2932,20 @@ mod tests {
                     }
                     Err(e) => {
                         println!("✓ Scan failed as expected without vended credentials");
-                        println!("Error: {}", e);
+                        println!("Error: {e}");
                         // Verify it's a permission/authentication error
                         let error_msg = e.to_string();
                         assert!(
                             error_msg.contains("PermissionDenied")
                                 && error_msg.contains("InvalidAccessKeyId")
                                 && error_msg.contains("403"),
-                            "Expected permission/authentication error, got: {}",
-                            error_msg
+                            "Expected permission/authentication error, got: {error_msg}"
                         );
                     }
                 }
             }
             Err(e) => {
-                panic!("Failed to load table without vended credentials: {:?}", e);
+                panic!("Failed to load table without vended credentials: {e:?}");
             }
         }
     }

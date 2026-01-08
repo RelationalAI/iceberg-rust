@@ -162,11 +162,11 @@ impl IncrementalTestFixture {
             };
 
             let manifest_list_location =
-                table_location.join(format!("metadata/snap-{}-manifest-list.avro", snapshot_id));
+                table_location.join(format!("metadata/snap-{snapshot_id}-manifest-list.avro"));
             manifest_list_locations.push(manifest_list_location.clone());
 
             let parent_str = if let Some(pid) = parent_id {
-                format!(r#""parent-snapshot-id": {},"#, pid)
+                format!(r#""parent-snapshot-id": {pid},"#)
             } else {
                 String::new()
             };
@@ -190,8 +190,7 @@ impl IncrementalTestFixture {
             ));
 
             snapshot_log_json.push(format!(
-                r#"    {{"snapshot-id": {}, "timestamp-ms": {}}}"#,
-                snapshot_id, timestamp
+                r#"    {{"snapshot-id": {snapshot_id}, "timestamp-ms": {timestamp}}}"#
             ));
         }
 
@@ -994,10 +993,10 @@ impl IncrementalTestFixture {
                     .enumerate()
                 {
                     // Skip this record if it was deleted via positional delete
-                    if let Some(deleted) = file_deleted_positions {
-                        if deleted.contains(&(position as i64)) {
-                            continue;
-                        }
+                    if let Some(deleted) = file_deleted_positions
+                        && deleted.contains(&(position as i64))
+                    {
+                        continue;
                     }
                     compacted_data.push((*n, d.clone()));
                 }
@@ -2519,13 +2518,11 @@ async fn test_incremental_scan_with_file_column() {
             let file_path = string_array.value(i);
             assert!(
                 file_path.ends_with(".parquet"),
-                "File path should end with .parquet: {}",
-                file_path
+                "File path should end with .parquet: {file_path}"
             );
             assert!(
                 file_path.contains("/data/"),
-                "File path should contain /data/: {}",
-                file_path
+                "File path should contain /data/: {file_path}"
             );
         }
     }
@@ -2603,9 +2600,7 @@ async fn test_incremental_select_with_pos_column() {
             assert_eq!(
                 pos_array.value(i),
                 i as i64,
-                "Row {} should have position {}",
-                i,
-                i
+                "Row {i} should have position {i}"
             );
         }
 
@@ -2661,9 +2656,7 @@ async fn test_incremental_select_with_pos_column() {
                 assert_eq!(
                     pos_array.value(i),
                     i as i64,
-                    "Row {} should have position {}",
-                    i,
-                    i
+                    "Row {i} should have position {i}"
                 );
             }
         }
@@ -2737,9 +2730,7 @@ async fn test_incremental_select_with_pos_and_file_columns() {
             assert_eq!(
                 pos_array.value(i),
                 i as i64,
-                "Row {} should have position {}",
-                i,
-                i
+                "Row {i} should have position {i}"
             );
         }
 
@@ -2750,8 +2741,7 @@ async fn test_incremental_select_with_pos_and_file_columns() {
             let file_path = string_array.value(i);
             assert!(
                 file_path.ends_with(".parquet"),
-                "File path should end with .parquet: {}",
-                file_path
+                "File path should end with .parquet: {file_path}"
             );
         }
     }
@@ -2772,8 +2762,8 @@ async fn test_incremental_scan_with_no_deletes() {
     for i in 0..20 {
         let start = i * 10 + 1;
         let end = (i + 1) * 10;
-        let data: Vec<_> = (start..=end).map(|n| (n, format!("data-{}", n))).collect();
-        operations.push(Operation::Add(data, format!("data-{}.parquet", i)));
+        let data: Vec<_> = (start..=end).map(|n| (n, format!("data-{n}"))).collect();
+        operations.push(Operation::Add(data, format!("data-{i}.parquet")));
     }
 
     let fixture = IncrementalTestFixture::new(operations).await;
@@ -2822,13 +2812,13 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
     // - Deadlock!
 
     // Snapshot 1: Create table with some rows
-    let snapshot1_data: Vec<_> = (1..=100).map(|n| (n, format!("initial-{}", n))).collect();
+    let snapshot1_data: Vec<_> = (1..=100).map(|n| (n, format!("initial-{n}"))).collect();
 
     // Snapshot 2: Add more rows
-    let snapshot2_data: Vec<_> = (101..=200).map(|n| (n, format!("second-{}", n))).collect();
+    let snapshot2_data: Vec<_> = (101..=200).map(|n| (n, format!("second-{n}"))).collect();
 
     // Snapshot 3: Add even more rows
-    let snapshot3_data: Vec<_> = (201..=300).map(|n| (n, format!("third-{}", n))).collect();
+    let snapshot3_data: Vec<_> = (201..=300).map(|n| (n, format!("third-{n}"))).collect();
 
     // Snapshot 4: Positional delete of 2 rows from first file
     let deletes = [(0, "data-1.parquet"), (1, "data-1.parquet")];
@@ -2885,10 +2875,7 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
     let total_delete_rows: usize = delete_batches.iter().map(|b| b.num_rows()).sum();
     let total_append_rows: usize = append_batches.iter().map(|b| b.num_rows()).sum();
 
-    eprintln!(
-        "Total delete rows: {}, total append rows: {}",
-        total_delete_rows, total_append_rows
-    );
+    eprintln!("Total delete rows: {total_delete_rows}, total append rows: {total_append_rows}");
 
     // We expect 2 deletes and 300 appends
     assert_eq!(total_delete_rows, 0, "Should have 0 deleted rows");

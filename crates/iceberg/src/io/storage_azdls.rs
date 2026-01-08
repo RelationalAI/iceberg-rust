@@ -118,14 +118,14 @@ fn find_sas_token(
     let find_with_prefix = |prefix: &str| {
         properties
             .iter()
-            .filter(|(key, _)| key.as_str() == prefix || key.starts_with(&format!("{}.", prefix)))
+            .filter(|(key, _)| key.as_str() == prefix || key.starts_with(&format!("{prefix}.")))
             .min_by_key(|(key, _)| key.len())
             .map(|(_, value)| value.strip_prefix('?').unwrap_or(value).to_string())
     };
 
     // Try account-specific prefix first if account name is known, then fall back to base
     if let Some(account) = account_name {
-        let account_prefix = format!("{}.{}", ADLS_SAS_TOKEN, account);
+        let account_prefix = format!("{ADLS_SAS_TOKEN}.{account}");
         if let Some(token) = find_with_prefix(&account_prefix) {
             return Some(token);
         }
