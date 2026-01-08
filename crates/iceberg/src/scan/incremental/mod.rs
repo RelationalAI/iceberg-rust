@@ -29,8 +29,7 @@ use crate::arrow::{
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
 use crate::metadata_columns::{
-    RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_UNDERSCORE_POS, get_metadata_field_id,
-    is_metadata_column_name,
+    RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, get_metadata_field_id, is_metadata_column_name,
 };
 use crate::scan::DeleteFileContext;
 use crate::scan::cache::ExpressionEvaluatorCache;
@@ -190,7 +189,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         });
 
         // Add _pos column
-        columns.push(RESERVED_COL_NAME_UNDERSCORE_POS.to_string());
+        columns.push(RESERVED_COL_NAME_POS.to_string());
 
         self.column_names = Some(columns);
         self

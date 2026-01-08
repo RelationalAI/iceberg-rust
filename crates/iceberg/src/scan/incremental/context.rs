@@ -123,6 +123,7 @@ impl IncrementalPlanContext {
                 field_ids: self.field_ids.clone(),
                 expression_evaluator_cache: self.expression_evaluator_cache.clone(),
                 delete_file_index: delete_file_idx.clone(),
+                case_sensitive: true,
                 filter_fn: filter_fn.clone(),
             };
 

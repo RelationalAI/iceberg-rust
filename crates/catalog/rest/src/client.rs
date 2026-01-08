@@ -190,16 +190,6 @@ impl HttpClient {
         Ok(auth_res.access_token)
     }
 
-    /// Set a custom token authenticator.
-    ///
-    /// When set, the authenticator will be called to get tokens instead of using
-    /// static tokens or OAuth credentials. This allows for custom token management
-    /// such as reading from files, APIs, or other custom sources.
-    pub fn with_authenticator(mut self, authenticator: Arc<dyn CustomAuthenticator>) -> Self {
-        self.authenticator = Some(authenticator);
-        self
-    }
-
     /// Add bearer token to request authorization header.
     fn set_bearer_token(req: &mut Request, token: &str, error_msg: &str) -> Result<()> {
         req.headers_mut().insert(

@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::TableIdent;
 use crate::io::{FileIO, OutputFile};
-use crate::metadata_columns::{RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_UNDERSCORE_POS};
+use crate::metadata_columns::{RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS};
 use crate::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, ManifestEntry, ManifestListWriter,
     ManifestStatus, ManifestWriterBuilder, PartitionSpec, SchemaRef, Struct, TableMetadata,
@@ -2553,7 +2553,7 @@ async fn test_incremental_select_with_pos_column() {
     let scan = fixture
         .table
         .incremental_scan(Some(1), Some(2))
-        .select(["n", RESERVED_COL_NAME_UNDERSCORE_POS])
+        .select(["n", RESERVED_COL_NAME_POS])
         .build()
         .unwrap();
 
@@ -2578,7 +2578,7 @@ async fn test_incremental_select_with_pos_column() {
         assert!(batch.column_by_name("n").is_some(), "n column should exist");
 
         // Verify the _pos column exists
-        let pos_col = batch.column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS);
+        let pos_col = batch.column_by_name(RESERVED_COL_NAME_POS);
         assert!(
             pos_col.is_some(),
             "_pos column should be present in the batch"
@@ -2640,7 +2640,7 @@ async fn test_incremental_select_with_pos_column() {
             );
 
             // Verify the _pos column exists
-            let pos_col = batch.column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS);
+            let pos_col = batch.column_by_name(RESERVED_COL_NAME_POS);
             assert!(
                 pos_col.is_some(),
                 "_pos column should be present when using with_pos_column()"
@@ -2692,12 +2692,7 @@ async fn test_incremental_select_with_pos_and_file_columns() {
     let scan = fixture
         .table
         .incremental_scan(Some(1), Some(2))
-        .select([
-            "n",
-            RESERVED_COL_NAME_FILE,
-            "data",
-            RESERVED_COL_NAME_UNDERSCORE_POS,
-        ])
+        .select(["n", RESERVED_COL_NAME_FILE, "data", RESERVED_COL_NAME_POS])
         .build()
         .unwrap();
 
@@ -2726,16 +2721,10 @@ async fn test_incremental_select_with_pos_and_file_columns() {
         assert!(batch.column_by_name("n").is_some());
         assert!(batch.column_by_name(RESERVED_COL_NAME_FILE).is_some());
         assert!(batch.column_by_name("data").is_some());
-        assert!(
-            batch
-                .column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS)
-                .is_some()
-        );
+        assert!(batch.column_by_name(RESERVED_COL_NAME_POS).is_some());
 
         // Verify the _pos column has correct data type
-        let pos_col = batch
-            .column_by_name(RESERVED_COL_NAME_UNDERSCORE_POS)
-            .unwrap();
+        let pos_col = batch.column_by_name(RESERVED_COL_NAME_POS).unwrap();
         assert_eq!(
             pos_col.data_type(),
             &arrow_schema::DataType::Int64,
