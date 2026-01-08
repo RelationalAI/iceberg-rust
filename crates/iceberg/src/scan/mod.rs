@@ -128,39 +128,6 @@ impl<'a> TableScanBuilder<'a> {
         self
     }
 
-    /// Set the snapshot to scan. When not set, it uses current snapshot.
-    pub fn snapshot_id(mut self, snapshot_id: i64) -> Self {
-        self.snapshot_id = Some(snapshot_id);
-        self
-    }
-
-    /// Sets the concurrency limit for both manifest files and manifest
-    /// entries for this scan
-    pub fn with_concurrency_limit(mut self, limit: usize) -> Self {
-        self.concurrency_limit_manifest_files = limit;
-        self.concurrency_limit_manifest_entries = limit;
-        self.concurrency_limit_data_files = limit;
-        self
-    }
-
-    /// Sets the data file concurrency limit for this scan
-    pub fn with_data_file_concurrency_limit(mut self, limit: usize) -> Self {
-        self.concurrency_limit_data_files = limit;
-        self
-    }
-
-    /// Set the concurrency limit for reading manifest files.
-    pub fn with_manifest_file_concurrency_limit(mut self, limit: usize) -> Self {
-        self.concurrency_limit_manifest_files = limit;
-        self
-    }
-
-    /// Sets the manifest entry concurrency limit for this scan
-    pub fn with_manifest_entry_concurrency_limit(mut self, limit: usize) -> Self {
-        self.concurrency_limit_manifest_entries = limit;
-        self
-    }
-
     /// Include the _file metadata column in the scan.
     ///
     /// This is a convenience method that adds the _file column to the current selection.
@@ -239,6 +206,39 @@ impl<'a> TableScanBuilder<'a> {
         columns.push(RESERVED_COL_NAME_POS.to_string());
 
         self.column_names = Some(columns);
+        self
+    }
+
+    /// Set the snapshot to scan. When not set, it uses current snapshot.
+    pub fn snapshot_id(mut self, snapshot_id: i64) -> Self {
+        self.snapshot_id = Some(snapshot_id);
+        self
+    }
+
+    /// Sets the concurrency limit for both manifest files and manifest
+    /// entries for this scan
+    pub fn with_concurrency_limit(mut self, limit: usize) -> Self {
+        self.concurrency_limit_manifest_files = limit;
+        self.concurrency_limit_manifest_entries = limit;
+        self.concurrency_limit_data_files = limit;
+        self
+    }
+
+    /// Sets the data file concurrency limit for this scan
+    pub fn with_data_file_concurrency_limit(mut self, limit: usize) -> Self {
+        self.concurrency_limit_data_files = limit;
+        self
+    }
+
+    /// Set the concurrency limit for reading manifest files.
+    pub fn with_manifest_file_concurrency_limit(mut self, limit: usize) -> Self {
+        self.concurrency_limit_manifest_files = limit;
+        self
+    }
+
+    /// Sets the manifest entry concurrency limit for this scan
+    pub fn with_manifest_entry_concurrency_limit(mut self, limit: usize) -> Self {
+        self.concurrency_limit_manifest_entries = limit;
         self
     }
 
