@@ -2344,9 +2344,7 @@ pub mod tests {
             assert_eq!(
                 pos_array.value(i),
                 i as i64,
-                "Row {} should have position {}",
-                i,
-                i
+                "Row {i} should have position {i}"
             );
         }
 
@@ -2388,9 +2386,7 @@ pub mod tests {
             assert_eq!(
                 pos_array.value(i),
                 i as i64,
-                "Row {} should have position {}",
-                i,
-                i
+                "Row {i} should have position {i}"
             );
         }
     }
@@ -2461,9 +2457,7 @@ pub mod tests {
             assert_eq!(
                 pos_array.value(i),
                 i as i64,
-                "Row {} should have position {}",
-                i,
-                i
+                "Row {i} should have position {i}"
             );
         }
 
