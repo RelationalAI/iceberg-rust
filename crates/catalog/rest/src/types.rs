@@ -164,6 +164,19 @@ pub(super) struct LoadTableResponse {
     pub(super) metadata_location: Option<String>,
     pub(super) metadata: TableMetadata,
     pub(super) config: Option<HashMap<String, String>>,
+    pub(super) storage_credentials: Option<Vec<StorageCredential>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageCredential {
+    pub prefix: String,
+    pub config: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct LoadCredentialsResponse {
+    pub storage_credentials: Vec<StorageCredential>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

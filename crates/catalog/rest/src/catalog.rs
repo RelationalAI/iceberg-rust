@@ -21,6 +21,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use iceberg::io::{self, FileIO};
@@ -38,7 +39,8 @@ use tokio::sync::OnceCell;
 use typed_builder::TypedBuilder;
 
 use crate::client::{
-    HttpClient, deserialize_catalog_response, deserialize_unexpected_catalog_error,
+    CustomAuthenticator, HttpClient, deserialize_catalog_response,
+    deserialize_unexpected_catalog_error,
 };
 use crate::types::{
     CatalogConfig, CommitTableRequest, CommitTableResponse, CreateTableRequest,
@@ -67,6 +69,7 @@ impl Default for RestCatalogBuilder {
             warehouse: None,
             props: HashMap::new(),
             client: None,
+            authenticator: None,
         })
     }
 }
@@ -124,6 +127,24 @@ impl RestCatalogBuilder {
         self.0.client = Some(client);
         self
     }
+
+    /// Set a custom token authenticator.
+    ///
+    /// The authenticator will be used to obtain tokens instead of using static tokens
+    /// or OAuth credentials.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let authenticator = Arc::new(MyAuthenticator::new());
+    /// let catalog = RestCatalogBuilder::default()
+    ///     .with_token_authenticator(authenticator)
+    ///     .load("rest", config)
+    ///     .await?;
+    /// ```
+    pub fn with_token_authenticator(mut self, authenticator: Arc<dyn CustomAuthenticator>) -> Self {
+        self.0.authenticator = Some(authenticator);
+        self
+    }
 }
 
 /// Rest catalog configuration.
@@ -142,6 +163,9 @@ pub(crate) struct RestCatalogConfig {
 
     #[builder(default)]
     client: Option<Client>,
+
+    #[builder(default)]
+    authenticator: Option<Arc<dyn CustomAuthenticator>>,
 }
 
 impl RestCatalogConfig {
@@ -349,7 +373,13 @@ impl RestCatalog {
     async fn context(&self) -> Result<&RestContext> {
         self.ctx
             .get_or_try_init(|| async {
-                let client = HttpClient::new(&self.user_config)?;
+                let mut client = HttpClient::new(&self.user_config)?;
+
+                // Set authenticator if one was configured
+                if let Some(authenticator) = &self.user_config.authenticator {
+                    client = client.with_authenticator(authenticator.clone());
+                }
+
                 let catalog_config = RestCatalog::load_config(&client, &self.user_config).await?;
                 let config = self.user_config.clone().merge_with_config(catalog_config);
                 let client = client.update_with(&config)?;
@@ -430,6 +460,85 @@ impl RestCatalog {
     /// the current token unchanged.
     pub async fn regenerate_token(&self) -> Result<()> {
         self.context().await?.client.regenerate_token().await
+    }
+
+    /// The actual logic for loading table, that supports loading vended credentials if requested.
+    async fn load_table_internal(
+        &self,
+        table_ident: &TableIdent,
+        load_credentials: bool,
+    ) -> Result<Table> {
+        let context = self.context().await?;
+
+        let mut request_builder = context
+            .client
+            .request(Method::GET, context.config.table_endpoint(table_ident));
+
+        if load_credentials {
+            request_builder =
+                request_builder.header("X-Iceberg-Access-Delegation", "vended-credentials");
+        }
+
+        let request = request_builder.build()?;
+
+        let http_response = context.client.query_catalog(request).await?;
+
+        let response = match http_response.status() {
+            StatusCode::OK | StatusCode::NOT_MODIFIED => {
+                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
+            }
+            StatusCode::NOT_FOUND => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "Tried to load a table that does not exist",
+                ));
+            }
+            _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+        };
+
+        // Build config with proper precedence, with each next config overriding previous one:
+        // 1. response.config (server defaults)
+        // 2. user_config.props (user configuration)
+        // 3. storage_credentials (vended credentials - highest priority)
+        let mut config: HashMap<String, String> = response
+            .config
+            .unwrap_or_default()
+            .into_iter()
+            .chain(self.user_config.props.clone())
+            .collect();
+
+        // Per the OpenAPI spec: "Clients must first check whether the respective credentials
+        // exist in the storage-credentials field before checking the config for credentials."
+        // When vended-credentials header is set, credentials are returned in storage_credentials field.
+        if let Some(storage_credentials) = response.storage_credentials {
+            for cred in storage_credentials {
+                config.extend(cred.config);
+            }
+        }
+
+        let file_io = self
+            .load_file_io(response.metadata_location.as_deref(), Some(config))
+            .await?;
+
+        let table_builder = Table::builder()
+            .identifier(table_ident.clone())
+            .file_io(file_io)
+            .metadata(response.metadata);
+
+        if let Some(metadata_location) = response.metadata_location {
+            table_builder.metadata_location(metadata_location).build()
+        } else {
+            table_builder.build()
+        }
+    }
+
+    /// Load a table with vended credentials from the catalog.
+    ///
+    /// This method loads the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
+        self.load_table_internal(table_ident, true).await
     }
 }
 
@@ -724,49 +833,7 @@ impl Catalog for RestCatalog {
     /// server and the config provided when creating this `RestCatalog` instance, then the value
     /// provided locally to the `RestCatalog` will take precedence.
     async fn load_table(&self, table_ident: &TableIdent) -> Result<Table> {
-        let context = self.context().await?;
-
-        let request = context
-            .client
-            .request(Method::GET, context.config.table_endpoint(table_ident))
-            .build()?;
-
-        let http_response = context.client.query_catalog(request).await?;
-
-        let response = match http_response.status() {
-            StatusCode::OK | StatusCode::NOT_MODIFIED => {
-                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
-            }
-            StatusCode::NOT_FOUND => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "Tried to load a table that does not exist",
-                ));
-            }
-            _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
-        };
-
-        let config = response
-            .config
-            .unwrap_or_default()
-            .into_iter()
-            .chain(self.user_config.props.clone())
-            .collect();
-
-        let file_io = self
-            .load_file_io(response.metadata_location.as_deref(), Some(config))
-            .await?;
-
-        let table_builder = Table::builder()
-            .identifier(table_ident.clone())
-            .file_io(file_io)
-            .metadata(response.metadata);
-
-        if let Some(metadata_location) = response.metadata_location {
-            table_builder.metadata_location(metadata_location).build()
-        } else {
-            table_builder.build()
-        }
+        self.load_table_internal(table_ident, false).await
     }
 
     /// Drop a table from the catalog.
