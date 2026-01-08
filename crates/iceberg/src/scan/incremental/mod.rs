@@ -310,9 +310,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
                 if schema.field_by_name(column_name).is_none() {
                     return Err(Error::new(
                         ErrorKind::DataInvalid,
-                        format!(
-                            "Column {column_name} not found in table. Schema: {schema}"
-                        ),
+                        format!("Column {column_name} not found in table. Schema: {schema}"),
                     ));
                 }
             }
@@ -338,9 +336,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             let field_id = schema.field_id_by_name(column_name).ok_or_else(|| {
                 Error::new(
                     ErrorKind::DataInvalid,
-                    format!(
-                        "Column {column_name} not found in table. Schema: {schema}"
-                    ),
+                    format!("Column {column_name} not found in table. Schema: {schema}"),
                 )
             })?;
 
