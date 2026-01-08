@@ -678,7 +678,7 @@ pub mod tests {
     use crate::arrow::ArrowReaderBuilder;
     use crate::expr::{BoundPredicate, Reference};
     use crate::io::{FileIO, OutputFile};
-    use crate::metadata_columns::RESERVED_COL_NAME_FILE;
+    use crate::metadata_columns::{RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS};
     use crate::scan::FileScanTask;
     use crate::spec::{
         DataContentType, DataFileBuilder, DataFileFormat, Datum, Literal, ManifestEntry,
@@ -2289,6 +2289,278 @@ pub mod tests {
             &arrow_schema::DataType::Utf8,
             "_file column (duplicate) should use Utf8 type"
         );
+    }
+
+    #[tokio::test]
+    async fn test_select_with_pos_column() {
+        use arrow_array::cast::AsArray;
+
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Select regular columns plus the _pos column
+        let table_scan = fixture
+            .table
+            .scan()
+            .select(["x", RESERVED_COL_NAME_POS])
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        // Verify we have 2 columns: x and _pos
+        assert_eq!(batches[0].num_columns(), 2);
+
+        // Verify the x column exists and has correct data
+        let x_col = batches[0].column_by_name("x").unwrap();
+        let x_arr = x_col.as_primitive::<arrow_array::types::Int64Type>();
+        assert_eq!(x_arr.value(0), 1);
+
+        // Verify the _pos column exists
+        let pos_col = batches[0].column_by_name(RESERVED_COL_NAME_POS);
+        assert!(
+            pos_col.is_some(),
+            "_pos column should be present in the batch"
+        );
+
+        // Verify the _pos column has correct data type (Int64 from RowNumber extension)
+        let pos_col = pos_col.unwrap();
+        assert_eq!(
+            pos_col.data_type(),
+            &arrow_schema::DataType::Int64,
+            "_pos column should use Int64 type"
+        );
+
+        // Get the position values from the Int64Array
+        let pos_array = pos_col.as_primitive::<arrow_array::types::Int64Type>();
+
+        // Verify first position is 0
+        assert_eq!(pos_array.value(0), 0, "First row should have position 0");
+
+        // Verify positions are sequential
+        for i in 1..pos_array.len().min(10) {
+            assert_eq!(
+                pos_array.value(i),
+                i as i64,
+                "Row {} should have position {}",
+                i,
+                i
+            );
+        }
+
+        // Test variant 2: Use with_pos_column() method instead of selecting by name
+        let table_scan = fixture
+            .table
+            .scan()
+            .select(["x"])
+            .with_pos_column()
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        // Verify we have 2 columns: x and _pos
+        assert_eq!(batches[0].num_columns(), 2);
+
+        // Verify the _pos column exists
+        let pos_col = batches[0].column_by_name(RESERVED_COL_NAME_POS);
+        assert!(
+            pos_col.is_some(),
+            "_pos column should be present when using with_pos_column()"
+        );
+
+        // Verify the _pos column has correct data type
+        let pos_col = pos_col.unwrap();
+        assert_eq!(
+            pos_col.data_type(),
+            &arrow_schema::DataType::Int64,
+            "_pos column should use Int64 type"
+        );
+
+        // Verify positions are sequential
+        let pos_array = pos_col.as_primitive::<arrow_array::types::Int64Type>();
+        assert_eq!(pos_array.value(0), 0, "First row should have position 0");
+        for i in 1..pos_array.len().min(10) {
+            assert_eq!(
+                pos_array.value(i),
+                i as i64,
+                "Row {} should have position {}",
+                i,
+                i
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_with_pos_and_file_columns() {
+        use arrow_array::cast::AsArray;
+
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Test 1: _file first, then _pos
+        let table_scan = fixture
+            .table
+            .scan()
+            .select(["x", RESERVED_COL_NAME_FILE, "y", RESERVED_COL_NAME_POS])
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        // Verify we have 4 columns: x, _file, y, _pos
+        assert_eq!(batches[0].num_columns(), 4);
+
+        // Verify column order
+        let schema = batches[0].schema();
+        assert_eq!(schema.field(0).name(), "x", "Column 0 should be x");
+        assert_eq!(
+            schema.field(1).name(),
+            RESERVED_COL_NAME_FILE,
+            "Column 1 should be _file"
+        );
+        assert_eq!(schema.field(2).name(), "y", "Column 2 should be y");
+        assert_eq!(
+            schema.field(3).name(),
+            RESERVED_COL_NAME_POS,
+            "Column 3 should be _pos"
+        );
+
+        // Verify data types
+        assert_eq!(
+            schema.field(1).data_type(),
+            &arrow_schema::DataType::Utf8,
+            "_file column should use Utf8 type"
+        );
+        assert_eq!(
+            schema.field(3).data_type(),
+            &arrow_schema::DataType::Int64,
+            "_pos column should use Int64 type"
+        );
+
+        // Verify _file column has valid data
+        let file_col = batches[0].column_by_name(RESERVED_COL_NAME_FILE).unwrap();
+        let file_array = file_col.as_string::<i32>();
+        let file_path = file_array.value(0);
+        assert!(
+            file_path.ends_with(".parquet"),
+            "File path should end with .parquet"
+        );
+
+        // Verify _pos column has valid sequential data
+        let pos_col = batches[0].column_by_name(RESERVED_COL_NAME_POS).unwrap();
+        let pos_array = pos_col.as_primitive::<arrow_array::types::Int64Type>();
+        assert_eq!(pos_array.value(0), 0, "First row should have position 0");
+        for i in 1..pos_array.len().min(10) {
+            assert_eq!(
+                pos_array.value(i),
+                i as i64,
+                "Row {} should have position {}",
+                i,
+                i
+            );
+        }
+
+        // Test 2: _pos first, then _file (reversed order)
+        let table_scan = fixture
+            .table
+            .scan()
+            .select(["x", RESERVED_COL_NAME_POS, "y", RESERVED_COL_NAME_FILE])
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        // Verify we have 4 columns in the new order
+        assert_eq!(batches[0].num_columns(), 4);
+
+        // Verify column order is now: x, _pos, y, _file
+        let schema = batches[0].schema();
+        assert_eq!(schema.field(0).name(), "x", "Column 0 should be x");
+        assert_eq!(
+            schema.field(1).name(),
+            RESERVED_COL_NAME_POS,
+            "Column 1 should be _pos"
+        );
+        assert_eq!(schema.field(2).name(), "y", "Column 2 should be y");
+        assert_eq!(
+            schema.field(3).name(),
+            RESERVED_COL_NAME_FILE,
+            "Column 3 should be _file"
+        );
+
+        // Verify data is still correct
+        let pos_col = batches[0].column_by_name(RESERVED_COL_NAME_POS).unwrap();
+        let pos_array = pos_col.as_primitive::<arrow_array::types::Int64Type>();
+        assert_eq!(pos_array.value(0), 0, "First row should have position 0");
+
+        let file_col = batches[0].column_by_name(RESERVED_COL_NAME_FILE).unwrap();
+        let file_array = file_col.as_string::<i32>();
+        let file_path = file_array.value(0);
+        assert!(
+            file_path.ends_with(".parquet"),
+            "File path should end with .parquet"
+        );
+
+        // Test 3: Both at the start
+        let table_scan = fixture
+            .table
+            .scan()
+            .select([RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, "x", "y"])
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches[0].num_columns(), 4);
+        let schema = batches[0].schema();
+        assert_eq!(
+            schema.field(0).name(),
+            RESERVED_COL_NAME_FILE,
+            "Column 0 should be _file"
+        );
+        assert_eq!(
+            schema.field(1).name(),
+            RESERVED_COL_NAME_POS,
+            "Column 1 should be _pos"
+        );
+        assert_eq!(schema.field(2).name(), "x", "Column 2 should be x");
+        assert_eq!(schema.field(3).name(), "y", "Column 3 should be y");
+
+        // Verify data types
+        assert_eq!(
+            schema.field(0).data_type(),
+            &arrow_schema::DataType::Utf8,
+            "_file column should use Utf8 type"
+        );
+        assert_eq!(
+            schema.field(1).data_type(),
+            &arrow_schema::DataType::Int64,
+            "_pos column should use Int64 type"
+        );
+
+        // Verify data is correct
+        let file_col = batches[0].column_by_name(RESERVED_COL_NAME_FILE).unwrap();
+        let file_array = file_col.as_string::<i32>();
+        let file_path = file_array.value(0);
+        assert!(
+            file_path.ends_with(".parquet"),
+            "File path should end with .parquet"
+        );
+
+        let pos_col = batches[0].column_by_name(RESERVED_COL_NAME_POS).unwrap();
+        let pos_array = pos_col.as_primitive::<arrow_array::types::Int64Type>();
+        assert_eq!(pos_array.value(0), 0, "First row should have position 0");
     }
 
     #[tokio::test]
