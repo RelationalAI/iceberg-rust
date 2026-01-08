@@ -2817,74 +2817,137 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_load_table_credentials_integration() {
-        // This test requires a running Polaris server with proper setup
-        // It tests the vended credentials feature for loading tables with short-lived credentials
+        use std::env;
 
-        let catalog_uri = "http://localhost:8181/api/catalog";
+        let client_id =
+            env::var("POLARIS_USER").expect("POLARIS_USER environment variable must be set");
+        let client_secret =
+            env::var("POLARIS_SECRET").expect("POLARIS_SECRET environment variable must be set");
+        let catalog_uri = env::var("POLARIS_URI")
+            .unwrap_or_else(|_| "http://localhost:8181/api/catalog".to_string());
 
-        let props = {
-            let mut m = HashMap::new();
-            m.insert(REST_CATALOG_PROP_URI.to_string(), catalog_uri.to_string());
-            m.insert(
-                REST_CATALOG_PROP_WAREHOUSE.to_string(),
-                "s3://warehouse".to_string(),
-            );
-            m.insert("credential".to_string(), "root:s3cr3t".to_string());
-            m.insert("scope".to_string(), "PRINCIPAL_ROLE:ALL".to_string());
-            m.insert(
-                "s3.endpoint".to_string(),
-                "http://localhost:9000".to_string(),
-            );
-            m.insert("s3.region".to_string(), "us-east-1".to_string());
-            m
-        };
+        let mut props = HashMap::new();
+        props.insert(
+            "credential".to_string(),
+            format!("{}:{}", client_id, client_secret),
+        );
+        props.insert("scope".to_string(), "PRINCIPAL_ROLE:ALL".to_string());
+        props.insert(
+            "s3.endpoint".to_string(),
+            "http://localhost:9000".to_string(),
+        );
 
-        let catalog = RestCatalogBuilder::default()
-            .load("rest", props)
-            .await
-            .expect("Failed to create catalog");
+        let catalog = RestCatalog::new(
+            RestCatalogConfig::builder()
+                .uri(catalog_uri)
+                .warehouse("warehouse".to_string())
+                .props(props)
+                .build(),
+        );
 
-        // Test loading table with credentials
         let table_ident = TableIdent::new(
-            NamespaceIdent::from_vec(vec!["tpch".to_string(), "sf01".to_string()]).unwrap(),
-            "customer".to_string(),
+            NamespaceIdent::new("tpch.sf01".to_string()),
+            "nation".to_string(),
         );
 
-        println!("\n--- Testing load_table_credentials ---");
-        let credentials = catalog
-            .load_table_credentials(&table_ident)
-            .await
-            .expect("Failed to load credentials");
+        let credentials_result = catalog.load_table_credentials(&table_ident).await;
 
-        assert!(
-            !credentials.storage_credentials.is_empty(),
-            "No credentials returned"
-        );
-        println!("✅ Successfully loaded credentials for table");
-        for cred in &credentials.storage_credentials {
-            println!("  - Prefix: {}", cred.prefix);
-            assert!(!cred.config.is_empty(), "Credential config is empty");
+        match credentials_result {
+            Ok(credentials) => {
+                println!("Successfully loaded credentials");
+                println!(
+                    "Number of storage credentials: {}",
+                    credentials.storage_credentials.len()
+                );
+                // println!("Full response: {:#?}", credentials);
+                assert!(!credentials.storage_credentials.is_empty());
+            }
+            Err(e) => {
+                panic!("Failed to load table credentials: {:?}", e);
+            }
         }
 
+        // Also test loading table with vended credentials
         println!("\n--- Testing load_table_with_credentials ---");
-        let table = catalog
-            .load_table_with_credentials(&table_ident)
-            .await
-            .expect("Failed to load table with credentials");
+        let table_result = catalog.load_table_with_credentials(&table_ident).await;
 
-        assert_eq!(table.identifier(), &table_ident);
-        println!("✅ Successfully loaded table with vended credentials");
+        match table_result {
+            Ok(table) => {
+                println!("Successfully loaded table with vended credentials");
+                println!("Table identifier: {}", table.identifier());
+                println!("Metadata location: {:?}", table.metadata_location());
+                println!("FileIO configured with vended credentials");
 
-        // Try to scan the table to verify credentials work
-        println!("\n--- Testing table scan with vended credentials ---");
-        let scan = table.scan().expect("Failed to create scan");
-        let mut stream = scan.plan_files().await.expect("Failed to plan files");
+                // Scan the table and count rows
+                println!("\n--- Scanning table ---");
+                let scan = table.scan().build().expect("Failed to build scan");
+                let mut row_count = 0;
 
-        let mut file_count = 0;
-        while let Some(_file) = stream.next().await {
-            file_count += 1;
+                let mut stream = scan
+                    .to_arrow()
+                    .await
+                    .expect("Failed to create arrow stream");
+
+                while let Some(batch_result) = stream.next().await {
+                    match batch_result {
+                        Ok(batch) => {
+                            row_count += batch.num_rows();
+                            println!("  Batch: {} rows", batch.num_rows());
+                        }
+                        Err(e) => {
+                            panic!("Failed to read batch: {:?}", e);
+                        }
+                    }
+                }
+
+                println!("Total rows scanned: {}", row_count);
+                assert_eq!(row_count, 25, "Expected 25 rows in nation table");
+                println!("✓ Successfully verified 25 rows in table");
+            }
+            Err(e) => {
+                panic!("Failed to load table with vended credentials: {:?}", e);
+            }
         }
-        println!("✅ Successfully scanned table with vended credentials");
-        println!("  - Found {} files", file_count);
+
+        // Test loading table WITHOUT vended credentials and verify scan fails
+        println!("\n--- Testing load_table WITHOUT vended credentials (should fail) ---");
+        let table_result_no_creds = catalog.load_table(&table_ident).await;
+
+        match table_result_no_creds {
+            Ok(table) => {
+                println!("Successfully loaded table WITHOUT vended credentials");
+                println!("Table identifier: {}", table.identifier());
+                println!("Metadata location: {:?}", table.metadata_location());
+
+                // Try to scan the table - this should fail
+                println!("\n--- Attempting to scan table without credentials ---");
+                let scan = table.scan().build().expect("Failed to build scan");
+
+                // Try to create arrow stream - this should fail when accessing manifest list
+                match scan.to_arrow().await {
+                    Ok(_stream) => {
+                        panic!(
+                            "Stream creation succeeded without vended credentials - this should not happen!"
+                        );
+                    }
+                    Err(e) => {
+                        println!("✓ Scan failed as expected without vended credentials");
+                        println!("Error: {}", e);
+                        // Verify it's a permission/authentication error
+                        let error_msg = e.to_string();
+                        assert!(
+                            error_msg.contains("PermissionDenied")
+                                && error_msg.contains("InvalidAccessKeyId")
+                                && error_msg.contains("403"),
+                            "Expected permission/authentication error, got: {}",
+                            error_msg
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                panic!("Failed to load table without vended credentials: {:?}", e);
+            }
+        }
     }
 }
