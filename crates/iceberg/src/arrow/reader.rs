@@ -307,7 +307,9 @@ impl ArrowReader {
                 add_fallback_field_ids_to_arrow_schema(initial_stream_builder.schema())
             };
 
-            let options = ArrowReaderOptions::new().with_schema(arrow_schema);
+            let options = ArrowReaderOptions::new()
+                .with_schema(arrow_schema)
+                .with_virtual_columns(virtual_columns.clone())?;
 
             Self::create_parquet_record_batch_stream_builder(
                 &task.data_file_path,
@@ -546,7 +548,7 @@ impl ArrowReader {
     /// Using the Parquet page index, we build a `RowSelection` that rejects rows that are indicated
     /// as having been deleted by a positional delete, taking into account any row groups that have
     /// been skipped entirely by the filter predicate
-    pub fn build_deletes_row_selection(
+    pub(crate) fn build_deletes_row_selection(
         row_group_metadata_list: &[RowGroupMetaData],
         selected_row_groups: &Option<Vec<usize>>,
         positional_deletes: &DeleteVector,
