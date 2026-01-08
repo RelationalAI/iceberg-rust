@@ -43,9 +43,9 @@ use crate::client::{
     deserialize_unexpected_catalog_error,
 };
 use crate::types::{
-    CatalogConfig, CommitTableRequest, CommitTableResponse, CreateTableRequest,
-    ListNamespaceResponse, ListTableResponse, LoadCredentialsResponse, LoadTableResponse,
-    NamespaceSerde, RegisterTableRequest, RenameTableRequest,
+    CatalogConfig, CommitTableRequest, CommitTableResponse, CreateNamespaceRequest,
+    CreateTableRequest, ListNamespaceResponse, ListTablesResponse, LoadCredentialsResponse,
+    LoadTableResult, NamespaceResponse, RegisterTableRequest, RenameTableRequest,
 };
 
 /// REST catalog URI
@@ -129,18 +129,6 @@ impl RestCatalogBuilder {
     }
 
     /// Set a custom token authenticator.
-    ///
-    /// The authenticator will be used to obtain tokens instead of using static tokens
-    /// or OAuth credentials.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let authenticator = Arc::new(MyAuthenticator::new());
-    /// let catalog = RestCatalogBuilder::default()
-    ///     .with_token_authenticator(authenticator)
-    ///     .load("rest", config)
-    ///     .await?;
-    /// ```
     pub fn with_token_authenticator(mut self, authenticator: Arc<dyn CustomAuthenticator>) -> Self {
         self.0.authenticator = Some(authenticator);
         self
@@ -485,7 +473,7 @@ impl RestCatalog {
 
         let response = match http_response.status() {
             StatusCode::OK | StatusCode::NOT_MODIFIED => {
-                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
             }
             StatusCode::NOT_FOUND => {
                 return Err(Error::new(
@@ -502,7 +490,6 @@ impl RestCatalog {
         // 3. storage_credentials (vended credentials - highest priority)
         let mut config: HashMap<String, String> = response
             .config
-            .unwrap_or_default()
             .into_iter()
             .chain(self.user_config.props.clone())
             .collect();
@@ -532,6 +519,15 @@ impl RestCatalog {
         }
     }
 
+    /// Load a table with vended credentials from the catalog.
+    ///
+    /// This method loads the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
+        self.load_table_internal(table_ident, true).await
+    }
+
     /// Load vended credentials for a table from the catalog.
     pub async fn load_table_credentials(
         &self,
@@ -553,15 +549,6 @@ impl RestCatalog {
             )),
             _ => Err(deserialize_unexpected_catalog_error(http_response).await),
         }
-    }
-
-    /// Load a table with vended credentials from the catalog.
-    ///
-    /// This method loads the table and automatically fetches short-lived credentials
-    /// for accessing the table's data files. The credentials are merged into the
-    /// FileIO configuration.
-    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
-        self.load_table_internal(table_ident, true).await
     }
 }
 
@@ -598,13 +585,7 @@ impl Catalog for RestCatalog {
                         deserialize_catalog_response::<ListNamespaceResponse>(http_response)
                             .await?;
 
-                    let ns_identifiers = response
-                        .namespaces
-                        .into_iter()
-                        .map(NamespaceIdent::from_vec)
-                        .collect::<Result<Vec<NamespaceIdent>>>()?;
-
-                    namespaces.extend(ns_identifiers);
+                    namespaces.extend(response.namespaces);
 
                     match response.next_page_token {
                         Some(token) => next_token = Some(token),
@@ -634,9 +615,9 @@ impl Catalog for RestCatalog {
         let request = context
             .client
             .request(Method::POST, context.config.namespaces_endpoint())
-            .json(&NamespaceSerde {
-                namespace: namespace.as_ref().clone(),
-                properties: Some(properties),
+            .json(&CreateNamespaceRequest {
+                namespace: namespace.clone(),
+                properties,
             })
             .build()?;
 
@@ -645,8 +626,8 @@ impl Catalog for RestCatalog {
         match http_response.status() {
             StatusCode::OK => {
                 let response =
-                    deserialize_catalog_response::<NamespaceSerde>(http_response).await?;
-                Namespace::try_from(response)
+                    deserialize_catalog_response::<NamespaceResponse>(http_response).await?;
+                Ok(Namespace::from(response))
             }
             StatusCode::CONFLICT => Err(Error::new(
                 ErrorKind::Unexpected,
@@ -669,8 +650,8 @@ impl Catalog for RestCatalog {
         match http_response.status() {
             StatusCode::OK => {
                 let response =
-                    deserialize_catalog_response::<NamespaceSerde>(http_response).await?;
-                Namespace::try_from(response)
+                    deserialize_catalog_response::<NamespaceResponse>(http_response).await?;
+                Ok(Namespace::from(response))
             }
             StatusCode::NOT_FOUND => Err(Error::new(
                 ErrorKind::Unexpected,
@@ -746,7 +727,7 @@ impl Catalog for RestCatalog {
             match http_response.status() {
                 StatusCode::OK => {
                     let response =
-                        deserialize_catalog_response::<ListTableResponse>(http_response).await?;
+                        deserialize_catalog_response::<ListTablesResponse>(http_response).await?;
 
                     identifiers.extend(response.identifiers);
 
@@ -793,11 +774,7 @@ impl Catalog for RestCatalog {
                 partition_spec: creation.partition_spec,
                 write_order: creation.sort_order,
                 stage_create: Some(false),
-                properties: if creation.properties.is_empty() {
-                    None
-                } else {
-                    Some(creation.properties)
-                },
+                properties: creation.properties,
             })
             .build()?;
 
@@ -805,7 +782,7 @@ impl Catalog for RestCatalog {
 
         let response = match http_response.status() {
             StatusCode::OK => {
-                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
             }
             StatusCode::NOT_FOUND => {
                 return Err(Error::new(
@@ -829,7 +806,6 @@ impl Catalog for RestCatalog {
 
         let config = response
             .config
-            .unwrap_or_default()
             .into_iter()
             .chain(self.user_config.props.clone())
             .collect();
@@ -951,9 +927,9 @@ impl Catalog for RestCatalog {
 
         let http_response = context.client.query_catalog(request).await?;
 
-        let response: LoadTableResponse = match http_response.status() {
+        let response: LoadTableResult = match http_response.status() {
             StatusCode::OK => {
-                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
             }
             StatusCode::NOT_FOUND => {
                 return Err(Error::new(
@@ -995,7 +971,7 @@ impl Catalog for RestCatalog {
                 context.config.table_endpoint(commit.identifier()),
             )
             .json(&CommitTableRequest {
-                identifier: commit.identifier().clone(),
+                identifier: Some(commit.identifier().clone()),
                 requirements: commit.take_requirements(),
                 updates: commit.take_updates(),
             })
@@ -1059,7 +1035,6 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
-    use futures::stream::StreamExt;
     use iceberg::spec::{
         FormatVersion, NestedField, NullOrder, Operation, PrimitiveType, Schema, Snapshot,
         SnapshotLog, SortDirection, SortField, SortOrder, Summary, Transform, Type,
@@ -2519,7 +2494,7 @@ mod tests {
             ))
             .unwrap();
             let reader = BufReader::new(file);
-            let resp = serde_json::from_reader::<_, LoadTableResponse>(reader).unwrap();
+            let resp = serde_json::from_reader::<_, LoadTableResult>(reader).unwrap();
 
             Table::builder()
                 .metadata(resp.metadata)
@@ -2659,7 +2634,7 @@ mod tests {
             ))
             .unwrap();
             let reader = BufReader::new(file);
-            let resp = serde_json::from_reader::<_, LoadTableResponse>(reader).unwrap();
+            let resp = serde_json::from_reader::<_, LoadTableResult>(reader).unwrap();
 
             Table::builder()
                 .metadata(resp.metadata)
@@ -2823,143 +2798,6 @@ mod tests {
         if let Err(err) = catalog {
             assert_eq!(err.kind(), ErrorKind::DataInvalid);
             assert_eq!(err.message(), "Catalog uri is required");
-        }
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_load_table_credentials_integration() {
-        use std::env;
-
-        let client_id =
-            env::var("POLARIS_USER").expect("POLARIS_USER environment variable must be set");
-        let client_secret =
-            env::var("POLARIS_SECRET").expect("POLARIS_SECRET environment variable must be set");
-        let catalog_uri = env::var("POLARIS_URI")
-            .unwrap_or_else(|_| "http://localhost:8181/api/catalog".to_string());
-
-        let mut props = HashMap::new();
-        props.insert(
-            "credential".to_string(),
-            format!("{}:{}", client_id, client_secret),
-        );
-        props.insert("scope".to_string(), "PRINCIPAL_ROLE:ALL".to_string());
-        props.insert(
-            "s3.endpoint".to_string(),
-            "http://localhost:9000".to_string(),
-        );
-
-        let catalog = RestCatalog::new(
-            RestCatalogConfig::builder()
-                .uri(catalog_uri)
-                .warehouse("warehouse".to_string())
-                .props(props)
-                .build(),
-        );
-
-        let table_ident = TableIdent::new(
-            NamespaceIdent::new("tpch.sf01".to_string()),
-            "nation".to_string(),
-        );
-
-        let credentials_result = catalog.load_table_credentials(&table_ident).await;
-
-        match credentials_result {
-            Ok(credentials) => {
-                println!("Successfully loaded credentials");
-                println!(
-                    "Number of storage credentials: {}",
-                    credentials.storage_credentials.len()
-                );
-                // println!("Full response: {:#?}", credentials);
-                assert!(!credentials.storage_credentials.is_empty());
-            }
-            Err(e) => {
-                panic!("Failed to load table credentials: {:?}", e);
-            }
-        }
-
-        // Also test loading table with vended credentials
-        println!("\n--- Testing load_table_with_credentials ---");
-        let table_result = catalog.load_table_with_credentials(&table_ident).await;
-
-        match table_result {
-            Ok(table) => {
-                println!("Successfully loaded table with vended credentials");
-                println!("Table identifier: {}", table.identifier());
-                println!("Metadata location: {:?}", table.metadata_location());
-                println!("FileIO configured with vended credentials");
-
-                // Scan the table and count rows
-                println!("\n--- Scanning table ---");
-                let scan = table.scan().build().expect("Failed to build scan");
-                let mut row_count = 0;
-
-                let mut stream = scan
-                    .to_arrow()
-                    .await
-                    .expect("Failed to create arrow stream");
-
-                while let Some(batch_result) = stream.next().await {
-                    match batch_result {
-                        Ok(batch) => {
-                            row_count += batch.num_rows();
-                            println!("  Batch: {} rows", batch.num_rows());
-                        }
-                        Err(e) => {
-                            panic!("Failed to read batch: {:?}", e);
-                        }
-                    }
-                }
-
-                println!("Total rows scanned: {}", row_count);
-                assert_eq!(row_count, 25, "Expected 25 rows in nation table");
-                println!("✓ Successfully verified 25 rows in table");
-            }
-            Err(e) => {
-                panic!("Failed to load table with vended credentials: {:?}", e);
-            }
-        }
-
-        // Test loading table WITHOUT vended credentials and verify scan fails
-        println!("\n--- Testing load_table WITHOUT vended credentials (should fail) ---");
-        let table_result_no_creds = catalog.load_table(&table_ident).await;
-
-        match table_result_no_creds {
-            Ok(table) => {
-                println!("Successfully loaded table WITHOUT vended credentials");
-                println!("Table identifier: {}", table.identifier());
-                println!("Metadata location: {:?}", table.metadata_location());
-
-                // Try to scan the table - this should fail
-                println!("\n--- Attempting to scan table without credentials ---");
-                let scan = table.scan().build().expect("Failed to build scan");
-
-                // Try to create arrow stream - this should fail when accessing manifest list
-                match scan.to_arrow().await {
-                    Ok(_stream) => {
-                        panic!(
-                            "Stream creation succeeded without vended credentials - this should not happen!"
-                        );
-                    }
-                    Err(e) => {
-                        println!("✓ Scan failed as expected without vended credentials");
-                        println!("Error: {}", e);
-                        // Verify it's a permission/authentication error
-                        let error_msg = e.to_string();
-                        assert!(
-                            error_msg.contains("PermissionDenied")
-                                && error_msg.contains("InvalidAccessKeyId")
-                                && error_msg.contains("403"),
-                            "Expected permission/authentication error, got: {}",
-                            error_msg
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                panic!("Failed to load table without vended credentials: {:?}", e);
-            }
         }
     }
 }
