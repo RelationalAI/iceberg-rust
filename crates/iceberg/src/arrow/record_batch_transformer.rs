@@ -310,7 +310,9 @@ pub(crate) struct RecordBatchTransformer {
     // Includes both virtual/metadata fields (like _file) and identity-partitioned fields
     // Datum holds both the Iceberg type and the value
     constant_fields: HashMap<i32, Datum>,
-    // Virtual fields from Parquet reader (like _pos)
+    // Virtual fields are metadata fields that are not present in the snapshot schema,
+    // but are present in the source schema (arrow reader produces them)
+    // Map from field_id to FieldRef
     virtual_fields: HashMap<i32, FieldRef>,
 
     // BatchTransform gets lazily constructed based on the schema of
