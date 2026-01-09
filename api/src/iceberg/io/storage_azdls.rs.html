@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/iceberg/src/io/storage_azdls.rs`."><title>storage_azdls.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-916cea96.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iceberg" data-themes="" data-resource-suffix="" data-rustdoc-version="1.87.0-nightly (3f5502370 2025-03-27)" data-channel="nightly" data-search-js="search-e7298875.js" data-settings-js="settings-d72f25bb.js" ><script src="../../../static.files/storage-82c7156e.js"></script><script defer src="../../../static.files/src-script-63605ae7.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fb8c74a8.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iceberg/io/</div>storage_azdls.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/iceberg/src/io/storage_azdls.rs`."><title>storage_azdls.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-84e720fa.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iceberg" data-themes="" data-resource-suffix="" data-rustdoc-version="1.89.0-nightly (be19eda0d 2025-06-22)" data-channel="nightly" data-search-js="search-92309212.js" data-settings-js="settings-5514c975.js" ><script src="../../../static.files/storage-4e99c027.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fd3af306.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-32bb7600.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iceberg/io/</div>storage_azdls.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
 <a href=#2 id=2 data-nosnippet>2</a>// or more contributor license agreements.  See the NOTICE file
 <a href=#3 id=3 data-nosnippet>3</a>// distributed with this work for additional information
 <a href=#4 id=4 data-nosnippet>4</a>// regarding copyright ownership.  The ASF licenses this file
@@ -118,14 +118,14 @@
 <a href=#118 id=118 data-nosnippet>118</a>    </span><span class="kw">let </span>find_with_prefix = |prefix: <span class="kw-2">&amp;</span>str| {
 <a href=#119 id=119 data-nosnippet>119</a>        properties
 <a href=#120 id=120 data-nosnippet>120</a>            .iter()
-<a href=#121 id=121 data-nosnippet>121</a>            .filter(|(key, <span class="kw">_</span>)| key.as_str() == prefix || key.starts_with(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{}."</span>, prefix)))
+<a href=#121 id=121 data-nosnippet>121</a>            .filter(|(key, <span class="kw">_</span>)| key.as_str() == prefix || key.starts_with(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{prefix}."</span>)))
 <a href=#122 id=122 data-nosnippet>122</a>            .min_by_key(|(key, <span class="kw">_</span>)| key.len())
 <a href=#123 id=123 data-nosnippet>123</a>            .map(|(<span class="kw">_</span>, value)| value.strip_prefix(<span class="string">'?'</span>).unwrap_or(value).to_string())
 <a href=#124 id=124 data-nosnippet>124</a>    };
 <a href=#125 id=125 data-nosnippet>125</a>
 <a href=#126 id=126 data-nosnippet>126</a>    <span class="comment">// Try account-specific prefix first if account name is known, then fall back to base
 <a href=#127 id=127 data-nosnippet>127</a>    </span><span class="kw">if let </span><span class="prelude-val">Some</span>(account) = account_name {
-<a href=#128 id=128 data-nosnippet>128</a>        <span class="kw">let </span>account_prefix = <span class="macro">format!</span>(<span class="string">"{}.{}"</span>, ADLS_SAS_TOKEN, account);
+<a href=#128 id=128 data-nosnippet>128</a>        <span class="kw">let </span>account_prefix = <span class="macro">format!</span>(<span class="string">"{ADLS_SAS_TOKEN}.{account}"</span>);
 <a href=#129 id=129 data-nosnippet>129</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(token) = find_with_prefix(<span class="kw-2">&amp;</span>account_prefix) {
 <a href=#130 id=130 data-nosnippet>130</a>            <span class="kw">return </span><span class="prelude-val">Some</span>(token);
 <a href=#131 id=131 data-nosnippet>131</a>        }
@@ -204,7 +204,7 @@
 <a href=#204 id=204 data-nosnippet>204</a>            <span class="string">"wasbs" </span>=&gt; <span class="prelude-val">Ok</span>(AzureStorageScheme::Wasbs),
 <a href=#205 id=205 data-nosnippet>205</a>            <span class="kw">_ </span>=&gt; <span class="prelude-val">Err</span>(Error::new(
 <a href=#206 id=206 data-nosnippet>206</a>                ErrorKind::DataInvalid,
-<a href=#207 id=207 data-nosnippet>207</a>                <span class="macro">format!</span>(<span class="string">"Unexpected Azure Storage scheme: {}"</span>, s),
+<a href=#207 id=207 data-nosnippet>207</a>                <span class="macro">format!</span>(<span class="string">"Unexpected Azure Storage scheme: {s}"</span>),
 <a href=#208 id=208 data-nosnippet>208</a>            )),
 <a href=#209 id=209 data-nosnippet>209</a>        }
 <a href=#210 id=210 data-nosnippet>210</a>    }
@@ -517,11 +517,11 @@
 <a href=#517 id=517 data-nosnippet>517</a>            <span class="kw">let </span>config = azdls_config_parse(properties);
 <a href=#518 id=518 data-nosnippet>518</a>            <span class="kw">match </span>expected {
 <a href=#519 id=519 data-nosnippet>519</a>                <span class="prelude-val">Some</span>(expected_config) =&gt; {
-<a href=#520 id=520 data-nosnippet>520</a>                    <span class="macro">assert!</span>(config.is_ok(), <span class="string">"Test case {} failed: {:?}"</span>, name, config);
-<a href=#521 id=521 data-nosnippet>521</a>                    <span class="macro">assert_eq!</span>(config.unwrap(), expected_config, <span class="string">"Test case: {}"</span>, name);
+<a href=#520 id=520 data-nosnippet>520</a>                    <span class="macro">assert!</span>(config.is_ok(), <span class="string">"Test case {name} failed: {config:?}"</span>);
+<a href=#521 id=521 data-nosnippet>521</a>                    <span class="macro">assert_eq!</span>(config.unwrap(), expected_config, <span class="string">"Test case: {name}"</span>);
 <a href=#522 id=522 data-nosnippet>522</a>                }
 <a href=#523 id=523 data-nosnippet>523</a>                <span class="prelude-val">None </span>=&gt; {
-<a href=#524 id=524 data-nosnippet>524</a>                    <span class="macro">assert!</span>(config.is_err(), <span class="string">"Test case {} expected error."</span>, name);
+<a href=#524 id=524 data-nosnippet>524</a>                    <span class="macro">assert!</span>(config.is_err(), <span class="string">"Test case {name} expected error."</span>);
 <a href=#525 id=525 data-nosnippet>525</a>                }
 <a href=#526 id=526 data-nosnippet>526</a>            }
 <a href=#527 id=527 data-nosnippet>527</a>        }
@@ -629,14 +629,14 @@
 <a href=#629 id=629 data-nosnippet>629</a>            <span class="kw">let </span>result = azdls_create_operator(input.<span class="number">0</span>, <span class="kw-2">&amp;</span>input.<span class="number">1</span>, <span class="kw-2">&amp;</span>input.<span class="number">2</span>);
 <a href=#630 id=630 data-nosnippet>630</a>            <span class="kw">match </span>expected {
 <a href=#631 id=631 data-nosnippet>631</a>                <span class="prelude-val">Some</span>((expected_filesystem, expected_path)) =&gt; {
-<a href=#632 id=632 data-nosnippet>632</a>                    <span class="macro">assert!</span>(result.is_ok(), <span class="string">"Test case {} failed: {:?}"</span>, name, result);
+<a href=#632 id=632 data-nosnippet>632</a>                    <span class="macro">assert!</span>(result.is_ok(), <span class="string">"Test case {name} failed: {result:?}"</span>);
 <a href=#633 id=633 data-nosnippet>633</a>
 <a href=#634 id=634 data-nosnippet>634</a>                    <span class="kw">let </span>(op, relative_path) = result.unwrap();
 <a href=#635 id=635 data-nosnippet>635</a>                    <span class="macro">assert_eq!</span>(op.info().name(), expected_filesystem);
 <a href=#636 id=636 data-nosnippet>636</a>                    <span class="macro">assert_eq!</span>(relative_path, expected_path);
 <a href=#637 id=637 data-nosnippet>637</a>                }
 <a href=#638 id=638 data-nosnippet>638</a>                <span class="prelude-val">None </span>=&gt; {
-<a href=#639 id=639 data-nosnippet>639</a>                    <span class="macro">assert!</span>(result.is_err(), <span class="string">"Test case {} expected error."</span>, name);
+<a href=#639 id=639 data-nosnippet>639</a>                    <span class="macro">assert!</span>(result.is_err(), <span class="string">"Test case {name} expected error."</span>);
 <a href=#640 id=640 data-nosnippet>640</a>                }
 <a href=#641 id=641 data-nosnippet>641</a>            }
 <a href=#642 id=642 data-nosnippet>642</a>        }
@@ -677,11 +677,11 @@
 <a href=#677 id=677 data-nosnippet>677</a>            <span class="kw">let </span>result = input.parse::&lt;AzureStoragePath&gt;();
 <a href=#678 id=678 data-nosnippet>678</a>            <span class="kw">match </span>expected {
 <a href=#679 id=679 data-nosnippet>679</a>                <span class="prelude-val">Some</span>(expected_path) =&gt; {
-<a href=#680 id=680 data-nosnippet>680</a>                    <span class="macro">assert!</span>(result.is_ok(), <span class="string">"Test case {} failed: {:?}"</span>, name, result);
-<a href=#681 id=681 data-nosnippet>681</a>                    <span class="macro">assert_eq!</span>(result.unwrap(), expected_path, <span class="string">"Test case: {}"</span>, name);
+<a href=#680 id=680 data-nosnippet>680</a>                    <span class="macro">assert!</span>(result.is_ok(), <span class="string">"Test case {name} failed: {result:?}"</span>);
+<a href=#681 id=681 data-nosnippet>681</a>                    <span class="macro">assert_eq!</span>(result.unwrap(), expected_path, <span class="string">"Test case: {name}"</span>);
 <a href=#682 id=682 data-nosnippet>682</a>                }
 <a href=#683 id=683 data-nosnippet>683</a>                <span class="prelude-val">None </span>=&gt; {
-<a href=#684 id=684 data-nosnippet>684</a>                    <span class="macro">assert!</span>(result.is_err(), <span class="string">"Test case {} expected error."</span>, name);
+<a href=#684 id=684 data-nosnippet>684</a>                    <span class="macro">assert!</span>(result.is_err(), <span class="string">"Test case {name} expected error."</span>);
 <a href=#685 id=685 data-nosnippet>685</a>                }
 <a href=#686 id=686 data-nosnippet>686</a>            }
 <a href=#687 id=687 data-nosnippet>687</a>        }
@@ -727,7 +727,7 @@
 <a href=#727 id=727 data-nosnippet>727</a>
 <a href=#728 id=728 data-nosnippet>728</a>        <span class="kw">for </span>(name, path, expected) <span class="kw">in </span>test_cases {
 <a href=#729 id=729 data-nosnippet>729</a>            <span class="kw">let </span>endpoint = path.as_endpoint();
-<a href=#730 id=730 data-nosnippet>730</a>            <span class="macro">assert_eq!</span>(endpoint, expected, <span class="string">"Test case: {}"</span>, name);
+<a href=#730 id=730 data-nosnippet>730</a>            <span class="macro">assert_eq!</span>(endpoint, expected, <span class="string">"Test case: {name}"</span>);
 <a href=#731 id=731 data-nosnippet>731</a>        }
 <a href=#732 id=732 data-nosnippet>732</a>    }
 <a href=#733 id=733 data-nosnippet>733</a>}</code></pre></div></section></main></body></html>
