@@ -61,6 +61,7 @@ pub struct IncrementalTableScanBuilder<'a> {
     // None means scan to the current/last snapshot
     to_snapshot_id: Option<i64>,
     batch_size: Option<usize>,
+    case_sensitive: bool,
     concurrency_limit_data_files: usize,
     concurrency_limit_manifest_entries: usize,
     concurrency_limit_manifest_files: usize,
@@ -79,6 +80,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             from_snapshot_id,
             to_snapshot_id,
             batch_size: None,
+            case_sensitive: true,
             concurrency_limit_data_files: num_cpus,
             concurrency_limit_manifest_entries: num_cpus,
             concurrency_limit_manifest_files: num_cpus,
@@ -225,6 +227,12 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         self
     }
 
+    /// Set whether column names should be matched case-sensitively.
+    pub fn with_case_sensitive(mut self, case_sensitive: bool) -> Self {
+        self.case_sensitive = case_sensitive;
+        self
+    }
+
     /// Build the incremental table scan.
     pub fn build(self) -> Result<IncrementalTableScan> {
         let metadata = self.table.metadata();
@@ -367,6 +375,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
                 self.table.file_io().clone(),
                 self.concurrency_limit_data_files,
             ),
+            case_sensitive: self.case_sensitive,
         };
 
         Ok(IncrementalTableScan {
