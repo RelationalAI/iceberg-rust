@@ -23,49 +23,14 @@ use crate::Result;
 use crate::arrow::delete_filter::DeleteFilter;
 use crate::delete_vector::DeleteVector;
 use crate::scan::context::ManifestEntryContext;
-use crate::spec::{DataFileFormat, Schema, SchemaRef};
-
-/// Base file scan task containing common attributes for incremental scan tasks.
-#[derive(Debug, Clone)]
-pub struct BaseIncrementalFileScanTask {
-    /// The start offset of the file to scan.
-    pub start: u64,
-    /// The length of the file to scan.
-    pub length: u64,
-    /// The number of records in the file.
-    pub record_count: Option<u64>,
-    /// The path to the data file to scan.
-    pub data_file_path: String,
-    /// The format of the data file to scan.
-    pub data_file_format: DataFileFormat,
-    /// The schema of the data file to scan.
-    pub schema: SchemaRef,
-    /// The field ids to project.
-    pub project_field_ids: Vec<i32>,
-}
-
-impl BaseIncrementalFileScanTask {
-    /// Returns the data file path of this file scan task.
-    pub fn data_file_path(&self) -> &str {
-        &self.data_file_path
-    }
-
-    /// Returns the schema of this file scan task as a reference
-    pub fn schema(&self) -> &Schema {
-        &self.schema
-    }
-
-    /// Returns the schema of this file scan task as a SchemaRef
-    pub fn schema_ref(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
+use crate::scan::task::BaseFileScanTask;
+use crate::spec::Schema;
 
 /// A file scan task for appended data files in an incremental scan.
 #[derive(Debug, Clone)]
 pub struct AppendedFileScanTask {
     /// The base file scan task attributes.
-    pub base: BaseIncrementalFileScanTask,
+    pub base: BaseFileScanTask,
     /// The optional positional deletes associated with this data file.
     pub positional_deletes: Option<Arc<Mutex<DeleteVector>>>,
 }
@@ -82,7 +47,7 @@ impl AppendedFileScanTask {
     }
 
     /// Returns the schema of this file scan task as a SchemaRef
-    pub fn schema_ref(&self) -> SchemaRef {
+    pub fn schema_ref(&self) -> crate::spec::SchemaRef {
         self.base.schema_ref()
     }
 }
@@ -91,7 +56,7 @@ impl AppendedFileScanTask {
 #[derive(Debug, Clone)]
 pub struct DeletedFileScanTask {
     /// The base file scan task attributes.
-    pub base: BaseIncrementalFileScanTask,
+    pub base: BaseFileScanTask,
 }
 
 impl DeletedFileScanTask {
@@ -106,7 +71,7 @@ impl DeletedFileScanTask {
     }
 
     /// Returns the schema of this file scan task as a SchemaRef
-    pub fn schema_ref(&self) -> SchemaRef {
+    pub fn schema_ref(&self) -> crate::spec::SchemaRef {
         self.base.schema_ref()
     }
 }
@@ -148,7 +113,7 @@ impl IncrementalFileScanTask {
     ) -> Self {
         let data_file_path = manifest_entry_context.manifest_entry.file_path();
         IncrementalFileScanTask::Append(AppendedFileScanTask {
-            base: BaseIncrementalFileScanTask {
+            base: BaseFileScanTask {
                 start: 0,
                 length: manifest_entry_context.manifest_entry.file_size_in_bytes(),
                 record_count: Some(manifest_entry_context.manifest_entry.record_count()),
@@ -156,6 +121,11 @@ impl IncrementalFileScanTask {
                 data_file_format: manifest_entry_context.manifest_entry.file_format(),
                 schema: manifest_entry_context.snapshot_schema.clone(),
                 project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
+                predicate: None,
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: manifest_entry_context.case_sensitive,
             },
             positional_deletes: delete_filter.get_delete_vector_for_path(data_file_path),
         })
