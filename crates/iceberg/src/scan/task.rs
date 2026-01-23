@@ -48,9 +48,9 @@ where D: serde::Deserializer<'de> {
     ))
 }
 
-/// A task to scan part of file.
+/// Common fields for both regular and incremental file scan tasks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FileScanTask {
+pub struct BaseFileScanTask {
     /// The start offset of the file to scan.
     pub start: u64,
     /// The length of the file to scan.
@@ -74,9 +74,6 @@ pub struct FileScanTask {
     /// The predicate to filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predicate: Option<BoundPredicate>,
-
-    /// The list of delete files that may need to be applied to this data file
-    pub deletes: Vec<FileScanTaskDeleteFile>,
 
     /// Partition data from the manifest entry, used to identify which columns can use
     /// constant values from partition metadata vs. reading from the data file.
@@ -109,7 +106,7 @@ pub struct FileScanTask {
     pub case_sensitive: bool,
 }
 
-impl FileScanTask {
+impl BaseFileScanTask {
     /// Returns the data file path of this file scan task.
     pub fn data_file_path(&self) -> &str {
         &self.data_file_path
@@ -133,6 +130,44 @@ impl FileScanTask {
     /// Returns the schema of this file scan task as a SchemaRef
     pub fn schema_ref(&self) -> SchemaRef {
         self.schema.clone()
+    }
+}
+
+/// A task to scan part of file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileScanTask {
+    /// Common file scan task attributes
+    #[serde(flatten)]
+    pub base: BaseFileScanTask,
+
+    /// The list of delete files that may need to be applied to this data file
+    pub deletes: Vec<FileScanTaskDeleteFile>,
+}
+
+impl FileScanTask {
+    /// Returns the data file path of this file scan task.
+    pub fn data_file_path(&self) -> &str {
+        self.base.data_file_path()
+    }
+
+    /// Returns the project field id of this file scan task.
+    pub fn project_field_ids(&self) -> &[i32] {
+        self.base.project_field_ids()
+    }
+
+    /// Returns the predicate of this file scan task.
+    pub fn predicate(&self) -> Option<&BoundPredicate> {
+        self.base.predicate()
+    }
+
+    /// Returns the schema of this file scan task as a reference
+    pub fn schema(&self) -> &Schema {
+        self.base.schema()
+    }
+
+    /// Returns the schema of this file scan task as a SchemaRef
+    pub fn schema_ref(&self) -> SchemaRef {
+        self.base.schema_ref()
     }
 }
 

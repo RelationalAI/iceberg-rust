@@ -34,6 +34,7 @@ use crate::metadata_columns::{
 use crate::scan::DeleteFileContext;
 use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
+use crate::scan::task::BaseFileScanTask;
 use crate::spec::{DataContentType, ManifestStatus, Snapshot, SnapshotRef};
 use crate::table::Table;
 use crate::util::snapshot::ancestors_between;
@@ -767,7 +768,7 @@ impl IncrementalTableScan {
 
         let data_file_path = manifest_entry_context.manifest_entry.file_path();
         let file_scan_task = IncrementalFileScanTask::Delete(DeletedFileScanTask {
-            base: BaseIncrementalFileScanTask {
+            base: BaseFileScanTask {
                 start: 0,
                 length: manifest_entry_context.manifest_entry.file_size_in_bytes(),
                 record_count: Some(manifest_entry_context.manifest_entry.record_count()),
@@ -775,6 +776,11 @@ impl IncrementalTableScan {
                 data_file_format: manifest_entry_context.manifest_entry.file_format(),
                 schema: manifest_entry_context.snapshot_schema.clone(),
                 project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
+                predicate: None,
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: manifest_entry_context.case_sensitive,
             },
         });
 

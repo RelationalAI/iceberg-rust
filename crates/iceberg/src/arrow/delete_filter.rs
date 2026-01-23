@@ -241,7 +241,7 @@ impl DeleteFilter {
         }
 
         let bound_predicate = combined_predicate
-            .bind(file_scan_task.schema.clone(), file_scan_task.case_sensitive)?;
+            .bind(file_scan_task.base.schema.clone(), file_scan_task.base.case_sensitive)?;
         Ok(Some(bound_predicate))
     }
 
@@ -312,6 +312,7 @@ pub(crate) mod tests {
     use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
     use crate::expr::Reference;
     use crate::io::FileIO;
+    use crate::scan::task::BaseFileScanTask;
     use crate::spec::{DataFileFormat, Datum, NestedField, PrimitiveType, Schema, Type};
 
     type ArrowSchemaRef = Arc<ArrowSchema>;
@@ -432,34 +433,38 @@ pub(crate) mod tests {
 
         let file_scan_tasks = vec![
             FileScanTask {
-                start: 0,
-                length: 0,
-                record_count: None,
-                data_file_path: format!("{}/1.parquet", table_location.to_str().unwrap()),
-                data_file_format: DataFileFormat::Parquet,
-                schema: data_file_schema.clone(),
-                project_field_ids: vec![],
-                predicate: None,
+                base: BaseFileScanTask {
+                    start: 0,
+                    length: 0,
+                    record_count: None,
+                    data_file_path: format!("{}/1.parquet", table_location.to_str().unwrap()),
+                    data_file_format: DataFileFormat::Parquet,
+                    schema: data_file_schema.clone(),
+                    project_field_ids: vec![],
+                    predicate: None,
+                    partition: None,
+                    partition_spec: None,
+                    name_mapping: None,
+                    case_sensitive: false,
+                },
                 deletes: vec![pos_del_1, pos_del_2.clone()],
-                partition: None,
-                partition_spec: None,
-                name_mapping: None,
-                case_sensitive: false,
             },
             FileScanTask {
-                start: 0,
-                length: 0,
-                record_count: None,
-                data_file_path: format!("{}/2.parquet", table_location.to_str().unwrap()),
-                data_file_format: DataFileFormat::Parquet,
-                schema: data_file_schema.clone(),
-                project_field_ids: vec![],
-                predicate: None,
+                base: BaseFileScanTask {
+                    start: 0,
+                    length: 0,
+                    record_count: None,
+                    data_file_path: format!("{}/2.parquet", table_location.to_str().unwrap()),
+                    data_file_format: DataFileFormat::Parquet,
+                    schema: data_file_schema.clone(),
+                    project_field_ids: vec![],
+                    predicate: None,
+                    partition: None,
+                    partition_spec: None,
+                    name_mapping: None,
+                    case_sensitive: false,
+                },
                 deletes: vec![pos_del_3],
-                partition: None,
-                partition_spec: None,
-                name_mapping: None,
-                case_sensitive: false,
             },
         ];
 
@@ -497,24 +502,26 @@ pub(crate) mod tests {
 
         // ---------- fake FileScanTask ----------
         let task = FileScanTask {
-            start: 0,
-            length: 0,
-            record_count: None,
-            data_file_path: "data.parquet".to_string(),
-            data_file_format: crate::spec::DataFileFormat::Parquet,
-            schema: schema.clone(),
-            project_field_ids: vec![],
-            predicate: None,
+            base: BaseFileScanTask {
+                start: 0,
+                length: 0,
+                record_count: None,
+                data_file_path: "data.parquet".to_string(),
+                data_file_format: crate::spec::DataFileFormat::Parquet,
+                schema: schema.clone(),
+                project_field_ids: vec![],
+                predicate: None,
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: true,
+            },
             deletes: vec![FileScanTaskDeleteFile {
                 file_path: "eq-del.parquet".to_string(),
                 file_type: DataContentType::EqualityDeletes,
                 partition_spec_id: 0,
                 equality_ids: None,
             }],
-            partition: None,
-            partition_spec: None,
-            name_mapping: None,
-            case_sensitive: true,
         };
 
         let filter = DeleteFilter::default();
