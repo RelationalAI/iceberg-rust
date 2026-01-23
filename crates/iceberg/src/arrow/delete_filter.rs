@@ -240,8 +240,10 @@ impl DeleteFilter {
             return Ok(None);
         }
 
-        let bound_predicate = combined_predicate
-            .bind(file_scan_task.base.schema.clone(), file_scan_task.base.case_sensitive)?;
+        let bound_predicate = combined_predicate.bind(
+            file_scan_task.base.schema.clone(),
+            file_scan_task.base.case_sensitive,
+        )?;
         Ok(Some(bound_predicate))
     }
 

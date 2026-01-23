@@ -25,15 +25,13 @@ pub mod incremental;
 /// File scan task types used in table scans.
 pub mod task;
 
-pub use task::BaseFileScanTask;
-
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use futures::channel::mpsc::{Sender, channel};
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt, TryStreamExt};
-pub use task::*;
+pub use task::{BaseFileScanTask, *};
 
 use crate::arrow::ArrowReaderBuilder;
 use crate::delete_file_index::DeleteFileIndex;
@@ -682,7 +680,7 @@ pub mod tests {
     use crate::expr::{BoundPredicate, Reference};
     use crate::io::{FileIO, OutputFile};
     use crate::metadata_columns::{RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS};
-    use crate::scan::{FileScanTask, BaseFileScanTask};
+    use crate::scan::{BaseFileScanTask, FileScanTask};
     use crate::spec::{
         DataContentType, DataFileBuilder, DataFileFormat, Datum, Literal, ManifestEntry,
         ManifestListWriter, ManifestStatus, ManifestWriterBuilder, NestedField, PartitionSpec,

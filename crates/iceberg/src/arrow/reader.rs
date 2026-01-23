@@ -59,8 +59,8 @@ use crate::metadata_columns::{
     RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS, is_metadata_field, row_pos_field,
 };
 use crate::runtime::spawn;
-use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
 use crate::scan::task::BaseFileScanTask;
+use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
 use crate::spec::{Datum, NameMapping, NestedField, PrimitiveType, Schema, Type};
 use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind};
@@ -272,8 +272,8 @@ impl ArrowReader {
         row_group_filtering_enabled: bool,
         row_selection_enabled: bool,
     ) -> Result<ArrowRecordBatchStream> {
-        let should_load_page_index =
-            (row_selection_enabled && base_task.predicate.is_some()) || preloaded_positional_deletes.is_some();
+        let should_load_page_index = (row_selection_enabled && base_task.predicate.is_some())
+            || preloaded_positional_deletes.is_some();
 
         let mut virtual_columns = Vec::new();
 
@@ -353,11 +353,16 @@ impl ArrowReader {
             record_batch_stream_builder.with_projection(projection_mask.clone());
 
         // Build RecordBatchTransformer for post-read transformations
-        let mut record_batch_transformer_builder =
-            RecordBatchTransformerBuilder::new(base_task.schema_ref(), base_task.project_field_ids());
+        let mut record_batch_transformer_builder = RecordBatchTransformerBuilder::new(
+            base_task.schema_ref(),
+            base_task.project_field_ids(),
+        );
 
         // Add the _file metadata column if it's in the projected fields
-        if base_task.project_field_ids().contains(&RESERVED_FIELD_ID_FILE) {
+        if base_task
+            .project_field_ids()
+            .contains(&RESERVED_FIELD_ID_FILE)
+        {
             let file_datum = Datum::string(base_task.data_file_path.clone());
             record_batch_transformer_builder =
                 record_batch_transformer_builder.with_constant(RESERVED_FIELD_ID_FILE, file_datum);
@@ -370,9 +375,10 @@ impl ArrowReader {
         }
 
         // Add partition constants if available
-        if let (Some(partition_spec), Some(partition_data)) =
-            (base_task.partition_spec.clone(), base_task.partition.clone())
-        {
+        if let (Some(partition_spec), Some(partition_data)) = (
+            base_task.partition_spec.clone(),
+            base_task.partition.clone(),
+        ) {
             record_batch_transformer_builder =
                 record_batch_transformer_builder.with_partition(partition_spec, partition_data)?;
         }
@@ -468,9 +474,7 @@ impl ArrowReader {
             record_batch_stream_builder
                 .build()?
                 .map(move |batch| match batch {
-                    Ok(batch) => {
-                        record_batch_transformer.process_record_batch(batch)
-                    }
+                    Ok(batch) => record_batch_transformer.process_record_batch(batch),
                     Err(err) => Err(err.into()),
                 });
 
@@ -1883,7 +1887,7 @@ mod tests {
     use crate::expr::visitors::bound_predicate_visitor::visit;
     use crate::expr::{Bind, Predicate, Reference};
     use crate::io::FileIO;
-    use crate::scan::{FileScanTask, FileScanTaskDeleteFile, FileScanTaskStream, BaseFileScanTask};
+    use crate::scan::{BaseFileScanTask, FileScanTask, FileScanTaskDeleteFile, FileScanTaskStream};
     use crate::spec::{
         DataContentType, DataFileFormat, Datum, NestedField, PrimitiveType, Schema, SchemaRef, Type,
     };

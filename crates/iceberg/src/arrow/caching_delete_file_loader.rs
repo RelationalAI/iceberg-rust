@@ -601,7 +601,7 @@ mod tests {
 
     use super::*;
     use crate::arrow::delete_filter::tests::setup;
-    use crate::scan::{FileScanTaskDeleteFile, BaseFileScanTask};
+    use crate::scan::{BaseFileScanTask, FileScanTaskDeleteFile};
     use crate::spec::{DataContentType, Schema};
 
     #[tokio::test]
