@@ -69,9 +69,16 @@ pub(crate) enum Storage {
     },
     /// Wraps any storage with credential refresh capability.
     ///
-    /// This variant refreshes credentials before each `create_operator` call
-    /// by invoking a `StorageCredentialsLoader`.
-    Refreshable(Box<super::refreshable_storage::RefreshableStorage>),
+    /// This variant holds an Operator built from RefreshableStorageBackend,
+    /// which refreshes credentials before operations by invoking a StorageCredentialsLoader.
+    /// This is at the OpenDAL backend level, so refresh happens transparently
+    /// when InputFile/OutputFile call self.op methods.
+    Refreshable {
+        /// The configured scheme string (e.g., "s3", "abfss")
+        configured_scheme: String,
+        /// The operator wrapping RefreshableStorageBackend
+        operator: Operator,
+    },
 }
 
 impl Storage {
@@ -83,16 +90,29 @@ impl Storage {
         let credentials_loader = extensions.get::<Arc<dyn StorageCredentialsLoader>>();
         let existing_credentials = extensions.get::<StorageCredential>();
 
-        // If loader is present, create RefreshableStorage
+        // If loader is present, create RefreshableStorageBackend
         if let Some(loader) = credentials_loader {
-            return Ok(Storage::Refreshable(Box::new(
-                super::refreshable_storage::RefreshableStorage::new(
-                    props,  // Pass all props as base_props
-                    scheme_str,
-                    Arc::clone(&loader),
-                    existing_credentials.map(|c| (*c).clone()),
-                ),
-            )));
+            // First, build the normal operator
+            let inner_storage = Self::build_from_props(&scheme_str, props.clone())?;
+            let dummy_path = "/".to_string();
+            let (inner_operator, _) = inner_storage.create_operator(&dummy_path)?;
+
+            // Wrap it in RefreshableStorageBackend
+            let refreshable_backend = super::refreshable_storage_backend::RefreshableStorageBuilder::new()
+                .scheme(scheme_str.clone())
+                .base_props(props)
+                .credentials_loader(Arc::clone(&loader))
+                .initial_operator(inner_operator)
+                .initial_credentials(existing_credentials.map(|c| (*c).clone()))
+                .build()?;
+
+            // Create an Operator from the backend
+            let refreshable_operator = Operator::from_inner(Arc::new(refreshable_backend));
+
+            return Ok(Storage::Refreshable {
+                configured_scheme: scheme_str,
+                operator: refreshable_operator,
+            });
         }
 
         // Otherwise, build storage normally
@@ -269,18 +289,29 @@ impl Storage {
                 configured_scheme,
                 config,
             } => super::azdls_create_operator(path, config, configured_scheme),
-            Storage::Refreshable(refreshable) => {
-                // Delegate to RefreshableStorage which will refresh credentials
-                let path_str = path.as_ref();
-                let (operator, relative_path_string) = refreshable.create_operator(path_str)?;
-                // Find the relative path in the original path to maintain the lifetime
-                let relative_path = if let Some(pos) = path_str.rfind(&relative_path_string) {
-                    &path_str[pos..]
+            Storage::Refreshable {
+                configured_scheme,
+                operator,
+            } => {
+                // The operator is already wrapped with RefreshableStorageBackend
+                // Just clone it and parse the path
+                let op = operator.clone();
+                let op_info = op.info();
+
+                // Parse path similar to how S3 does it
+                let prefix = format!("{}://{}/", configured_scheme, op_info.name());
+                if path.starts_with(&prefix) {
+                    Ok((op, &path[prefix.len()..]))
                 } else {
-                    // Fallback: return the whole path if we can't find the relative part
-                    path_str
-                };
-                return Ok((operator, relative_path));
+                    // Fallback for paths without the scheme prefix
+                    // Try to strip just the scheme
+                    if let Some(stripped) = path.strip_prefix(&format!("{}:/", configured_scheme)) {
+                        Ok((op, stripped))
+                    } else {
+                        // Last resort: treat as absolute path
+                        Ok((op, path))
+                    }
+                }
             }
             #[cfg(all(
                 not(feature = "storage-s3"),

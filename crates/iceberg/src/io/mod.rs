@@ -68,6 +68,7 @@
 
 mod file_io;
 mod refreshable_storage;
+mod refreshable_storage_backend;
 mod storage;
 mod storage_credential;
 
