@@ -30,10 +30,11 @@ use super::storage::Storage;
 ///
 /// This backend is transparent - it implements the `Access` trait and delegates all operations
 /// to an inner backend after optionally refreshing credentials.
+/// The inner backend is created lazily on first access.
 #[derive(Clone)]
 pub struct RefreshableStorageBackend {
-    /// The current backend's accessor (rebuilt when credentials refresh)
-    inner: Arc<Mutex<Accessor>>,
+    /// The current backend's accessor (created lazily, rebuilt when credentials refresh)
+    inner: Arc<Mutex<Option<Accessor>>>,
 
     /// Information needed to rebuild the backend
     rebuild_info: Arc<RebuildInfo>,
@@ -53,8 +54,8 @@ struct RebuildInfo {
     /// Current credentials from last refresh
     current_credentials: Mutex<Option<StorageCredential>>,
 
-    /// AccessorInfo for this backend
-    info: Arc<AccessorInfo>,
+    /// Cached AccessorInfo (created lazily from first operator)
+    cached_info: Mutex<Option<Arc<AccessorInfo>>>,
 }
 
 impl std::fmt::Debug for RefreshableStorageBackend {
@@ -72,71 +73,53 @@ impl RefreshableStorageBackend {
     /// * `scheme` - Storage scheme (e.g., "s3", "azdls")
     /// * `base_props` - Base configuration properties (without credentials)
     /// * `credentials_loader` - Loader for refreshing credentials
-    /// * `initial_operator` - The initial operator to wrap
     /// * `initial_credentials` - Initial credentials (if any)
     pub fn new(
         scheme: String,
         base_props: HashMap<String, String>,
         credentials_loader: Arc<dyn StorageCredentialsLoader>,
-        initial_operator: Operator,
         initial_credentials: Option<StorageCredential>,
     ) -> Self {
-        // Extract the inner accessor from the operator
-        let inner = initial_operator.into_inner();
-
-        // Copy AccessorInfo from the inner backend
-        let info = inner.info();
-
         Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(Mutex::new(None)),
             rebuild_info: Arc::new(RebuildInfo {
                 scheme,
                 base_props,
                 credentials_loader,
                 current_credentials: Mutex::new(initial_credentials),
-                info,
+                cached_info: Mutex::new(None),
             }),
         }
     }
 
     /// Check if we should refresh credentials, and if so, rebuild the inner operator
-    fn maybe_refresh(&self, _path: &str) -> Result<()> {
+    async fn maybe_refresh(&self, _path: &str) -> Result<()> {
         // TODO: Add refresh condition logic here (time-based, always, etc.)
         // For now, keep it simple - never refresh
         // User said conditions are "hazy" and will be extended later
         let should_refresh = false;
 
         if should_refresh {
-            self.do_refresh(_path)?;
+            self.do_refresh(_path).await?;
         }
 
         Ok(())
     }
 
     /// Actually refresh credentials and rebuild the operator
-    fn do_refresh(&self, path: &str) -> Result<()> {
-        // Lock credentials for entire operation
-        let mut creds_guard = self.rebuild_info.current_credentials.lock().unwrap();
+    /// This is called both for initial creation and for refreshing existing operator.
+    async fn do_refresh(&self, path: &str) -> Result<()> {
+        // Get existing credentials (without holding lock across await)
+        let existing_creds = {
+            let creds_guard = self.rebuild_info.current_credentials.lock().unwrap();
+            creds_guard.clone()
+        };
 
         // Load new credentials
-        let new_creds = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle.block_on(
-                self.rebuild_info
-                    .credentials_loader
-                    .load_credentials(path, creds_guard.as_ref()),
-            )?,
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                    Error::new(ErrorKind::Unexpected, "Failed to create Tokio runtime")
-                        .with_source(e)
-                })?;
-                rt.block_on(
-                    self.rebuild_info
-                        .credentials_loader
-                        .load_credentials(path, creds_guard.as_ref()),
-                )?
-            }
-        };
+        let new_creds = self.rebuild_info
+            .credentials_loader
+            .load_credentials(path, existing_creds.as_ref())
+            .await?;
 
         // Build new properties by extending base props with credentials
         let mut full_props = self.rebuild_info.base_props.clone();
@@ -148,11 +131,17 @@ impl RefreshableStorageBackend {
         // Extract the accessor from the new operator
         let new_accessor = new_operator.into_inner();
 
-        // Update current accessor
-        *self.inner.lock().unwrap() = new_accessor;
+        // Cache the AccessorInfo if not already cached
+        {
+            let mut info_guard = self.rebuild_info.cached_info.lock().unwrap();
+            if info_guard.is_none() {
+                *info_guard = Some(new_accessor.info());
+            }
+        }
 
-        // Update current credentials
-        *creds_guard = Some(new_creds);
+        // Update current accessor and credentials
+        *self.inner.lock().unwrap() = Some(new_accessor);
+        *self.rebuild_info.current_credentials.lock().unwrap() = Some(new_creds);
 
         Ok(())
     }
@@ -170,9 +159,23 @@ impl RefreshableStorageBackend {
     }
 
     /// Get the current inner accessor (with potential refresh)
-    fn get_accessor(&self, path: &str) -> Result<Accessor> {
-        self.maybe_refresh(path)?;
-        Ok(Arc::clone(&*self.inner.lock().unwrap()))
+    /// Creates the accessor lazily on first call.
+    async fn get_accessor(&self, path: &str) -> Result<Accessor> {
+        // Check if we need to create or refresh
+        let needs_creation = {
+            let inner_guard = self.inner.lock().unwrap();
+            inner_guard.is_none()
+        };
+
+        if needs_creation {
+            // Create initial operator
+            self.do_refresh(path).await?;
+        } else {
+            // Check if we should refresh
+            self.maybe_refresh(path).await?;
+        }
+
+        Ok(Arc::clone(self.inner.lock().unwrap().as_ref().unwrap()))
     }
 }
 
@@ -185,11 +188,20 @@ impl Access for RefreshableStorageBackend {
     type Deleter = oio::Deleter;
 
     fn info(&self) -> Arc<AccessorInfo> {
-        Arc::clone(&self.rebuild_info.info)
+        // Return cached info if available, otherwise create a minimal one
+        let info_guard = self.rebuild_info.cached_info.lock().unwrap();
+        if let Some(info) = info_guard.as_ref() {
+            Arc::clone(info)
+        } else {
+            // Create a minimal AccessorInfo before first operation
+            // This will be replaced with real info on first async operation
+            drop(info_guard);
+            AccessorInfo::default().into()
+        }
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> opendal::Result<RpStat> {
-        let accessor = self.get_accessor(path).map_err(|e| {
+        let accessor = self.get_accessor(path).await.map_err(|e| {
             opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
                 .set_source(e)
         })?;
@@ -202,7 +214,7 @@ impl Access for RefreshableStorageBackend {
         path: &str,
         args: OpRead,
     ) -> opendal::Result<(RpRead, Self::Reader)> {
-        let accessor = self.get_accessor(path).map_err(|e| {
+        let accessor = self.get_accessor(path).await.map_err(|e| {
             opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
                 .set_source(e)
         })?;
@@ -216,7 +228,7 @@ impl Access for RefreshableStorageBackend {
         path: &str,
         args: OpWrite,
     ) -> opendal::Result<(RpWrite, Self::Writer)> {
-        let accessor = self.get_accessor(path).map_err(|e| {
+        let accessor = self.get_accessor(path).await.map_err(|e| {
             opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
                 .set_source(e)
         })?;
@@ -226,7 +238,7 @@ impl Access for RefreshableStorageBackend {
     }
 
     async fn delete(&self) -> opendal::Result<(RpDelete, Self::Deleter)> {
-        let accessor = self.get_accessor("").map_err(|e| {
+        let accessor = self.get_accessor("").await.map_err(|e| {
             opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
                 .set_source(e)
         })?;
@@ -236,7 +248,7 @@ impl Access for RefreshableStorageBackend {
     }
 
     async fn list(&self, path: &str, args: OpList) -> opendal::Result<(RpList, Self::Lister)> {
-        let accessor = self.get_accessor(path).map_err(|e| {
+        let accessor = self.get_accessor(path).await.map_err(|e| {
             opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
                 .set_source(e)
         })?;
@@ -246,7 +258,7 @@ impl Access for RefreshableStorageBackend {
     }
 
     async fn create_dir(&self, path: &str, args: OpCreateDir) -> opendal::Result<RpCreateDir> {
-        let accessor = self.get_accessor(path).map_err(|e| {
+        let accessor = self.get_accessor(path).await.map_err(|e| {
             opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
                 .set_source(e)
         })?;
@@ -255,7 +267,7 @@ impl Access for RefreshableStorageBackend {
     }
 
     async fn rename(&self, from: &str, to: &str, args: OpRename) -> opendal::Result<RpRename> {
-        let accessor = self.get_accessor(from).map_err(|e| {
+        let accessor = self.get_accessor(from).await.map_err(|e| {
             opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
                 .set_source(e)
         })?;
@@ -272,7 +284,6 @@ pub struct RefreshableStorageBuilder {
     scheme: Option<String>,
     base_props: HashMap<String, String>,
     credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
-    initial_operator: Option<Operator>,
     initial_credentials: Option<StorageCredential>,
 }
 
@@ -300,12 +311,6 @@ impl RefreshableStorageBuilder {
         self
     }
 
-    /// Set the initial operator to wrap
-    pub fn initial_operator(mut self, operator: Operator) -> Self {
-        self.initial_operator = Some(operator);
-        self
-    }
-
     /// Set the initial credentials (if any)
     pub fn initial_credentials(mut self, creds: Option<StorageCredential>) -> Self {
         self.initial_credentials = creds;
@@ -321,9 +326,6 @@ impl RefreshableStorageBuilder {
             self.base_props,
             self.credentials_loader.ok_or_else(|| {
                 Error::new(ErrorKind::DataInvalid, "credentials_loader is required")
-            })?,
-            self.initial_operator.ok_or_else(|| {
-                Error::new(ErrorKind::DataInvalid, "initial_operator is required")
             })?,
             self.initial_credentials,
         ))

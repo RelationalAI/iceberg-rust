@@ -69,15 +69,17 @@ pub(crate) enum Storage {
     },
     /// Wraps any storage with credential refresh capability.
     ///
-    /// This variant holds an Operator built from RefreshableStorageBackend,
-    /// which refreshes credentials before operations by invoking a StorageCredentialsLoader.
-    /// This is at the OpenDAL backend level, so refresh happens transparently
-    /// when InputFile/OutputFile call self.op methods.
+    /// This variant stores configuration to lazily create operators wrapped with
+    /// RefreshableStorageBackend for transparent credential refresh.
     Refreshable {
         /// The configured scheme string (e.g., "s3", "abfss")
         configured_scheme: String,
-        /// The operator wrapping RefreshableStorageBackend
-        operator: Operator,
+        /// Base properties (non-credential config)
+        base_props: HashMap<String, String>,
+        /// Credential loader
+        credentials_loader: Arc<dyn StorageCredentialsLoader>,
+        /// Initial credentials (if any)
+        initial_credentials: Option<StorageCredential>,
     },
 }
 
@@ -90,28 +92,13 @@ impl Storage {
         let credentials_loader = extensions.get::<Arc<dyn StorageCredentialsLoader>>();
         let existing_credentials = extensions.get::<StorageCredential>();
 
-        // If loader is present, create RefreshableStorageBackend
+        // If loader is present, store config for lazy operator creation
         if let Some(loader) = credentials_loader {
-            // First, build the normal operator
-            let inner_storage = Self::build_from_props(&scheme_str, props.clone())?;
-            let dummy_path = "/".to_string();
-            let (inner_operator, _) = inner_storage.create_operator(&dummy_path)?;
-
-            // Wrap it in RefreshableStorageBackend
-            let refreshable_backend = super::refreshable_storage_backend::RefreshableStorageBuilder::new()
-                .scheme(scheme_str.clone())
-                .base_props(props)
-                .credentials_loader(Arc::clone(&loader))
-                .initial_operator(inner_operator)
-                .initial_credentials(existing_credentials.map(|c| (*c).clone()))
-                .build()?;
-
-            // Create an Operator from the backend
-            let refreshable_operator = Operator::from_inner(Arc::new(refreshable_backend));
-
             return Ok(Storage::Refreshable {
                 configured_scheme: scheme_str,
-                operator: refreshable_operator,
+                base_props: props,
+                credentials_loader: Arc::clone(&loader),
+                initial_credentials: existing_credentials.map(|c| (*c).clone()),
             });
         }
 
@@ -291,26 +278,38 @@ impl Storage {
             } => super::azdls_create_operator(path, config, configured_scheme),
             Storage::Refreshable {
                 configured_scheme,
-                operator,
+                base_props,
+                credentials_loader,
+                initial_credentials,
             } => {
-                // The operator is already wrapped with RefreshableStorageBackend
-                // Just clone it and parse the path
-                let op = operator.clone();
-                let op_info = op.info();
+                // Wrap with RefreshableStorageBackend (no operator creation here)
+                let refreshable_backend = super::refreshable_storage_backend::RefreshableStorageBuilder::new()
+                    .scheme(configured_scheme.clone())
+                    .base_props(base_props.clone())
+                    .credentials_loader(Arc::clone(credentials_loader))
+                    .initial_credentials(initial_credentials.clone())
+                    .build()?;
 
-                // Parse path similar to how S3 does it
-                let prefix = format!("{}://{}/", configured_scheme, op_info.name());
-                if path.starts_with(&prefix) {
-                    Ok((op, &path[prefix.len()..]))
-                } else {
-                    // Fallback for paths without the scheme prefix
-                    // Try to strip just the scheme
-                    if let Some(stripped) = path.strip_prefix(&format!("{}:/", configured_scheme)) {
-                        Ok((op, stripped))
+                // Create operator from backend
+                let wrapped_operator = Operator::from_inner(Arc::new(refreshable_backend));
+
+                // Parse path to extract relative path
+                // We don't have AccessorInfo yet, so we need to parse differently
+                // For now, assume standard format: scheme://name/path
+                // The RefreshableStorageBackend will handle the actual path when operations occur
+
+                // Try to extract relative path from the URL format
+                if let Some(after_scheme) = path.strip_prefix(&format!("{}://", configured_scheme)) {
+                    // Find first '/' to separate bucket/container from path
+                    if let Some(slash_pos) = after_scheme.find('/') {
+                        Ok((wrapped_operator, &after_scheme[slash_pos + 1..]))
                     } else {
-                        // Last resort: treat as absolute path
-                        Ok((op, path))
+                        Ok((wrapped_operator, ""))
                     }
+                } else if let Some(stripped) = path.strip_prefix(&format!("{}:/", configured_scheme)) {
+                    Ok((wrapped_operator, stripped))
+                } else {
+                    Ok((wrapped_operator, path))
                 }
             }
             #[cfg(all(
