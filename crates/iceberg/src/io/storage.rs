@@ -282,7 +282,7 @@ impl Storage {
                 credentials_loader,
                 initial_credentials,
             } => {
-                // Wrap with RefreshableStorageBackend (no operator creation here)
+                // Create RefreshableStorageBackend (creates initial operator with base_props + initial_credentials)
                 let refreshable_backend = super::refreshable_storage_backend::RefreshableStorageBuilder::new()
                     .scheme(configured_scheme.clone())
                     .base_props(base_props.clone())
@@ -290,27 +290,17 @@ impl Storage {
                     .initial_credentials(initial_credentials.clone())
                     .build()?;
 
+                // Parse path using the backend's inner storage logic
+                let relative_path = refreshable_backend.parse_path(path)?;
+
                 // Create operator from backend
                 let wrapped_operator = Operator::from_inner(Arc::new(refreshable_backend));
 
-                // Parse path to extract relative path
-                // We don't have AccessorInfo yet, so we need to parse differently
-                // For now, assume standard format: scheme://name/path
-                // The RefreshableStorageBackend will handle the actual path when operations occur
-
-                // Try to extract relative path from the URL format
-                if let Some(after_scheme) = path.strip_prefix(&format!("{}://", configured_scheme)) {
-                    // Find first '/' to separate bucket/container from path
-                    if let Some(slash_pos) = after_scheme.find('/') {
-                        Ok((wrapped_operator, &after_scheme[slash_pos + 1..]))
-                    } else {
-                        Ok((wrapped_operator, ""))
-                    }
-                } else if let Some(stripped) = path.strip_prefix(&format!("{}:/", configured_scheme)) {
-                    Ok((wrapped_operator, stripped))
-                } else {
-                    Ok((wrapped_operator, path))
-                }
+                // Need to convert String to &str with appropriate lifetime
+                // Leak the string to get a 'static reference
+                // TODO @vustef: Why this?
+                let leaked: &'static mut str = Box::leak(relative_path.into_boxed_str());
+                Ok((wrapped_operator, &*leaked))
             }
             #[cfg(all(
                 not(feature = "storage-s3"),

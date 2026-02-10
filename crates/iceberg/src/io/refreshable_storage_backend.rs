@@ -30,11 +30,11 @@ use super::storage::Storage;
 ///
 /// This backend is transparent - it implements the `Access` trait and delegates all operations
 /// to an inner backend after optionally refreshing credentials.
-/// The inner backend is created lazily on first access.
+/// The inner backend is created immediately with base props + initial credentials.
 #[derive(Clone)]
 pub struct RefreshableStorageBackend {
-    /// The current backend's accessor (created lazily, rebuilt when credentials refresh)
-    inner: Arc<Mutex<Option<Accessor>>>,
+    /// The current backend's accessor (rebuilt when credentials refresh)
+    inner: Arc<Mutex<Accessor>>,
 
     /// Information needed to rebuild the backend
     rebuild_info: Arc<RebuildInfo>,
@@ -44,6 +44,9 @@ pub struct RefreshableStorageBackend {
 struct RebuildInfo {
     /// Scheme of the inner backend (e.g., "s3", "azdls")
     scheme: String,
+
+    /// Inner storage (built once with base_props, reused for path parsing only)
+    inner_storage: super::storage::Storage,
 
     /// Base properties (non-credential config like endpoint, region, etc.)
     base_props: HashMap<String, String>,
@@ -61,7 +64,6 @@ struct RebuildInfo {
 impl std::fmt::Debug for RefreshableStorageBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RefreshableStorageBackend")
-            .field("scheme", &self.rebuild_info.scheme)
             .finish()
     }
 }
@@ -79,17 +81,48 @@ impl RefreshableStorageBackend {
         base_props: HashMap<String, String>,
         credentials_loader: Arc<dyn StorageCredentialsLoader>,
         initial_credentials: Option<StorageCredential>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(None)),
+    ) -> Result<Self> {
+        use super::storage::Storage;
+
+        // Build inner storage with just base_props (no credentials)
+        // This is reused for path parsing only
+        let inner_storage = Storage::build_from_props(&scheme, base_props.clone())?;
+
+        // Build initial operator with credentials if available
+        let mut initial_props = base_props.clone();
+        if let Some(ref creds) = initial_credentials {
+            initial_props.extend(creds.config.clone());
+        }
+        // TODO @vustef: Why both?
+        let initial_storage = Storage::build_from_props(&scheme, initial_props)?;
+        let dummy_path = "/".to_string();
+        let (initial_operator, _) = initial_storage.create_operator(&dummy_path)?;
+        let inner_accessor = initial_operator.into_inner();
+
+        // Cache the AccessorInfo
+        let cached_info = inner_accessor.info();
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(inner_accessor)),
             rebuild_info: Arc::new(RebuildInfo {
                 scheme,
+                inner_storage,
                 base_props,
                 credentials_loader,
                 current_credentials: Mutex::new(initial_credentials),
-                cached_info: Mutex::new(None),
+                cached_info: Mutex::new(Some(cached_info)),
             }),
-        }
+        })
+    }
+
+    /// Parse a path using the inner storage to extract the relative path
+    /// This delegates to the underlying storage backend's path parsing logic
+    pub fn parse_path(&self, path: &str) -> Result<String> { // TODO @vustef: Rename to create_operator?
+        // Use stored inner_storage to parse path
+        let path_string = path.to_string();
+        let (_, relative_path) = self.rebuild_info.inner_storage.create_operator(&path_string)?;
+
+        Ok(relative_path.to_string())
     }
 
     /// Check if we should refresh credentials, and if so, rebuild the inner operator
@@ -140,7 +173,7 @@ impl RefreshableStorageBackend {
         }
 
         // Update current accessor and credentials
-        *self.inner.lock().unwrap() = Some(new_accessor);
+        *self.inner.lock().unwrap() = new_accessor;
         *self.rebuild_info.current_credentials.lock().unwrap() = Some(new_creds);
 
         Ok(())
@@ -159,23 +192,11 @@ impl RefreshableStorageBackend {
     }
 
     /// Get the current inner accessor (with potential refresh)
-    /// Creates the accessor lazily on first call.
     async fn get_accessor(&self, path: &str) -> Result<Accessor> {
-        // Check if we need to create or refresh
-        let needs_creation = {
-            let inner_guard = self.inner.lock().unwrap();
-            inner_guard.is_none()
-        };
+        // Check if we should refresh
+        self.maybe_refresh(path).await?;
 
-        if needs_creation {
-            // Create initial operator
-            self.do_refresh(path).await?;
-        } else {
-            // Check if we should refresh
-            self.maybe_refresh(path).await?;
-        }
-
-        Ok(Arc::clone(self.inner.lock().unwrap().as_ref().unwrap()))
+        Ok(Arc::clone(&*self.inner.lock().unwrap()))
     }
 }
 
@@ -319,7 +340,7 @@ impl RefreshableStorageBuilder {
 
     /// Build the RefreshableStorageBackend
     pub fn build(self) -> Result<RefreshableStorageBackend> {
-        Ok(RefreshableStorageBackend::new(
+        RefreshableStorageBackend::new(
             self.scheme.ok_or_else(|| {
                 Error::new(ErrorKind::DataInvalid, "scheme is required")
             })?,
@@ -328,7 +349,7 @@ impl RefreshableStorageBuilder {
                 Error::new(ErrorKind::DataInvalid, "credentials_loader is required")
             })?,
             self.initial_credentials,
-        ))
+        )
     }
 }
 
