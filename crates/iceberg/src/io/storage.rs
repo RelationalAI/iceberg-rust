@@ -94,14 +94,14 @@ impl Storage {
                 .base_props(props)
                 .credentials_loader(Arc::clone(&loader))
                 .initial_credentials(existing_credentials.map(|c| (*c).clone()))
+                .extensions(extensions)
                 .build()?;
 
             return Ok(Storage::Refreshable { backend });
         }
 
         // Otherwise, build storage normally
-        let scheme = Self::parse_scheme(&scheme_str)?;
-        Self::build_from_props(&scheme_str, scheme, props, &extensions)
+        Self::build_from_props(&scheme_str, props, &extensions)
     }
 
     /// Build storage from scheme, properties, and extensions.
@@ -109,10 +109,10 @@ impl Storage {
     /// This is the core builder used by both `build()` and `RefreshableStorage`.
     pub(crate) fn build_from_props(
         scheme_str: &str,
-        scheme: Scheme,
         props: HashMap<String, String>,
         extensions: &super::file_io::Extensions,
     ) -> crate::Result<Self> {
+        let scheme = Self::parse_scheme(scheme_str)?;
         match scheme {
             #[cfg(feature = "storage-memory")]
             Scheme::Memory => Ok(Self::Memory(super::memory_config_build()?)),
@@ -371,7 +371,7 @@ mod tests {
 
         #[cfg(feature = "storage-s3")]
         {
-            let storage = Storage::build_from_props("s3", props).unwrap();
+            let storage = Storage::build_from_props("s3", props, &Default::default()).unwrap();
 
             // Verify it created a normal S3 variant, not Refreshable
             match storage {

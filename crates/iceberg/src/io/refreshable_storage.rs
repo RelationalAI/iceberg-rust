@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use opendal::raw::*;
 
+use crate::io::file_io::Extensions;
 use crate::io::{StorageCredential, StorageCredentialsLoader};
 use crate::{Error, ErrorKind, Result};
 
@@ -55,6 +56,9 @@ struct SharedInfo {
 
     /// Credential loader
     credentials_loader: Arc<dyn StorageCredentialsLoader>,
+
+    /// Extensions for building storage (e.g. custom S3 credential loaders)
+    extensions: Extensions,
 
     /// Current credentials from last refresh (shared across clones)
     current_credentials: Mutex<Option<StorageCredential>>,
@@ -95,13 +99,14 @@ impl RefreshableStorage {
         base_props: HashMap<String, String>,
         credentials_loader: Arc<dyn StorageCredentialsLoader>,
         initial_credentials: Option<StorageCredential>,
+        extensions: Extensions,
     ) -> Result<Self> {
         // Build initial inner_storage from base_props + initial_credentials
         let mut props = base_props.clone();
         if let Some(ref creds) = initial_credentials {
             props.extend(creds.config.clone());
         }
-        let inner_storage = Storage::build_from_props(&scheme, props)?;
+        let inner_storage = Storage::build_from_props(&scheme, props, &extensions)?;
 
         Ok(Self {
             inner: Mutex::new(None),
@@ -110,6 +115,7 @@ impl RefreshableStorage {
                 base_props,
                 inner_storage: Mutex::new(Box::new(inner_storage)),
                 credentials_loader,
+                extensions,
                 current_credentials: Mutex::new(initial_credentials),
                 cached_info: Mutex::new(None),
             }),
@@ -172,7 +178,7 @@ impl RefreshableStorage {
         let mut full_props = self.shared.base_props.clone();
         full_props.extend(new_creds.config.clone());
 
-        let new_storage = Storage::build_from_props(&self.shared.scheme, full_props)?;
+        let new_storage = Storage::build_from_props(&self.shared.scheme, full_props, &self.shared.extensions)?;
         let dummy_path = "/".to_string();
         let (new_operator, _) = new_storage.create_operator(&dummy_path)?;
         let new_accessor = new_operator.into_inner();
@@ -342,6 +348,7 @@ pub struct RefreshableStorageBuilder {
     base_props: HashMap<String, String>,
     credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
     initial_credentials: Option<StorageCredential>,
+    extensions: Extensions,
 }
 
 impl RefreshableStorageBuilder {
@@ -374,6 +381,12 @@ impl RefreshableStorageBuilder {
         self
     }
 
+    /// Set the extensions
+    pub fn extensions(mut self, extensions: Extensions) -> Self {
+        self.extensions = extensions;
+        self
+    }
+
     /// Build the RefreshableStorage
     pub fn build(self) -> Result<RefreshableStorage> {
         RefreshableStorage::new(
@@ -385,6 +398,7 @@ impl RefreshableStorageBuilder {
                 Error::new(ErrorKind::DataInvalid, "credentials_loader is required")
             })?,
             self.initial_credentials,
+            self.extensions,
         )
     }
 }
