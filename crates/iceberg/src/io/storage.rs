@@ -101,54 +101,18 @@ impl Storage {
 
         // Otherwise, build storage normally
         let scheme = Self::parse_scheme(&scheme_str)?;
-
-        match scheme {
-            #[cfg(feature = "storage-memory")]
-            Scheme::Memory => Ok(Self::Memory(super::memory_config_build()?)),
-            #[cfg(feature = "storage-fs")]
-            Scheme::Fs => Ok(Self::LocalFs),
-            #[cfg(feature = "storage-s3")]
-            Scheme::S3 => Ok(Self::S3 {
-                configured_scheme: scheme_str,
-                config: super::s3_config_parse(props)?.into(),
-                customized_credential_load: extensions
-                    .get::<CustomAwsCredentialLoader>()
-                    .map(Arc::unwrap_or_clone),
-            }),
-            #[cfg(feature = "storage-gcs")]
-            Scheme::Gcs => Ok(Self::Gcs {
-                config: super::gcs_config_parse(props)?.into(),
-            }),
-            #[cfg(feature = "storage-oss")]
-            Scheme::Oss => Ok(Self::Oss {
-                config: super::oss_config_parse(props)?.into(),
-            }),
-            #[cfg(feature = "storage-azdls")]
-            Scheme::Azdls => {
-                let scheme = scheme_str.parse::<AzureStorageScheme>()?;
-                Ok(Self::Azdls {
-                    config: super::azdls_config_parse(props)?.into(),
-                    configured_scheme: scheme,
-                })
-            }
-            // Update doc on [`FileIO`] when adding new schemes.
-            _ => Err(Error::new(
-                ErrorKind::FeatureUnsupported,
-                format!("Constructing file io from scheme: {scheme} not supported now",),
-            )),
-        }
+        Self::build_from_props(&scheme_str, scheme, props, &extensions)
     }
 
-    /// Build storage from scheme and properties (used by RefreshableStorage).
+    /// Build storage from scheme, properties, and extensions.
     ///
-    /// This is similar to `build()` but takes scheme and properties directly
-    /// without handling extensions. Used for rebuilding storage with refreshed credentials.
+    /// This is the core builder used by both `build()` and `RefreshableStorage`.
     pub(crate) fn build_from_props(
         scheme_str: &str,
+        scheme: Scheme,
         props: HashMap<String, String>,
+        extensions: &super::file_io::Extensions,
     ) -> crate::Result<Self> {
-        let scheme = Self::parse_scheme(scheme_str)?;
-
         match scheme {
             #[cfg(feature = "storage-memory")]
             Scheme::Memory => Ok(Self::Memory(super::memory_config_build()?)),
@@ -158,7 +122,9 @@ impl Storage {
             Scheme::S3 => Ok(Self::S3 {
                 configured_scheme: scheme_str.to_string(),
                 config: super::s3_config_parse(props)?.into(),
-                customized_credential_load: None,  // Not used in refreshable path
+                customized_credential_load: extensions
+                    .get::<CustomAwsCredentialLoader>()
+                    .map(Arc::unwrap_or_clone),
             }),
             #[cfg(feature = "storage-gcs")]
             Scheme::Gcs => Ok(Self::Gcs {
