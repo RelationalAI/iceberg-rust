@@ -274,15 +274,13 @@ impl Storage {
                 config,
             } => super::azdls_create_operator(path, config, configured_scheme),
             Storage::Refreshable { backend } => {
-                // Parse path using the backend's inner storage logic
-                let relative_path = backend.parse_path(path)?;
-
-                // Clone the backend to get a new instance.
-                // RefreshableStorageBackend::clone() is cheap - it only clones Arc pointers.
-                // All clones share the same Arc<Mutex<Accessor>> and Arc<RebuildInfo>,
-                // so they share current_credentials and inner accessor state.
-                // When credentials are refreshed, all clones see the update.
+                // Clone to get a new instance with its own (empty) inner accessor.
                 let backend_clone = backend.clone();
+
+                // Build inner storage from props, create operator to get relative_path,
+                // and store the inner accessor on this clone.
+                let relative_path = backend_clone.refreshable_create_operator(path)?;
+
                 let wrapped_operator = Operator::from_inner(Arc::new(backend_clone));
 
                 // Need to convert String to &str with appropriate lifetime

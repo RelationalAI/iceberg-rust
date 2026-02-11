@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use opendal::raw::*;
-use opendal::Operator;
 
 use crate::io::{StorageCredential, StorageCredentialsLoader};
 use crate::{Error, ErrorKind, Result};
@@ -30,23 +29,22 @@ use super::storage::Storage;
 ///
 /// This backend is transparent - it implements the `Access` trait and delegates all operations
 /// to an inner backend after optionally refreshing credentials.
-/// The inner backend is created immediately with base props + initial credentials.
-#[derive(Clone)]
+///
+/// Each instance has its own inner accessor (not shared across clones).
+/// The accessor is created lazily via `refreshable_create_operator` or `do_refresh`.
 pub struct RefreshableStorageBackend {
-    /// The current backend's accessor (rebuilt when credentials refresh)
-    inner: Arc<Mutex<Accessor>>,
+    /// The current backend's accessor (per-instance, created lazily)
+    inner: Mutex<Option<Accessor>>,
 
-    /// Information needed to rebuild the backend
-    rebuild_info: Arc<RebuildInfo>,
+    /// Shared configuration across clones
+    shared: Arc<SharedInfo>,
 }
 
-/// Information needed to rebuild the operator when credentials refresh
-struct RebuildInfo {
+/// Shared configuration for rebuilding operators when credentials refresh.
+/// This is shared across clones via Arc.
+struct SharedInfo {
     /// Scheme of the inner backend (e.g., "s3", "azdls")
     scheme: String,
-
-    /// Inner storage (built once with base_props, reused for path parsing only)
-    inner_storage: super::storage::Storage,
 
     /// Base properties (non-credential config like endpoint, region, etc.)
     base_props: HashMap<String, String>,
@@ -54,11 +52,20 @@ struct RebuildInfo {
     /// Credential loader
     credentials_loader: Arc<dyn StorageCredentialsLoader>,
 
-    /// Current credentials from last refresh
+    /// Current credentials from last refresh (shared across clones)
     current_credentials: Mutex<Option<StorageCredential>>,
 
     /// Cached AccessorInfo (created lazily from first operator)
     cached_info: Mutex<Option<Arc<AccessorInfo>>>,
+}
+
+impl Clone for RefreshableStorageBackend {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Mutex::new(None),
+            shared: Arc::clone(&self.shared),
+        }
+    }
 }
 
 impl std::fmt::Debug for RefreshableStorageBackend {
@@ -69,58 +76,65 @@ impl std::fmt::Debug for RefreshableStorageBackend {
 }
 
 impl RefreshableStorageBackend {
-    /// Creates a new RefreshableStorageBackend
+    /// Creates a new RefreshableStorageBackend.
+    ///
+    /// This only stores configuration. No storage or accessor is built here.
+    /// The inner accessor is created lazily via `refreshable_create_operator`.
     ///
     /// # Arguments
     /// * `scheme` - Storage scheme (e.g., "s3", "azdls")
     /// * `base_props` - Base configuration properties (without credentials)
     /// * `credentials_loader` - Loader for refreshing credentials
-    /// * `initial_credentials` - Initial credentials (if any)
+    /// * `initial_credentials` - Initial credentials (if any), stored as current_credentials
     pub fn new(
         scheme: String,
         base_props: HashMap<String, String>,
         credentials_loader: Arc<dyn StorageCredentialsLoader>,
         initial_credentials: Option<StorageCredential>,
     ) -> Result<Self> {
-        use super::storage::Storage;
-
-        // Build inner storage with just base_props (no credentials)
-        // This is reused for path parsing only
-        let inner_storage = Storage::build_from_props(&scheme, base_props.clone())?;
-
-        // Build initial operator with credentials if available
-        let mut initial_props = base_props.clone();
-        if let Some(ref creds) = initial_credentials {
-            initial_props.extend(creds.config.clone());
-        }
-        // TODO @vustef: Why both?
-        let initial_storage = Storage::build_from_props(&scheme, initial_props)?;
-        let dummy_path = "/".to_string();
-        let (initial_operator, _) = initial_storage.create_operator(&dummy_path)?;
-        let inner_accessor = initial_operator.into_inner();
-
-        // Cache the AccessorInfo
-        let cached_info = inner_accessor.info();
-
         Ok(Self {
-            inner: Arc::new(Mutex::new(inner_accessor)),
-            rebuild_info: Arc::new(RebuildInfo {
+            inner: Mutex::new(None),
+            shared: Arc::new(SharedInfo {
                 scheme,
-                inner_storage,
                 base_props,
                 credentials_loader,
                 current_credentials: Mutex::new(initial_credentials),
-                cached_info: Mutex::new(Some(cached_info)),
+                cached_info: Mutex::new(None),
             }),
         })
     }
 
-    /// Parse a path using the inner storage to extract the relative path
-    /// This delegates to the underlying storage backend's path parsing logic
-    pub fn parse_path(&self, path: &str) -> Result<String> { // TODO @vustef: Rename to create_operator?
-        // Use stored inner_storage to parse path
+    /// Build an inner storage from props, create an operator from it to extract the
+    /// relative path, and store the inner accessor on this instance.
+    ///
+    /// Props are built from base_props + current_credentials (if any).
+    pub fn refreshable_create_operator(&self, path: &str) -> Result<String> {
+        // Build props = base_props + current_credentials
+        let mut props = self.shared.base_props.clone();
+        {
+            let creds_guard = self.shared.current_credentials.lock().unwrap();
+            if let Some(ref creds) = *creds_guard {
+                props.extend(creds.config.clone());
+            }
+        }
+
+        // Build inner storage from props and create operator
+        let inner_storage = Storage::build_from_props(&self.shared.scheme, props)?;
         let path_string = path.to_string();
-        let (_, relative_path) = self.rebuild_info.inner_storage.create_operator(&path_string)?;
+        let (operator, relative_path) = inner_storage.create_operator(&path_string)?;
+
+        // Store the accessor
+        let accessor = operator.into_inner();
+
+        // Cache AccessorInfo if not already cached
+        {
+            let mut info_guard = self.shared.cached_info.lock().unwrap();
+            if info_guard.is_none() {
+                *info_guard = Some(accessor.info());
+            }
+        }
+
+        *self.inner.lock().unwrap() = Some(accessor);
 
         Ok(relative_path.to_string())
     }
@@ -139,64 +153,55 @@ impl RefreshableStorageBackend {
         Ok(())
     }
 
-    /// Actually refresh credentials and rebuild the operator
-    /// This is called both for initial creation and for refreshing existing operator.
+    /// Actually refresh credentials and rebuild the operator.
+    /// Builds new inner storage from base_props + new credentials,
+    /// creates a new inner accessor from it, and saves new current_credentials.
     async fn do_refresh(&self, path: &str) -> Result<()> {
         // Get existing credentials (without holding lock across await)
         let existing_creds = {
-            let creds_guard = self.rebuild_info.current_credentials.lock().unwrap();
+            let creds_guard = self.shared.current_credentials.lock().unwrap();
             creds_guard.clone()
         };
 
         // Load new credentials
-        let new_creds = self.rebuild_info
+        let new_creds = self.shared
             .credentials_loader
             .load_credentials(path, existing_creds.as_ref())
             .await?;
 
         // Build new properties by extending base props with credentials
-        let mut full_props = self.rebuild_info.base_props.clone();
+        let mut full_props = self.shared.base_props.clone();
         full_props.extend(new_creds.config.clone());
 
-        // Build new operator using existing Storage logic
-        let new_operator = self.build_operator_from_props(&self.rebuild_info.scheme, full_props)?;
-
-        // Extract the accessor from the new operator
+        // Build new inner storage and accessor
+        let new_storage = Storage::build_from_props(&self.shared.scheme, full_props)?;
+        let dummy_path = "/".to_string();
+        let (new_operator, _) = new_storage.create_operator(&dummy_path)?;
         let new_accessor = new_operator.into_inner();
 
         // Cache the AccessorInfo if not already cached
         {
-            let mut info_guard = self.rebuild_info.cached_info.lock().unwrap();
+            let mut info_guard = self.shared.cached_info.lock().unwrap();
             if info_guard.is_none() {
                 *info_guard = Some(new_accessor.info());
             }
         }
 
         // Update current accessor and credentials
-        *self.inner.lock().unwrap() = new_accessor;
-        *self.rebuild_info.current_credentials.lock().unwrap() = Some(new_creds);
+        *self.inner.lock().unwrap() = Some(new_accessor);
+        *self.shared.current_credentials.lock().unwrap() = Some(new_creds);
 
         Ok(())
     }
 
-    /// Build an operator from scheme and properties
-    fn build_operator_from_props(&self, scheme: &str, props: HashMap<String, String>) -> Result<Operator> {
-        // Use existing Storage::build_from_props logic
-        let storage = Storage::build_from_props(scheme, props)?;
-
-        // Get an operator from the storage (use "/" as dummy path)
-        let dummy_path = "/".to_string();
-        let (operator, _) = storage.create_operator(&dummy_path)?;
-
-        Ok(operator)
-    }
-
     /// Get the current inner accessor (with potential refresh)
     async fn get_accessor(&self, path: &str) -> Result<Accessor> {
-        // Check if we should refresh
         self.maybe_refresh(path).await?;
 
-        Ok(Arc::clone(&*self.inner.lock().unwrap()))
+        let guard = self.inner.lock().unwrap();
+        guard.as_ref().cloned().ok_or_else(|| {
+            Error::new(ErrorKind::Unexpected, "Inner accessor not initialized. refreshable_create_operator must be called first.")
+        })
     }
 }
 
@@ -210,7 +215,7 @@ impl Access for RefreshableStorageBackend {
 
     fn info(&self) -> Arc<AccessorInfo> {
         // Return cached info if available, otherwise create a minimal one
-        let info_guard = self.rebuild_info.cached_info.lock().unwrap();
+        let info_guard = self.shared.cached_info.lock().unwrap();
         if let Some(info) = info_guard.as_ref() {
             Arc::clone(info)
         } else {
@@ -240,7 +245,6 @@ impl Access for RefreshableStorageBackend {
                 .set_source(e)
         })?;
 
-        // Accessor returns already-dynamic types
         accessor.read(path, args).await
     }
 
@@ -254,7 +258,6 @@ impl Access for RefreshableStorageBackend {
                 .set_source(e)
         })?;
 
-        // Accessor returns already-dynamic types
         accessor.write(path, args).await
     }
 
@@ -264,7 +267,6 @@ impl Access for RefreshableStorageBackend {
                 .set_source(e)
         })?;
 
-        // Accessor returns already-dynamic types
         accessor.delete().await
     }
 
@@ -274,7 +276,6 @@ impl Access for RefreshableStorageBackend {
                 .set_source(e)
         })?;
 
-        // Accessor returns already-dynamic types
         accessor.list(path, args).await
     }
 
@@ -352,4 +353,3 @@ impl RefreshableStorageBuilder {
         )
     }
 }
-
