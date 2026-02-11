@@ -69,12 +69,12 @@ pub(crate) enum Storage {
     },
     /// Wraps any storage with credential refresh capability.
     ///
-    /// This variant stores the RefreshableStorageBackend which maintains state
+    /// This variant stores the RefreshableStorage which maintains state
     /// including current credentials across multiple create_operator calls.
     /// The backend is cheap to clone as it only clones Arc pointers internally.
     Refreshable {
         /// The refreshable backend that maintains credential state
-        backend: super::refreshable_storage_backend::RefreshableStorageBackend,
+        backend: super::refreshable_storage::RefreshableStorage,
     },
 }
 
@@ -87,9 +87,9 @@ impl Storage {
         let credentials_loader = extensions.get::<Arc<dyn StorageCredentialsLoader>>();
         let existing_credentials = extensions.get::<StorageCredential>();
 
-        // If loader is present, create RefreshableStorageBackend immediately
+        // If loader is present, create RefreshableStorage immediately
         if let Some(loader) = credentials_loader {
-            let backend = super::refreshable_storage_backend::RefreshableStorageBuilder::new()
+            let backend = super::refreshable_storage::RefreshableStorageBuilder::new()
                 .scheme(scheme_str.clone())
                 .base_props(props)
                 .credentials_loader(Arc::clone(&loader))

@@ -32,7 +32,7 @@ use super::storage::Storage;
 ///
 /// Each instance has its own inner accessor (not shared across clones).
 /// The accessor is created lazily via `refreshable_create_operator` or `do_refresh`.
-pub struct RefreshableStorageBackend {
+pub struct RefreshableStorage {
     /// The current backend's accessor (per-instance, created lazily)
     inner: Mutex<Option<Accessor>>,
 
@@ -62,7 +62,7 @@ struct SharedInfo {
     cached_info: Mutex<Option<Arc<AccessorInfo>>>,
 }
 
-impl Clone for RefreshableStorageBackend {
+impl Clone for RefreshableStorage {
     fn clone(&self) -> Self {
         Self {
             inner: Mutex::new(None),
@@ -71,15 +71,15 @@ impl Clone for RefreshableStorageBackend {
     }
 }
 
-impl std::fmt::Debug for RefreshableStorageBackend {
+impl std::fmt::Debug for RefreshableStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RefreshableStorageBackend")
+        f.debug_struct("RefreshableStorage")
             .finish()
     }
 }
 
-impl RefreshableStorageBackend {
-    /// Creates a new RefreshableStorageBackend.
+impl RefreshableStorage {
+    /// Creates a new RefreshableStorage.
     ///
     /// This only stores configuration. No storage or accessor is built here.
     /// The inner accessor is created lazily via `refreshable_create_operator`.
@@ -210,7 +210,7 @@ impl RefreshableStorageBackend {
     }
 }
 
-impl Access for RefreshableStorageBackend {
+impl Access for RefreshableStorage {
     // Use dynamic dispatch for associated types since we don't know
     // the concrete types of the inner backend at compile time
     type Reader = oio::Reader;
@@ -305,7 +305,7 @@ impl Access for RefreshableStorageBackend {
     // Other methods use default implementations (return Unsupported)
 }
 
-/// Builder for RefreshableStorageBackend
+/// Builder for RefreshableStorage
 #[derive(Default, Debug)]
 pub struct RefreshableStorageBuilder {
     scheme: Option<String>,
@@ -344,9 +344,9 @@ impl RefreshableStorageBuilder {
         self
     }
 
-    /// Build the RefreshableStorageBackend
-    pub fn build(self) -> Result<RefreshableStorageBackend> {
-        RefreshableStorageBackend::new(
+    /// Build the RefreshableStorage
+    pub fn build(self) -> Result<RefreshableStorage> {
+        RefreshableStorage::new(
             self.scheme.ok_or_else(|| {
                 Error::new(ErrorKind::DataInvalid, "scheme is required")
             })?,
