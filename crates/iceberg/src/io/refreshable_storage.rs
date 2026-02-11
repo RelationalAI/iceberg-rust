@@ -16,35 +16,23 @@
 // under the License.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use opendal::raw::*;
+use opendal::Operator;
 
 use crate::io::file_io::Extensions;
 use crate::io::{StorageCredential, StorageCredentialsLoader};
 use crate::{Error, ErrorKind, Result};
 
+use super::refreshable_accessor::RefreshableAccessor;
 use super::storage::Storage;
 
-/// An OpenDAL backend that wraps another backend and refreshes credentials before operations.
+/// Holds shared configuration and state for credential refresh.
 ///
-/// This backend is transparent - it implements the `Access` trait and delegates all operations
-/// to an inner backend after optionally refreshing credentials.
-///
-/// Each instance has its own inner accessor (not shared across clones).
-/// The accessor is created lazily via `refreshable_create_operator` or `do_refresh`.
+/// Multiple `RefreshableAccessor` instances share a single `RefreshableStorage`
+/// via `Arc`, allowing credential refreshes to be visible across all accessors.
 pub struct RefreshableStorage {
-    /// The current backend's accessor (per-instance, created lazily)
-    inner: Mutex<Option<Accessor>>,
-
-    /// Shared configuration across clones
-    shared: Arc<SharedInfo>,
-}
-
-/// Shared configuration for rebuilding operators when credentials refresh.
-/// This is shared across clones via Arc.
-struct SharedInfo {
     /// Scheme of the inner backend (e.g., "s3", "azdls")
     scheme: String,
 
@@ -52,7 +40,7 @@ struct SharedInfo {
     base_props: HashMap<String, String>,
 
     /// Inner storage (built in new, rebuilt on credential refresh)
-    inner_storage: Mutex<Box<Storage>>,
+    pub(crate) inner_storage: Mutex<Box<Storage>>,
 
     /// Credential loader
     credentials_loader: Arc<dyn StorageCredentialsLoader>,
@@ -60,40 +48,28 @@ struct SharedInfo {
     /// Extensions for building storage (e.g. custom S3 credential loaders)
     extensions: Extensions,
 
-    /// Current credentials from last refresh (shared across clones)
+    /// Current credentials from last refresh (shared across accessors)
     current_credentials: Mutex<Option<StorageCredential>>,
 
     /// Cached AccessorInfo (created lazily from first operator)
-    cached_info: Mutex<Option<Arc<AccessorInfo>>>,
-}
-
-impl Clone for RefreshableStorage {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Mutex::new(None),
-            shared: Arc::clone(&self.shared),
-        }
-    }
+    pub(crate) cached_info: Mutex<Option<Arc<AccessorInfo>>>,
 }
 
 impl std::fmt::Debug for RefreshableStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RefreshableStorage")
-            .finish()
+        f.debug_struct("RefreshableStorage").finish()
     }
 }
 
 impl RefreshableStorage {
     /// Creates a new RefreshableStorage.
     ///
-    /// This only stores configuration. No storage or accessor is built here.
-    /// The inner accessor is created lazily via `refreshable_create_operator`.
-    ///
     /// # Arguments
     /// * `scheme` - Storage scheme (e.g., "s3", "azdls")
     /// * `base_props` - Base configuration properties (without credentials)
     /// * `credentials_loader` - Loader for refreshing credentials
     /// * `initial_credentials` - Initial credentials (if any), stored as current_credentials
+    /// * `extensions` - Extensions for building storage
     pub fn new(
         scheme: String,
         base_props: HashMap<String, String>,
@@ -109,60 +85,56 @@ impl RefreshableStorage {
         let inner_storage = Storage::build_from_props(&scheme, props, &extensions)?;
 
         Ok(Self {
-            inner: Mutex::new(None),
-            shared: Arc::new(SharedInfo {
-                scheme,
-                base_props,
-                inner_storage: Mutex::new(Box::new(inner_storage)),
-                credentials_loader,
-                extensions,
-                current_credentials: Mutex::new(initial_credentials),
-                cached_info: Mutex::new(None),
-            }),
+            scheme,
+            base_props,
+            inner_storage: Mutex::new(Box::new(inner_storage)),
+            credentials_loader,
+            extensions,
+            current_credentials: Mutex::new(initial_credentials),
+            cached_info: Mutex::new(None),
         })
     }
 
-    /// Build an inner storage from props, create an operator from it to extract the
-    /// relative path, and store the inner accessor on this instance.
+    /// Create an operator for the given path.
     ///
-    /// Props are built from base_props + current_credentials (if any).
-    pub fn refreshable_create_operator(&self, path: &str) -> Result<String> {
-        // Use shared inner_storage to create operator
-        let storage_guard = self.shared.inner_storage.lock().unwrap();
+    /// Builds a `RefreshableAccessor` that wraps the inner storage operator and
+    /// delegates all operations through credential refresh logic.
+    pub fn refreshable_create_operator(self: &Arc<Self>, path: &str) -> Result<(Operator, String)> {
+        let storage_guard = self.inner_storage.lock().unwrap();
         let path_string = path.to_string();
         let (operator, relative_path) = storage_guard.create_operator(&path_string)?;
         let relative_path = relative_path.to_string();
         drop(storage_guard);
 
-        // Store the accessor
         let accessor = operator.into_inner();
 
         // Cache AccessorInfo if not already cached
         {
-            let mut info_guard = self.shared.cached_info.lock().unwrap();
+            let mut info_guard = self.cached_info.lock().unwrap();
             if info_guard.is_none() {
                 *info_guard = Some(accessor.info());
             }
         }
 
-        *self.inner.lock().unwrap() = Some(accessor);
+        let refreshable_accessor = RefreshableAccessor::new(accessor, Arc::clone(self));
 
-        Ok(relative_path)
+        let wrapped_operator = Operator::from_inner(Arc::new(refreshable_accessor));
+        Ok((wrapped_operator, relative_path))
     }
 
-    /// Load credentials if available, and refresh inner storage/accessor if new ones are returned.
+    /// Load credentials if available, and refresh inner storage if new ones are returned.
     ///
     /// Returns `Ok(true)` if credentials were refreshed, `Ok(false)` otherwise.
-    async fn maybe_refresh(&self, path: &str) -> Result<bool> {
+    pub(crate) async fn maybe_refresh(&self) -> Result<bool> {
         // Get existing credentials (without holding lock across await)
         let existing_creds = {
-            let creds_guard = self.shared.current_credentials.lock().unwrap();
+            let creds_guard = self.current_credentials.lock().unwrap();
             creds_guard.clone()
         };
 
-        let new_creds = self.shared
+        let new_creds = self
             .credentials_loader
-            .maybe_load_credentials(path, existing_creds.as_ref())
+            .maybe_load_credentials("", existing_creds.as_ref())
             .await?;
 
         if let Some(new_creds) = new_creds {
@@ -173,172 +145,19 @@ impl RefreshableStorage {
         }
     }
 
-    /// Rebuild inner storage and accessor from new credentials.
+    /// Rebuild inner storage from new credentials.
     fn do_refresh(&self, new_creds: StorageCredential) -> Result<()> {
-        let mut full_props = self.shared.base_props.clone();
+        let mut full_props = self.base_props.clone();
         full_props.extend(new_creds.config.clone());
 
-        let new_storage = Storage::build_from_props(&self.shared.scheme, full_props, &self.shared.extensions)?;
-        let dummy_path = "/".to_string();
-        let (new_operator, _) = new_storage.create_operator(&dummy_path)?;
-        let new_accessor = new_operator.into_inner();
+        let new_storage =
+            Storage::build_from_props(&self.scheme, full_props, &self.extensions)?;
 
-        // Cache the AccessorInfo if not already cached
-        {
-            let mut info_guard = self.shared.cached_info.lock().unwrap();
-            if info_guard.is_none() {
-                *info_guard = Some(new_accessor.info());
-            }
-        }
-
-        *self.inner.lock().unwrap() = Some(new_accessor);
-        *self.shared.inner_storage.lock().unwrap() = Box::new(new_storage);
-        *self.shared.current_credentials.lock().unwrap() = Some(new_creds);
+        *self.inner_storage.lock().unwrap() = Box::new(new_storage);
+        *self.current_credentials.lock().unwrap() = Some(new_creds);
 
         Ok(())
     }
-
-    /// Get the current inner accessor (with potential credential refresh)
-    async fn get_accessor(&self, path: &str) -> Result<Accessor> {
-        self.maybe_refresh(path).await?;
-
-        let guard = self.inner.lock().unwrap();
-        guard.as_ref().cloned().ok_or_else(|| {
-            Error::new(ErrorKind::Unexpected, "Inner accessor not initialized. refreshable_create_operator must be called first.")
-        })
-    }
-
-    /// Run an operation with automatic retry on PermissionDenied after credential refresh.
-    ///
-    /// 1. Gets accessor (which proactively refreshes credentials) and runs the operation.
-    /// 2. If it fails with PermissionDenied, calls maybe_refresh to get fresh credentials.
-    /// 3. If refresh happened, retries the operation once with the new accessor.
-    /// 4. Otherwise, returns the original error.
-    async fn with_credential_retry<F, Fut, T>(&self, path: &str, op: F) -> opendal::Result<T>
-    where
-        F: Fn(Accessor) -> Fut,
-        Fut: Future<Output = opendal::Result<T>>,
-    {
-        let accessor = self.get_accessor(path).await.map_err(|e| {
-            opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
-                .set_source(e)
-        })?;
-
-        let result = op(accessor).await;
-
-        match result {
-            Err(err) if err.kind() == opendal::ErrorKind::PermissionDenied => {
-                let refreshed = self.maybe_refresh(path).await.map_err(|e| {
-                    opendal::Error::new(
-                        opendal::ErrorKind::Unexpected,
-                        "Failed to refresh credentials after PermissionDenied",
-                    )
-                    .set_source(e)
-                })?;
-
-                if refreshed {
-                    let new_accessor = self.get_accessor(path).await.map_err(|e| {
-                        opendal::Error::new(
-                            opendal::ErrorKind::Unexpected,
-                            "Failed to get accessor after credential refresh",
-                        )
-                        .set_source(e)
-                    })?;
-                    op(new_accessor).await
-                } else {
-                    Err(err)
-                }
-            }
-            other => other,
-        }
-    }
-}
-
-impl Access for RefreshableStorage {
-    // Use dynamic dispatch for associated types since we don't know
-    // the concrete types of the inner backend at compile time
-    type Reader = oio::Reader;
-    type Writer = oio::Writer;
-    type Lister = oio::Lister;
-    type Deleter = oio::Deleter;
-
-    fn info(&self) -> Arc<AccessorInfo> {
-        // Return cached info if available, otherwise create a minimal one
-        let info_guard = self.shared.cached_info.lock().unwrap();
-        if let Some(info) = info_guard.as_ref() {
-            Arc::clone(info)
-        } else {
-            // Create a minimal AccessorInfo before first operation
-            // This will be replaced with real info on first async operation
-            drop(info_guard);
-            AccessorInfo::default().into()
-        }
-    }
-
-    async fn stat(&self, path: &str, args: OpStat) -> opendal::Result<RpStat> {
-        self.with_credential_retry(path, |accessor| {
-            let args = args.clone();
-            async move { accessor.stat(path, args).await }
-        })
-        .await
-    }
-
-    async fn read(
-        &self,
-        path: &str,
-        args: OpRead,
-    ) -> opendal::Result<(RpRead, Self::Reader)> {
-        self.with_credential_retry(path, |accessor| {
-            let args = args.clone();
-            async move { accessor.read(path, args).await }
-        })
-        .await
-    }
-
-    async fn write(
-        &self,
-        path: &str,
-        args: OpWrite,
-    ) -> opendal::Result<(RpWrite, Self::Writer)> {
-        self.with_credential_retry(path, |accessor| {
-            let args = args.clone();
-            async move { accessor.write(path, args).await }
-        })
-        .await
-    }
-
-    async fn delete(&self) -> opendal::Result<(RpDelete, Self::Deleter)> {
-        self.with_credential_retry("", |accessor| async move {
-            accessor.delete().await
-        })
-        .await
-    }
-
-    async fn list(&self, path: &str, args: OpList) -> opendal::Result<(RpList, Self::Lister)> {
-        self.with_credential_retry(path, |accessor| {
-            let args = args.clone();
-            async move { accessor.list(path, args).await }
-        })
-        .await
-    }
-
-    async fn create_dir(&self, path: &str, args: OpCreateDir) -> opendal::Result<RpCreateDir> {
-        self.with_credential_retry(path, |accessor| {
-            let args = args.clone();
-            async move { accessor.create_dir(path, args).await }
-        })
-        .await
-    }
-
-    async fn rename(&self, from: &str, to: &str, args: OpRename) -> opendal::Result<RpRename> {
-        self.with_credential_retry(from, |accessor| {
-            let args = args.clone();
-            async move { accessor.rename(from, to, args).await }
-        })
-        .await
-    }
-
-    // Other methods use default implementations (return Unsupported)
 }
 
 /// Builder for RefreshableStorage
@@ -387,9 +206,9 @@ impl RefreshableStorageBuilder {
         self
     }
 
-    /// Build the RefreshableStorage
-    pub fn build(self) -> Result<RefreshableStorage> {
-        RefreshableStorage::new(
+    /// Build the RefreshableStorage wrapped in Arc
+    pub fn build(self) -> Result<Arc<RefreshableStorage>> {
+        Ok(Arc::new(RefreshableStorage::new(
             self.scheme.ok_or_else(|| {
                 Error::new(ErrorKind::DataInvalid, "scheme is required")
             })?,
@@ -399,6 +218,6 @@ impl RefreshableStorageBuilder {
             })?,
             self.initial_credentials,
             self.extensions,
-        )
+        )?))
     }
 }

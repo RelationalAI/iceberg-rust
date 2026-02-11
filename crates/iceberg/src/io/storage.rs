@@ -68,13 +68,8 @@ pub(crate) enum Storage {
         config: Arc<AzdlsConfig>,
     },
     /// Wraps any storage with credential refresh capability.
-    ///
-    /// This variant stores the RefreshableStorage which maintains state
-    /// including current credentials across multiple create_operator calls.
-    /// The backend is cheap to clone as it only clones Arc pointers internally.
     Refreshable {
-        /// The refreshable backend that maintains credential state
-        backend: super::refreshable_storage::RefreshableStorage,
+        backend: Arc<super::refreshable_storage::RefreshableStorage>,
     },
 }
 
@@ -240,19 +235,11 @@ impl Storage {
                 config,
             } => super::azdls_create_operator(path, config, configured_scheme),
             Storage::Refreshable { backend } => {
-                // Clone to get a new instance with its own (empty) inner accessor.
-                let backend_clone = backend.clone();
-
-                // Build inner storage from props, create operator to get relative_path,
-                // and store the inner accessor on this clone.
-                let relative_path = backend_clone.refreshable_create_operator(path)?;
-
-                let wrapped_operator = Operator::from_inner(Arc::new(backend_clone));
-
+                let (operator, relative_path) = backend.refreshable_create_operator(path)?;
                 // relative_path is always a suffix of `path`, so slice the
                 // input directly to avoid an allocation.
                 let relative_path_ref = &path[path.len() - relative_path.len()..];
-                Ok((wrapped_operator, relative_path_ref))
+                Ok((operator, relative_path_ref))
             }
             #[cfg(all(
                 not(feature = "storage-s3"),

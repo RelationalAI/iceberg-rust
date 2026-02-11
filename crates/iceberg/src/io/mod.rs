@@ -67,6 +67,7 @@
 //! - `new_output`: Create output file for writing.
 
 mod file_io;
+mod refreshable_accessor;
 mod refreshable_storage;
 mod storage;
 mod storage_credential;
