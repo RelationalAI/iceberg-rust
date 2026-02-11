@@ -72,7 +72,6 @@ impl Default for RestCatalogBuilder {
             client: None,
             authenticator: None,
             storage_credentials_loader: None,
-            refresh_credentials: false,
         })
     }
 }
@@ -114,11 +113,6 @@ impl CatalogBuilder for RestCatalogBuilder {
                 Err(Error::new(
                     ErrorKind::DataInvalid,
                     "Catalog uri is required",
-                ))
-            } else if self.0.refresh_credentials && self.0.storage_credentials_loader.is_none() {
-                Err(Error::new(
-                    ErrorKind::DataInvalid,
-                    "storage_credentials_loader is required when refresh_credentials is true",
                 ))
             } else {
                 Ok(RestCatalog::new(self.0))
@@ -184,9 +178,6 @@ pub(crate) struct RestCatalogConfig {
 
     #[builder(default)]
     storage_credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
-
-    #[builder(default)]
-    refresh_credentials: bool,
 }
 
 impl RestCatalogConfig {
@@ -458,13 +449,11 @@ impl RestCatalog {
                     .with_props(props)
                     .with_extensions(self.file_io_extensions.clone());
 
-                if self.user_config.refresh_credentials {
+                if let Some(loader) = &self.user_config.storage_credentials_loader {
                     if let Some(cred) = storage_credential {
                         file_io_builder = file_io_builder.with_extension(cred);
                     }
-                    if let Some(loader) = &self.user_config.storage_credentials_loader {
-                        file_io_builder = file_io_builder.with_extension(loader.clone());
-                    }
+                    file_io_builder = file_io_builder.with_extension(loader.clone());
                 }
 
                 file_io_builder.build()?
