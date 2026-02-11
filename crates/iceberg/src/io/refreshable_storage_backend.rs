@@ -49,6 +49,9 @@ struct SharedInfo {
     /// Base properties (non-credential config like endpoint, region, etc.)
     base_props: HashMap<String, String>,
 
+    /// Inner storage (built in new, rebuilt on credential refresh)
+    inner_storage: Mutex<Box<Storage>>,
+
     /// Credential loader
     credentials_loader: Arc<dyn StorageCredentialsLoader>,
 
@@ -92,11 +95,19 @@ impl RefreshableStorageBackend {
         credentials_loader: Arc<dyn StorageCredentialsLoader>,
         initial_credentials: Option<StorageCredential>,
     ) -> Result<Self> {
+        // Build initial inner_storage from base_props + initial_credentials
+        let mut props = base_props.clone();
+        if let Some(ref creds) = initial_credentials {
+            props.extend(creds.config.clone());
+        }
+        let inner_storage = Storage::build_from_props(&scheme, props)?;
+
         Ok(Self {
             inner: Mutex::new(None),
             shared: Arc::new(SharedInfo {
                 scheme,
                 base_props,
+                inner_storage: Mutex::new(Box::new(inner_storage)),
                 credentials_loader,
                 current_credentials: Mutex::new(initial_credentials),
                 cached_info: Mutex::new(None),
@@ -109,19 +120,12 @@ impl RefreshableStorageBackend {
     ///
     /// Props are built from base_props + current_credentials (if any).
     pub fn refreshable_create_operator(&self, path: &str) -> Result<String> {
-        // Build props = base_props + current_credentials
-        let mut props = self.shared.base_props.clone();
-        {
-            let creds_guard = self.shared.current_credentials.lock().unwrap();
-            if let Some(ref creds) = *creds_guard {
-                props.extend(creds.config.clone());
-            }
-        }
-
-        // Build inner storage from props and create operator
-        let inner_storage = Storage::build_from_props(&self.shared.scheme, props)?;
+        // Use shared inner_storage to create operator
+        let storage_guard = self.shared.inner_storage.lock().unwrap();
         let path_string = path.to_string();
-        let (operator, relative_path) = inner_storage.create_operator(&path_string)?;
+        let (operator, relative_path) = storage_guard.create_operator(&path_string)?;
+        let relative_path = relative_path.to_string();
+        drop(storage_guard);
 
         // Store the accessor
         let accessor = operator.into_inner();
@@ -136,7 +140,7 @@ impl RefreshableStorageBackend {
 
         *self.inner.lock().unwrap() = Some(accessor);
 
-        Ok(relative_path.to_string())
+        Ok(relative_path)
     }
 
     /// Check if we should refresh credentials, and if so, rebuild the inner operator
@@ -187,8 +191,9 @@ impl RefreshableStorageBackend {
             }
         }
 
-        // Update current accessor and credentials
+        // Update current accessor, inner storage, and credentials
         *self.inner.lock().unwrap() = Some(new_accessor);
+        *self.shared.inner_storage.lock().unwrap() = Box::new(new_storage);
         *self.shared.current_credentials.lock().unwrap() = Some(new_creds);
 
         Ok(())
