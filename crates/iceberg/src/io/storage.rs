@@ -283,11 +283,10 @@ impl Storage {
 
                 let wrapped_operator = Operator::from_inner(Arc::new(backend_clone));
 
-                // Need to convert String to &str with appropriate lifetime
-                // Leak the string to get a 'static reference
-                // TODO @vustef: Why this?
-                let leaked: &'static mut str = Box::leak(relative_path.into_boxed_str());
-                Ok((wrapped_operator, &*leaked))
+                // relative_path is always a suffix of `path`, so slice the
+                // input directly to avoid an allocation.
+                let relative_path_ref = &path[path.len() - relative_path.len()..];
+                Ok((wrapped_operator, relative_path_ref))
             }
             #[cfg(all(
                 not(feature = "storage-s3"),
