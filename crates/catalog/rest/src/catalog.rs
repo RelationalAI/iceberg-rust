@@ -899,7 +899,7 @@ impl Catalog for RestCatalog {
             .chain(self.user_config.props.clone())
             .collect();
 
-        // TODO @vustef: Do we support vended credentials here?
+        // TODO: Support vended credentials here.
         let file_io = self
             .load_file_io(Some(metadata_location), Some(config), None)
             .await?;
@@ -1041,7 +1041,7 @@ impl Catalog for RestCatalog {
             "Metadata location missing in `register_table` response!",
         ))?;
 
-        // TODO @vustef: Do we support vended credentials here?
+        // TODO: Support vended credentials here.
         let file_io = self
             .load_file_io(Some(metadata_location), None, None)
             .await?;
@@ -1108,7 +1108,7 @@ impl Catalog for RestCatalog {
             _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
         };
 
-        // TODO @vustef: Do we support vended credentials here?
+        // TODO: Support vended credentials here.
         let file_io = self
             .load_file_io(Some(&response.metadata_location), None, None)
             .await?;
