@@ -69,17 +69,12 @@ pub(crate) enum Storage {
     },
     /// Wraps any storage with credential refresh capability.
     ///
-    /// This variant stores configuration to lazily create operators wrapped with
-    /// RefreshableStorageBackend for transparent credential refresh.
+    /// This variant stores the RefreshableStorageBackend which maintains state
+    /// including current credentials across multiple create_operator calls.
+    /// The backend is cheap to clone as it only clones Arc pointers internally.
     Refreshable {
-        /// The configured scheme string (e.g., "s3", "abfss")
-        configured_scheme: String,
-        /// Base properties (non-credential config)
-        base_props: HashMap<String, String>,
-        /// Credential loader
-        credentials_loader: Arc<dyn StorageCredentialsLoader>,
-        /// Initial credentials (if any)
-        initial_credentials: Option<StorageCredential>,
+        /// The refreshable backend that maintains credential state
+        backend: super::refreshable_storage_backend::RefreshableStorageBackend,
     },
 }
 
@@ -92,14 +87,16 @@ impl Storage {
         let credentials_loader = extensions.get::<Arc<dyn StorageCredentialsLoader>>();
         let existing_credentials = extensions.get::<StorageCredential>();
 
-        // If loader is present, store config for lazy operator creation
+        // If loader is present, create RefreshableStorageBackend immediately
         if let Some(loader) = credentials_loader {
-            return Ok(Storage::Refreshable {
-                configured_scheme: scheme_str,
-                base_props: props,
-                credentials_loader: Arc::clone(&loader),
-                initial_credentials: existing_credentials.map(|c| (*c).clone()),
-            });
+            let backend = super::refreshable_storage_backend::RefreshableStorageBuilder::new()
+                .scheme(scheme_str.clone())
+                .base_props(props)
+                .credentials_loader(Arc::clone(&loader))
+                .initial_credentials(existing_credentials.map(|c| (*c).clone()))
+                .build()?;
+
+            return Ok(Storage::Refreshable { backend });
         }
 
         // Otherwise, build storage normally
@@ -276,25 +273,17 @@ impl Storage {
                 configured_scheme,
                 config,
             } => super::azdls_create_operator(path, config, configured_scheme),
-            Storage::Refreshable {
-                configured_scheme,
-                base_props,
-                credentials_loader,
-                initial_credentials,
-            } => {
-                // Create RefreshableStorageBackend (creates initial operator with base_props + initial_credentials)
-                let refreshable_backend = super::refreshable_storage_backend::RefreshableStorageBuilder::new()
-                    .scheme(configured_scheme.clone())
-                    .base_props(base_props.clone())
-                    .credentials_loader(Arc::clone(credentials_loader))
-                    .initial_credentials(initial_credentials.clone())
-                    .build()?;
-
+            Storage::Refreshable { backend } => {
                 // Parse path using the backend's inner storage logic
-                let relative_path = refreshable_backend.parse_path(path)?;
+                let relative_path = backend.parse_path(path)?;
 
-                // Create operator from backend
-                let wrapped_operator = Operator::from_inner(Arc::new(refreshable_backend));
+                // Clone the backend to get a new instance.
+                // RefreshableStorageBackend::clone() is cheap - it only clones Arc pointers.
+                // All clones share the same Arc<Mutex<Accessor>> and Arc<RebuildInfo>,
+                // so they share current_credentials and inner accessor state.
+                // When credentials are refreshed, all clones see the update.
+                let backend_clone = backend.clone();
+                let wrapped_operator = Operator::from_inner(Arc::new(backend_clone));
 
                 // Need to convert String to &str with appropriate lifetime
                 // Leak the string to get a 'static reference
@@ -370,7 +359,7 @@ mod tests {
 
         // Verify it created a Refreshable variant
         match storage {
-            Storage::Refreshable(_) => {} // Success
+            Storage::Refreshable { .. } => {} // Success
             _ => panic!("Expected Refreshable variant"),
         }
     }
@@ -407,7 +396,7 @@ mod tests {
 
         // Verify it created a Refreshable variant
         match storage {
-            Storage::Refreshable(_) => {} // Success
+            Storage::Refreshable { .. } => {} // Success
             _ => panic!("Expected Refreshable variant"),
         }
     }
@@ -424,7 +413,7 @@ mod tests {
             // Verify it created a normal S3 variant, not Refreshable
             match storage {
                 Storage::S3 { .. } => {} // Success
-                Storage::Refreshable(_) => panic!("build_from_props should not create Refreshable"),
+                Storage::Refreshable { .. } => panic!("build_from_props should not create Refreshable"),
                 _ => panic!("Expected S3 variant"),
             }
         }
