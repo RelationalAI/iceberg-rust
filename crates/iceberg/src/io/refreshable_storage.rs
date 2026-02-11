@@ -143,41 +143,31 @@ impl RefreshableStorage {
         Ok(relative_path)
     }
 
-    /// Check if we should refresh credentials, and if so, rebuild the inner operator
-    async fn maybe_refresh(&self, _path: &str) -> Result<()> {
-        // TODO: Add refresh condition logic here (time-based, always, etc.)
-        // For now, keep it simple - never refresh
-        // User said conditions are "hazy" and will be extended later
-        let should_refresh = false;
-
-        if should_refresh {
-            self.do_refresh(_path).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Actually refresh credentials and rebuild the operator.
-    /// Builds new inner storage from base_props + new credentials,
-    /// creates a new inner accessor from it, and saves new current_credentials.
-    async fn do_refresh(&self, path: &str) -> Result<()> {
+    /// Load credentials if available, and refresh inner storage/accessor if new ones are returned.
+    async fn maybe_refresh(&self, path: &str) -> Result<()> {
         // Get existing credentials (without holding lock across await)
         let existing_creds = {
             let creds_guard = self.shared.current_credentials.lock().unwrap();
             creds_guard.clone()
         };
 
-        // Load new credentials
         let new_creds = self.shared
             .credentials_loader
-            .load_credentials(path, existing_creds.as_ref())
+            .maybe_load_credentials(path, existing_creds.as_ref())
             .await?;
 
-        // Build new properties by extending base props with credentials
+        if let Some(new_creds) = new_creds {
+            self.do_refresh(new_creds)?;
+        }
+
+        Ok(())
+    }
+
+    /// Rebuild inner storage and accessor from new credentials.
+    fn do_refresh(&self, new_creds: StorageCredential) -> Result<()> {
         let mut full_props = self.shared.base_props.clone();
         full_props.extend(new_creds.config.clone());
 
-        // Build new inner storage and accessor
         let new_storage = Storage::build_from_props(&self.shared.scheme, full_props)?;
         let dummy_path = "/".to_string();
         let (new_operator, _) = new_storage.create_operator(&dummy_path)?;
@@ -191,7 +181,6 @@ impl RefreshableStorage {
             }
         }
 
-        // Update current accessor, inner storage, and credentials
         *self.inner.lock().unwrap() = Some(new_accessor);
         *self.shared.inner_storage.lock().unwrap() = Box::new(new_storage);
         *self.shared.current_credentials.lock().unwrap() = Some(new_creds);
@@ -199,7 +188,7 @@ impl RefreshableStorage {
         Ok(())
     }
 
-    /// Get the current inner accessor (with potential refresh)
+    /// Get the current inner accessor (with potential credential refresh)
     async fn get_accessor(&self, path: &str) -> Result<Accessor> {
         self.maybe_refresh(path).await?;
 

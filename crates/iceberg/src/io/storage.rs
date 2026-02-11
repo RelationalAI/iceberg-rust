@@ -333,15 +333,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageCredentialsLoader for TestCredentialLoader {
-        async fn load_credentials(
+        async fn maybe_load_credentials(
             &self,
             _location: &str,
             _existing_credentials: Option<&StorageCredential>,
-        ) -> crate::Result<StorageCredential> {
-            Ok(StorageCredential {
+        ) -> crate::Result<Option<StorageCredential>> {
+            Ok(Some(StorageCredential {
                 prefix: "s3://test/".to_string(),
                 config: HashMap::new(),
-            })
+            }))
         }
     }
 

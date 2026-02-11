@@ -575,13 +575,15 @@ impl RestCatalog {
             &self.user_config.storage_credentials_loader
         {
             let credential = storage_credentials_loader
-                .load_credentials(
+                .maybe_load_credentials(
                     response.metadata_location.as_deref().unwrap_or(""),
                     matched_credential.as_ref(),
                 )
                 .await?;
-            config.extend(credential.config.clone());
-            Some(credential)
+            if let Some(ref cred) = credential {
+                config.extend(cred.config.clone());
+            }
+            credential.or(matched_credential)
         } else {
             matched_credential
         };
@@ -3054,18 +3056,18 @@ mod tests {
 
         #[async_trait::async_trait]
         impl StorageCredentialsLoader for DummyCredentialLoader {
-            async fn load_credentials(
+            async fn maybe_load_credentials(
                 &self,
                 _location: &str,
                 _existing_credentials: Option<&StorageCredential>,
-            ) -> Result<StorageCredential> {
+            ) -> Result<Option<StorageCredential>> {
                 self.was_called.store(true, Ordering::SeqCst);
                 let mut config = HashMap::new();
                 config.insert("custom.key".to_string(), "custom.value".to_string());
-                Ok(StorageCredential {
+                Ok(Some(StorageCredential {
                     prefix: "custom".to_string(),
                     config,
-                })
+                }))
             }
         }
 
