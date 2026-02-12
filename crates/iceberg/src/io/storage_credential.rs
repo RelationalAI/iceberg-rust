@@ -31,6 +31,11 @@ pub struct StorageCredential {
     pub config: HashMap<String, String>,
 }
 
+/// Newtype wrapper for the metadata location string, used as an extension
+/// so that `RefreshableOpenDalStorage` can pass it to `load_credentials`.
+#[derive(Debug, Clone)]
+pub struct MetadataLocation(pub String);
+
 /// Trait for loading storage credentials dynamically.
 ///
 /// Implementations can fetch credentials from external sources,

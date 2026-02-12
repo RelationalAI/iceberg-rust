@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 use super::file_io::Extensions;
 use super::refreshable_storage::RefreshableOpenDalStorageBuilder;
 use super::{
-    FileIOBuilder, FileMetadata, FileRead, FileWrite, InputFile, OutputFile, Storage,
-    StorageConfig, StorageCredential, StorageCredentialsLoader, StorageFactory,
+    FileIOBuilder, FileMetadata, FileRead, FileWrite, InputFile, MetadataLocation, OutputFile,
+    Storage, StorageConfig, StorageCredential, StorageCredentialsLoader, StorageFactory,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -229,11 +229,16 @@ impl OpenDalStorage {
         // Check if credential refresh is requested
         if let Some(loader) = extensions.get::<Arc<dyn StorageCredentialsLoader>>() {
             let initial_creds = extensions.get::<StorageCredential>().map(|c| (*c).clone());
+            let location = extensions
+                .get::<MetadataLocation>()
+                .map(|l| l.0.clone())
+                .unwrap_or_default();
             let backend = RefreshableOpenDalStorageBuilder::new()
                 .scheme(scheme_str)
                 .base_props(props)
                 .credentials_loader(Arc::clone(&loader))
                 .initial_credentials(initial_creds)
+                .location(location)
                 .extensions(extensions)
                 .build()?;
             return Ok(Self::Refreshable {

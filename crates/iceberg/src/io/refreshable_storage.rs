@@ -49,8 +49,8 @@ pub struct RefreshableOpenDalStorage {
     /// Extensions for building storage (e.g. custom S3 credential loaders)
     extensions: Extensions,
 
-    /// Current credentials from last refresh (shared across accessors)
-    current_credentials: Mutex<Option<StorageCredential>>,
+    /// Metadata location passed to `load_credentials`
+    location: String,
 
     /// Cached AccessorInfo (created lazily from first operator)
     pub(crate) cached_info: Mutex<Option<Arc<AccessorInfo>>>,
@@ -79,13 +79,15 @@ impl RefreshableOpenDalStorage {
     /// * `scheme` - Storage scheme (e.g., "s3", "azdls")
     /// * `base_props` - Base configuration properties (without credentials)
     /// * `credentials_loader` - Loader for refreshing credentials
-    /// * `initial_credentials` - Initial credentials (if any), stored as current_credentials
+    /// * `initial_credentials` - Initial credentials (if any), used to build initial inner_storage
+    /// * `location` - Metadata location passed to `load_credentials`
     /// * `extensions` - Extensions for building storage
     pub fn new(
         scheme: String,
         base_props: HashMap<String, String>,
         credentials_loader: Arc<dyn StorageCredentialsLoader>,
         initial_credentials: Option<StorageCredential>,
+        location: String,
         extensions: Extensions,
     ) -> Result<Self> {
         // Build initial inner_storage from base_props + initial_credentials
@@ -101,7 +103,7 @@ impl RefreshableOpenDalStorage {
             inner_storage: Mutex::new(inner_storage),
             credentials_loader,
             extensions,
-            current_credentials: Mutex::new(initial_credentials),
+            location,
             cached_info: Mutex::new(None),
             credential_version: AtomicU64::new(0),
             refresh_lock: AsyncMutex::new(()),
@@ -146,7 +148,6 @@ impl RefreshableOpenDalStorage {
             OpenDalStorage::build_from_props(&self.scheme, full_props, &self.extensions)?;
 
         *self.inner_storage.lock().unwrap() = new_storage;
-        *self.current_credentials.lock().unwrap() = Some(new_creds);
         self.credential_version.fetch_add(1, Ordering::Release);
 
         Ok(())
@@ -184,7 +185,10 @@ impl RefreshableOpenDalStorage {
         }
 
         // We are the one who should call the loader
-        let new_creds = self.credentials_loader.load_credentials("").await?;
+        let new_creds = self
+            .credentials_loader
+            .load_credentials(&self.location)
+            .await?;
         self.do_refresh(new_creds)?;
         Ok(self.credential_version.load(Ordering::Acquire))
     }
@@ -197,6 +201,7 @@ pub struct RefreshableOpenDalStorageBuilder {
     base_props: HashMap<String, String>,
     credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
     initial_credentials: Option<StorageCredential>,
+    location: String,
     extensions: Extensions,
 }
 
@@ -230,6 +235,12 @@ impl RefreshableOpenDalStorageBuilder {
         self
     }
 
+    /// Set the metadata location passed to `load_credentials`
+    pub fn location(mut self, location: String) -> Self {
+        self.location = location;
+        self
+    }
+
     /// Set the extensions
     pub fn extensions(mut self, extensions: Extensions) -> Self {
         self.extensions = extensions;
@@ -246,6 +257,7 @@ impl RefreshableOpenDalStorageBuilder {
                 Error::new(ErrorKind::DataInvalid, "credentials_loader is required")
             })?,
             self.initial_credentials,
+            self.location,
             self.extensions,
         )?))
     }
@@ -322,7 +334,10 @@ mod tests {
 
     /// Load credentials and refresh inner storage. Test-only helper.
     async fn refresh(storage: &RefreshableOpenDalStorage) -> Result<()> {
-        let new_creds = storage.credentials_loader.load_credentials("").await?;
+        let new_creds = storage
+            .credentials_loader
+            .load_credentials(&storage.location)
+            .await?;
         storage.do_refresh(new_creds)
     }
 

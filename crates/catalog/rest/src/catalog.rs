@@ -25,7 +25,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use iceberg::io::{self, FileIO};
+use iceberg::io::{self, FileIO, MetadataLocation};
 use iceberg::table::Table;
 use iceberg::{
     Catalog, CatalogBuilder, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit,
@@ -453,6 +453,10 @@ impl RestCatalog {
                 if let Some(loader) = &self.user_config.storage_credentials_loader {
                     if let Some(cred) = storage_credential {
                         file_io_builder = file_io_builder.with_extension(cred);
+                    }
+                    if let Some(loc) = metadata_location {
+                        file_io_builder =
+                            file_io_builder.with_extension(MetadataLocation(loc.to_string()));
                     }
                     file_io_builder = file_io_builder.with_extension(loader.clone());
                 }
