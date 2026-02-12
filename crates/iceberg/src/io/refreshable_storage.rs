@@ -18,15 +18,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use opendal::raw::*;
 use opendal::Operator;
-
-use crate::io::file_io::Extensions;
-use crate::io::{StorageCredential, StorageCredentialsLoader};
-use crate::{Error, ErrorKind, Result};
+use opendal::raw::*;
 
 use super::opendal::OpenDalStorage;
 use super::refreshable_accessor::RefreshableAccessor;
+use crate::io::file_io::Extensions;
+use crate::io::{StorageCredential, StorageCredentialsLoader};
+use crate::{Error, ErrorKind, Result};
 
 /// Holds shared configuration and state for credential refresh.
 ///
@@ -209,9 +208,8 @@ impl RefreshableOpenDalStorageBuilder {
     /// Build the RefreshableOpenDalStorage wrapped in Arc
     pub fn build(self) -> Result<Arc<RefreshableOpenDalStorage>> {
         Ok(Arc::new(RefreshableOpenDalStorage::new(
-            self.scheme.ok_or_else(|| {
-                Error::new(ErrorKind::DataInvalid, "scheme is required")
-            })?,
+            self.scheme
+                .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "scheme is required"))?,
             self.base_props,
             self.credentials_loader.ok_or_else(|| {
                 Error::new(ErrorKind::DataInvalid, "credentials_loader is required")

@@ -599,8 +599,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("bucket".to_string(), "test-bucket".to_string());
 
-        let storage =
-            OpenDalStorage::build_from_props("s3", props, &Default::default()).unwrap();
+        let storage = OpenDalStorage::build_from_props("s3", props, &Default::default()).unwrap();
 
         // Verify it created a normal S3 variant, not Refreshable
         match storage {

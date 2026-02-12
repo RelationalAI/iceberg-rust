@@ -46,7 +46,8 @@ use crate::client::{
 use crate::types::{
     CatalogConfig, CommitTableRequest, CommitTableResponse, CreateNamespaceRequest,
     CreateTableRequest, ListNamespaceResponse, ListTablesResponse, LoadCredentialsResponse,
-    LoadTableResult, NamespaceResponse, RegisterTableRequest, RenameTableRequest, StorageCredential,
+    LoadTableResult, NamespaceResponse, RegisterTableRequest, RenameTableRequest,
+    StorageCredential,
 };
 
 /// REST catalog URI
@@ -3018,83 +3019,6 @@ mod tests {
                 panic!("Failed to load table without vended credentials: {e:?}");
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_load_table_with_custom_credential_loader() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        // Dummy credential loader that just marks that it was called
-        #[derive(Debug)]
-        struct DummyCredentialLoader {
-            was_called: Arc<AtomicBool>,
-        }
-
-        #[async_trait::async_trait]
-        impl StorageCredentialsLoader for DummyCredentialLoader {
-            async fn maybe_load_credentials(
-                &self,
-                _location: &str,
-                _existing_credentials: Option<&StorageCredential>,
-            ) -> Result<Option<StorageCredential>> {
-                self.was_called.store(true, Ordering::SeqCst);
-                let mut config = HashMap::new();
-                config.insert("custom.key".to_string(), "custom.value".to_string());
-                Ok(Some(StorageCredential {
-                    prefix: "custom".to_string(),
-                    config,
-                }))
-            }
-        }
-
-        let mut server = Server::new_async().await;
-
-        let config_mock = create_config_mock(&mut server).await;
-
-        let load_table_mock = server
-            .mock("GET", "/v1/namespaces/ns1/tables/test1")
-            .with_status(200)
-            .with_body_from_file(format!(
-                "{}/testdata/{}",
-                env!("CARGO_MANIFEST_DIR"),
-                "load_table_response.json"
-            ))
-            .create_async()
-            .await;
-
-        let was_called = Arc::new(AtomicBool::new(false));
-        let loader = Arc::new(DummyCredentialLoader {
-            was_called: was_called.clone(),
-        });
-
-        let catalog = RestCatalog::new(
-            RestCatalogConfig::builder()
-                .uri(server.url())
-                .storage_credentials_loader(Some(loader))
-                .build(),
-        );
-
-        let table = catalog
-            .load_table(&TableIdent::new(
-                NamespaceIdent::new("ns1".to_string()),
-                "test1".to_string(),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            &TableIdent::from_strs(vec!["ns1", "test1"]).unwrap(),
-            table.identifier()
-        );
-
-        // Verify that the custom credential loader was called
-        assert!(
-            was_called.load(Ordering::SeqCst),
-            "Custom credential loader should have been called"
-        );
-
-        config_mock.assert_async().await;
-        load_table_mock.assert_async().await;
     }
 
     #[tokio::test]

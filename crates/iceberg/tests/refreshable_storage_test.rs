@@ -15,9 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use iceberg::io::{FileIOBuilder, StorageCredential, StorageCredentialsLoader};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use iceberg::io::{FileIOBuilder, StorageCredential, StorageCredentialsLoader};
 
 #[derive(Debug)]
 struct TestCredentialLoader;
@@ -46,7 +47,10 @@ fn test_storage_build_with_credentials_loader_creates_refreshable() {
 
     // Building FileIO with a credentials loader should create refreshable storage
     let file_io = file_io_builder.build();
-    assert!(file_io.is_ok(), "FileIO should build successfully with credentials loader");
+    assert!(
+        file_io.is_ok(),
+        "FileIO should build successfully with credentials loader"
+    );
 }
 
 #[test]
@@ -56,7 +60,10 @@ fn test_storage_build_without_loader_creates_normal_storage() {
         let file_io_builder = FileIOBuilder::new("memory");
         let file_io = file_io_builder.build();
 
-        assert!(file_io.is_ok(), "FileIO should build successfully without loader");
+        assert!(
+            file_io.is_ok(),
+            "FileIO should build successfully without loader"
+        );
     }
 }
 
@@ -74,5 +81,8 @@ fn test_storage_build_with_both_loader_and_initial_credentials() {
         .with_extension(initial_cred);
 
     let file_io = file_io_builder.build();
-    assert!(file_io.is_ok(), "FileIO should build with both loader and initial credentials");
+    assert!(
+        file_io.is_ok(),
+        "FileIO should build with both loader and initial credentials"
+    );
 }

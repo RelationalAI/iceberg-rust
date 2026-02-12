@@ -82,7 +82,6 @@ pub use file_io::*;
 pub use opendal::CustomAwsCredentialLoader;
 pub use opendal::{OpenDalStorage, OpenDalStorageFactory};
 pub use storage::{Storage, StorageConfig, StorageFactory};
-
 pub use storage_credential::*;
 pub(crate) mod object_cache;
 

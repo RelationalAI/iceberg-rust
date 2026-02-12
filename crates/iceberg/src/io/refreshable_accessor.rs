@@ -20,9 +20,8 @@ use std::sync::{Arc, Mutex};
 
 use opendal::raw::*;
 
-use crate::{Error, ErrorKind, Result};
-
 use super::refreshable_storage::RefreshableOpenDalStorage;
+use crate::{Error, ErrorKind, Result};
 
 /// An OpenDAL accessor that wraps another accessor and refreshes credentials before operations.
 ///
@@ -148,11 +147,7 @@ impl Access for RefreshableAccessor {
         .await
     }
 
-    async fn read(
-        &self,
-        path: &str,
-        args: OpRead,
-    ) -> opendal::Result<(RpRead, Self::Reader)> {
+    async fn read(&self, path: &str, args: OpRead) -> opendal::Result<(RpRead, Self::Reader)> {
         self.with_credential_retry(path, |accessor| {
             let args = args.clone();
             async move { accessor.read(path, args).await }
@@ -160,11 +155,7 @@ impl Access for RefreshableAccessor {
         .await
     }
 
-    async fn write(
-        &self,
-        path: &str,
-        args: OpWrite,
-    ) -> opendal::Result<(RpWrite, Self::Writer)> {
+    async fn write(&self, path: &str, args: OpWrite) -> opendal::Result<(RpWrite, Self::Writer)> {
         self.with_credential_retry(path, |accessor| {
             let args = args.clone();
             async move { accessor.write(path, args).await }

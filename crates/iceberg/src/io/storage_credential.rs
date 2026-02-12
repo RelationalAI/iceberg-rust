@@ -39,9 +39,10 @@ pub struct StorageCredential {
 /// # Example
 ///
 /// ```rust,no_run
-/// use iceberg::io::{StorageCredential, StorageCredentialsLoader, FileIOBuilder};
 /// use std::collections::HashMap;
 /// use std::sync::Arc;
+///
+/// use iceberg::io::{FileIOBuilder, StorageCredential, StorageCredentialsLoader};
 ///
 /// #[derive(Debug)]
 /// struct MyCredentialLoader;
