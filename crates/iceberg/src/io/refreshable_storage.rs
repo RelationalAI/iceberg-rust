@@ -137,13 +137,6 @@ impl RefreshableOpenDalStorage {
         Ok((wrapped_operator, relative_path))
     }
 
-    /// Load credentials and refresh inner storage.
-    #[cfg(test)]
-    pub(crate) async fn refresh(&self) -> Result<()> {
-        let new_creds = self.credentials_loader.load_credentials("").await?;
-        self.do_refresh(new_creds)
-    }
-
     /// Rebuild inner storage from new credentials and bump the credential version.
     fn do_refresh(&self, new_creds: StorageCredential) -> Result<()> {
         let mut full_props = self.base_props.clone();
@@ -327,6 +320,12 @@ mod tests {
             .expect("Failed to build RefreshableOpenDalStorage for memory")
     }
 
+    /// Load credentials and refresh inner storage. Test-only helper.
+    async fn refresh(storage: &RefreshableOpenDalStorage) -> Result<()> {
+        let new_creds = storage.credentials_loader.load_credentials("").await?;
+        storage.do_refresh(new_creds)
+    }
+
     // --- Tests ---
 
     /// Verifies `refresh` calls the loader and rebuilds inner storage.
@@ -335,10 +334,10 @@ mod tests {
         let loader = Arc::new(TrackingRefreshLoader::new());
         let storage = build_memory_refreshable(Arc::clone(&loader) as _);
 
-        storage.refresh().await.unwrap();
+        refresh(&storage).await.unwrap();
         assert_eq!(loader.call_count(), 1);
 
-        storage.refresh().await.unwrap();
+        refresh(&storage).await.unwrap();
         assert_eq!(loader.call_count(), 2);
     }
 
@@ -366,7 +365,7 @@ mod tests {
         }
 
         // Refresh credentials — this rebuilds inner_storage with a fresh memory backend
-        storage.refresh().await.unwrap();
+        refresh(&storage).await.unwrap();
 
         // The new inner storage is a fresh memory instance; old data should be gone
         let inner = storage.inner_storage.lock().unwrap();
@@ -386,10 +385,10 @@ mod tests {
 
         assert_eq!(storage.credential_version(), 0);
 
-        storage.refresh().await.unwrap();
+        refresh(&storage).await.unwrap();
         assert_eq!(storage.credential_version(), 1);
 
-        storage.refresh().await.unwrap();
+        refresh(&storage).await.unwrap();
         assert_eq!(storage.credential_version(), 2);
     }
 
