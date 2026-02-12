@@ -365,16 +365,17 @@ mod tests {
         // Write data via the current inner storage
         let path = "memory:/test-file".to_string();
         {
-            let inner = storage.inner_storage.lock().unwrap();
-            let (op, rel) = inner.create_operator(&path).unwrap();
-            drop(inner);
-
+            let (op, rel) = {
+                let inner = storage.inner_storage.lock().unwrap();
+                inner.create_operator(&path).unwrap()
+            };
             op.write(rel, bytes::Bytes::from("hello")).await.unwrap();
 
             // Verify the data is there
-            let inner = storage.inner_storage.lock().unwrap();
-            let (op2, rel2) = inner.create_operator(&path).unwrap();
-            drop(inner);
+            let (op2, rel2) = {
+                let inner = storage.inner_storage.lock().unwrap();
+                inner.create_operator(&path).unwrap()
+            };
             let data = op2.read(rel2).await.unwrap().to_bytes();
             assert_eq!(data, bytes::Bytes::from("hello"));
         }
@@ -383,9 +384,10 @@ mod tests {
         refresh(&storage).await.unwrap();
 
         // The new inner storage is a fresh memory instance; old data should be gone
-        let inner = storage.inner_storage.lock().unwrap();
-        let (op3, rel3) = inner.create_operator(&path).unwrap();
-        drop(inner);
+        let (op3, rel3) = {
+            let inner = storage.inner_storage.lock().unwrap();
+            inner.create_operator(&path).unwrap()
+        };
         let exists = op3.exists(rel3).await.unwrap();
         assert!(
             !exists,
