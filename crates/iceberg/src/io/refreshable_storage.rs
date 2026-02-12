@@ -25,8 +25,8 @@ use crate::io::file_io::Extensions;
 use crate::io::{StorageCredential, StorageCredentialsLoader};
 use crate::{Error, ErrorKind, Result};
 
+use super::opendal::OpenDalStorage;
 use super::refreshable_accessor::RefreshableAccessor;
-use super::storage::Storage;
 
 /// Holds shared configuration and state for credential refresh.
 ///
@@ -40,7 +40,7 @@ pub struct RefreshableStorage {
     base_props: HashMap<String, String>,
 
     /// Inner storage (built in new, rebuilt on credential refresh)
-    pub(crate) inner_storage: Mutex<Box<Storage>>,
+    pub(crate) inner_storage: Mutex<OpenDalStorage>,
 
     /// Credential loader
     credentials_loader: Arc<dyn StorageCredentialsLoader>,
@@ -82,12 +82,12 @@ impl RefreshableStorage {
         if let Some(ref creds) = initial_credentials {
             props.extend(creds.config.clone());
         }
-        let inner_storage = Storage::build_from_props(&scheme, props, &extensions)?;
+        let inner_storage = OpenDalStorage::build_from_props(&scheme, props, &extensions)?;
 
         Ok(Self {
             scheme,
             base_props,
-            inner_storage: Mutex::new(Box::new(inner_storage)),
+            inner_storage: Mutex::new(inner_storage),
             credentials_loader,
             extensions,
             current_credentials: Mutex::new(initial_credentials),
@@ -151,9 +151,9 @@ impl RefreshableStorage {
         full_props.extend(new_creds.config.clone());
 
         let new_storage =
-            Storage::build_from_props(&self.scheme, full_props, &self.extensions)?;
+            OpenDalStorage::build_from_props(&self.scheme, full_props, &self.extensions)?;
 
-        *self.inner_storage.lock().unwrap() = Box::new(new_storage);
+        *self.inner_storage.lock().unwrap() = new_storage;
         *self.current_credentials.lock().unwrap() = Some(new_creds);
 
         Ok(())

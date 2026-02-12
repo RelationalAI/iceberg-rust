@@ -23,7 +23,7 @@ use crate::Result;
 /// Storage credentials for accessing cloud storage.
 ///
 /// Contains configuration properties like access keys, tokens, etc.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StorageCredential {
     /// Prefix for which these credentials are valid
     pub prefix: String,

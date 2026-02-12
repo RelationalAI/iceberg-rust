@@ -18,7 +18,6 @@
 //! Storage interfaces for Iceberg.
 
 use std::fmt::Debug;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -140,99 +139,4 @@ pub trait StorageFactory: Debug + Send + Sync {
     /// A `Result` containing an `Arc<dyn Storage>` on success, or an error
     /// if the storage could not be created.
     fn build(&self, config: &StorageConfig) -> Result<Arc<dyn Storage>>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::io::{FileIOBuilder, StorageCredential, StorageCredentialsLoader};
-
-    #[derive(Debug)]
-    struct TestCredentialLoader;
-
-    #[async_trait::async_trait]
-    impl StorageCredentialsLoader for TestCredentialLoader {
-        async fn maybe_load_credentials(
-            &self,
-            _location: &str,
-            _existing_credentials: Option<&StorageCredential>,
-        ) -> crate::Result<Option<StorageCredential>> {
-            Ok(Some(StorageCredential {
-                prefix: "s3://test/".to_string(),
-                config: HashMap::new(),
-            }))
-        }
-    }
-
-    #[test]
-    fn test_storage_build_with_credentials_loader_creates_refreshable() {
-        let loader: Arc<dyn StorageCredentialsLoader> = Arc::new(TestCredentialLoader);
-
-        let file_io_builder = FileIOBuilder::new("s3")
-            .with_prop("bucket", "test-bucket")
-            .with_extension(loader);
-
-        let storage = Storage::build(file_io_builder).unwrap();
-
-        // Verify it created a Refreshable variant
-        match storage {
-            Storage::Refreshable { .. } => {} // Success
-            _ => panic!("Expected Refreshable variant"),
-        }
-    }
-
-    #[test]
-    fn test_storage_build_without_loader_creates_normal_storage() {
-        #[cfg(feature = "storage-memory")]
-        {
-            let file_io_builder = FileIOBuilder::new("memory");
-            let storage = Storage::build(file_io_builder).unwrap();
-
-            // Verify it created a normal Memory variant
-            match storage {
-                Storage::Memory(_) => {} // Success
-                _ => panic!("Expected Memory variant"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_storage_build_with_both_loader_and_initial_credentials() {
-        let loader: Arc<dyn StorageCredentialsLoader> = Arc::new(TestCredentialLoader);
-        let initial_cred = StorageCredential {
-            prefix: "s3://initial/".to_string(),
-            config: HashMap::new(),
-        };
-
-        let file_io_builder = FileIOBuilder::new("s3")
-            .with_prop("bucket", "test-bucket")
-            .with_extension(loader)
-            .with_extension(initial_cred);
-
-        let storage = Storage::build(file_io_builder).unwrap();
-
-        // Verify it created a Refreshable variant
-        match storage {
-            Storage::Refreshable { .. } => {} // Success
-            _ => panic!("Expected Refreshable variant"),
-        }
-    }
-
-    #[test]
-    fn test_storage_build_from_props_never_creates_refreshable() {
-        let mut props = HashMap::new();
-        props.insert("bucket".to_string(), "test-bucket".to_string());
-
-        #[cfg(feature = "storage-s3")]
-        {
-            let storage = Storage::build_from_props("s3", props, &Default::default()).unwrap();
-
-            // Verify it created a normal S3 variant, not Refreshable
-            match storage {
-                Storage::S3 { .. } => {} // Success
-                Storage::Refreshable { .. } => panic!("build_from_props should not create Refreshable"),
-                _ => panic!("Expected S3 variant"),
-            }
-        }
-    }
 }
