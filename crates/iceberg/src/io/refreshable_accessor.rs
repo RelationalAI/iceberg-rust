@@ -99,30 +99,29 @@ impl RefreshableAccessor {
 
         match result {
             Err(err) if err.kind() == opendal::ErrorKind::PermissionDenied => {
-                let (refreshed, new_version) = self
+                let new_version = self
                     .storage
                     .refresh_on_permission_denied(version)
                     .await
                     .map_err(|e| {
                         opendal::Error::new(
-                            opendal::ErrorKind::Unexpected,
-                            "Failed to refresh credentials after PermissionDenied",
+                            opendal::ErrorKind::PermissionDenied,
+                            format!(
+                                "Operation failed with PermissionDenied and credential \
+                                 refresh also failed: {e}"
+                            ),
                         )
-                        .set_source(e)
+                        .set_source(err)
                     })?;
 
-                if refreshed {
-                    let new_accessor = self.rebuild_accessor(new_version).map_err(|e| {
-                        opendal::Error::new(
-                            opendal::ErrorKind::Unexpected,
-                            "Failed to rebuild accessor after credential refresh",
-                        )
-                        .set_source(e)
-                    })?;
-                    op(new_accessor).await
-                } else {
-                    Err(err)
-                }
+                let new_accessor = self.rebuild_accessor(new_version).map_err(|e| {
+                    opendal::Error::new(
+                        opendal::ErrorKind::Unexpected,
+                        "Failed to rebuild accessor after credential refresh",
+                    )
+                    .set_source(e)
+                })?;
+                op(new_accessor).await
             }
             other => other,
         }
@@ -233,10 +232,9 @@ mod tests {
 
     // --- Test helpers ---
 
-    /// Returns pre-configured responses in order from a `VecDeque`.
-    /// After the sequence is exhausted, returns `None`. Tracks call count.
+    /// Returns pre-configured credentials in order from a `VecDeque`. Tracks call count.
     struct SequenceLoader {
-        responses: Mutex<VecDeque<Option<StorageCredential>>>,
+        responses: Mutex<VecDeque<StorageCredential>>,
         call_count: AtomicUsize,
     }
 
@@ -247,7 +245,7 @@ mod tests {
     }
 
     impl SequenceLoader {
-        fn new(responses: Vec<Option<StorageCredential>>) -> Self {
+        fn new(responses: Vec<StorageCredential>) -> Self {
             Self {
                 responses: Mutex::new(VecDeque::from(responses)),
                 call_count: AtomicUsize::new(0),
@@ -261,14 +259,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageCredentialsLoader for SequenceLoader {
-        async fn maybe_load_credentials(
+        async fn load_credentials(
             &self,
             _location: &str,
-            _existing_credentials: Option<&StorageCredential>,
-        ) -> crate::Result<Option<StorageCredential>> {
+        ) -> crate::Result<StorageCredential> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             let mut responses = self.responses.lock().unwrap();
-            Ok(responses.pop_front().flatten())
+            Ok(responses.pop_front().unwrap_or_else(|| dummy_credential()))
         }
     }
 
@@ -418,12 +415,12 @@ mod tests {
     /// Flow:
     /// 1. `get_accessor` → no refresh → FailingAccessor used
     /// 2. `stat` → PermissionDenied
-    /// 3. `refresh_on_permission_denied` → loader call #1 → Some → do_refresh
+    /// 3. `refresh_on_permission_denied` → loader call #1 → do_refresh
     /// 4. `rebuild_accessor` → memory accessor used
     /// 5. Memory backend `stat("nonexistent")` → NotFound (not PermissionDenied)
     #[tokio::test]
     async fn test_retry_on_permission_denied_with_successful_refresh() {
-        let loader = Arc::new(SequenceLoader::new(vec![Some(dummy_credential())]));
+        let loader = Arc::new(SequenceLoader::new(vec![dummy_credential()]));
 
         let accessor = build_refreshable_storage_and_accessor(
             Arc::clone(&loader) as _,
@@ -444,36 +441,6 @@ mod tests {
         );
 
         // Only 1 loader call: the retry on PermissionDenied
-        assert_eq!(loader.call_count(), 1);
-    }
-
-    /// If the loader can't provide new credentials (e.g. the user genuinely lacks
-    /// access), the original PermissionDenied error must be returned, not masked.
-    ///
-    /// Flow:
-    /// 1. `get_accessor` → no refresh → FailingAccessor → PermissionDenied
-    /// 2. `refresh_on_permission_denied` → loader call #1 → None → no refresh
-    /// 3. Returns original PermissionDenied
-    #[tokio::test]
-    async fn test_permission_denied_without_refresh_returns_original_error() {
-        let loader = Arc::new(SequenceLoader::new(vec![None]));
-
-        let accessor = build_refreshable_storage_and_accessor(
-            Arc::clone(&loader) as _,
-            opendal::ErrorKind::PermissionDenied,
-        );
-
-        let result = accessor.stat("nonexistent", OpStat::new()).await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.kind(),
-            opendal::ErrorKind::PermissionDenied,
-            "Expected PermissionDenied to be propagated"
-        );
-
-        // 1 loader call: the retry check
         assert_eq!(loader.call_count(), 1);
     }
 
@@ -507,7 +474,7 @@ mod tests {
     /// bump and skip the loader call.
     #[tokio::test]
     async fn test_concurrent_permission_denied_calls_loader_only_once() {
-        let loader = Arc::new(SequenceLoader::new(vec![Some(dummy_credential())]));
+        let loader = Arc::new(SequenceLoader::new(vec![dummy_credential()]));
 
         let storage = RefreshableOpenDalStorageBuilder::new()
             .scheme("memory".to_string())
@@ -528,8 +495,7 @@ mod tests {
         }
 
         for handle in handles {
-            let (refreshed, new_version) = handle.await.unwrap().unwrap();
-            assert!(refreshed, "All callers should see refreshed=true");
+            let new_version = handle.await.unwrap().unwrap();
             assert_eq!(new_version, 1, "Version should be 1 after one refresh");
         }
 

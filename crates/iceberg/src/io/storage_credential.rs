@@ -49,20 +49,19 @@ pub struct StorageCredential {
 ///
 /// #[async_trait::async_trait]
 /// impl StorageCredentialsLoader for MyCredentialLoader {
-///     async fn maybe_load_credentials(
+///     async fn load_credentials(
 ///         &self,
 ///         location: &str,
-///         existing_credentials: Option<&StorageCredential>,
-///     ) -> iceberg::Result<Option<StorageCredential>> {
+///     ) -> iceberg::Result<StorageCredential> {
 ///         // Fetch fresh credentials from your credential service
 ///         let mut config = HashMap::new();
 ///         config.insert("access_key_id".to_string(), "fresh-key".to_string());
 ///         config.insert("secret_access_key".to_string(), "fresh-secret".to_string());
 ///
-///         Ok(Some(StorageCredential {
+///         Ok(StorageCredential {
 ///             prefix: "s3://my-bucket/".to_string(),
 ///             config,
-///         }))
+///         })
 ///     }
 /// }
 ///
@@ -85,10 +84,8 @@ pub trait StorageCredentialsLoader: Send + Sync + Debug {
     ///
     /// # Arguments
     /// * `location` - The full path being accessed (e.g., "s3://bucket/path/file.parquet")
-    /// * `existing_credentials` - Current credentials from last refresh (if any)
-    async fn maybe_load_credentials(
+    async fn load_credentials(
         &self,
         location: &str,
-        existing_credentials: Option<&StorageCredential>,
-    ) -> Result<Option<StorageCredential>>;
+    ) -> Result<StorageCredential>;
 }

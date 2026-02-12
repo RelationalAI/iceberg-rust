@@ -559,22 +559,19 @@ impl RestCatalog {
             None
         };
 
-        // Finally, use custom storage credential loader if set, giving it a chance to override the previous configurations.
-        let final_credential = if let Some(storage_credentials_loader) =
+        // Use custom storage credential loader only if no credentials were vended by the catalog.
+        let final_credential = if matched_credential.is_some() {
+            matched_credential
+        } else if let Some(storage_credentials_loader) =
             &self.user_config.storage_credentials_loader
         {
             let credential = storage_credentials_loader
-                .maybe_load_credentials(
-                    response.metadata_location.as_deref().unwrap_or(""),
-                    matched_credential.as_ref(),
-                )
+                .load_credentials(response.metadata_location.as_deref().unwrap_or(""))
                 .await?;
-            if let Some(ref cred) = credential {
-                config.extend(cred.config.clone());
-            }
-            credential.or(matched_credential)
+            config.extend(credential.config.clone());
+            Some(credential)
         } else {
-            matched_credential
+            None
         };
 
         let file_io = self
@@ -3033,18 +3030,17 @@ mod tests {
 
         #[async_trait::async_trait]
         impl StorageCredentialsLoader for DummyCredentialLoader {
-            async fn maybe_load_credentials(
+            async fn load_credentials(
                 &self,
                 _location: &str,
-                _existing_credentials: Option<&StorageCredential>,
-            ) -> Result<Option<StorageCredential>> {
+            ) -> Result<StorageCredential> {
                 self.was_called.store(true, Ordering::SeqCst);
                 let mut config = HashMap::new();
                 config.insert("custom.key".to_string(), "custom.value".to_string());
-                Ok(Some(StorageCredential {
+                Ok(StorageCredential {
                     prefix: "custom".to_string(),
                     config,
-                }))
+                })
             }
         }
 
