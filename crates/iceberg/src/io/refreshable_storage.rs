@@ -219,3 +219,266 @@ impl RefreshableOpenDalStorageBuilder {
         )?))
     }
 }
+
+#[cfg(all(test, feature = "storage-memory"))]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::io::StorageCredential;
+
+    // --- Test helpers ---
+
+    /// Always returns `None` — simulates "credentials are still valid, no refresh needed".
+    #[derive(Debug)]
+    struct NeverRefreshLoader;
+
+    #[async_trait::async_trait]
+    impl StorageCredentialsLoader for NeverRefreshLoader {
+        async fn maybe_load_credentials(
+            &self,
+            _location: &str,
+            _existing_credentials: Option<&StorageCredential>,
+        ) -> Result<Option<StorageCredential>> {
+            Ok(None)
+        }
+    }
+
+    /// Always returns `Some(StorageCredential)` — simulates "always provide fresh credentials".
+    #[derive(Debug)]
+    struct AlwaysRefreshLoader;
+
+    #[async_trait::async_trait]
+    impl StorageCredentialsLoader for AlwaysRefreshLoader {
+        async fn maybe_load_credentials(
+            &self,
+            _location: &str,
+            _existing_credentials: Option<&StorageCredential>,
+        ) -> Result<Option<StorageCredential>> {
+            Ok(Some(StorageCredential {
+                prefix: "memory:/refreshed/".to_string(),
+                config: HashMap::from([("refreshed_key".to_string(), "refreshed_val".to_string())]),
+            }))
+        }
+    }
+
+    /// Records every call: increments a counter and stores the `existing_credentials` argument.
+    /// Returns `Some` with a credential whose `config` contains the call number (e.g. `{"call": "1"}`).
+    /// This lets tests assert what credentials were passed to the loader and in what order.
+    struct TrackingRefreshLoader {
+        call_count: AtomicUsize,
+        received_existing: Mutex<Vec<Option<StorageCredential>>>,
+    }
+
+    impl std::fmt::Debug for TrackingRefreshLoader {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TrackingRefreshLoader").finish()
+        }
+    }
+
+    impl TrackingRefreshLoader {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                received_existing: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+
+        fn received_existing(&self) -> Vec<Option<StorageCredential>> {
+            self.received_existing.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageCredentialsLoader for TrackingRefreshLoader {
+        async fn maybe_load_credentials(
+            &self,
+            _location: &str,
+            existing_credentials: Option<&StorageCredential>,
+        ) -> Result<Option<StorageCredential>> {
+            let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+            self.received_existing
+                .lock()
+                .unwrap()
+                .push(existing_credentials.cloned());
+
+            Ok(Some(StorageCredential {
+                prefix: format!("memory:/refresh-{n}/"),
+                config: HashMap::from([("call".to_string(), n.to_string())]),
+            }))
+        }
+    }
+
+    fn build_memory_refreshable(
+        loader: Arc<dyn StorageCredentialsLoader>,
+    ) -> Arc<RefreshableOpenDalStorage> {
+        RefreshableOpenDalStorageBuilder::new()
+            .scheme("memory".to_string())
+            .base_props(HashMap::new())
+            .credentials_loader(loader)
+            .build()
+            .expect("Failed to build RefreshableOpenDalStorage for memory")
+    }
+
+    fn build_memory_refreshable_with_initial_creds(
+        loader: Arc<dyn StorageCredentialsLoader>,
+        initial_creds: StorageCredential,
+    ) -> Arc<RefreshableOpenDalStorage> {
+        RefreshableOpenDalStorageBuilder::new()
+            .scheme("memory".to_string())
+            .base_props(HashMap::new())
+            .credentials_loader(loader)
+            .initial_credentials(Some(initial_creds))
+            .build()
+            .expect("Failed to build RefreshableOpenDalStorage for memory")
+    }
+
+    // --- Tests ---
+
+    /// Verifies the basic contract: when the loader provides new credentials,
+    /// `maybe_refresh` returns `Ok(true)`.
+    #[tokio::test]
+    async fn test_maybe_refresh_returns_true_when_new_credentials_loaded() {
+        let storage = build_memory_refreshable(Arc::new(AlwaysRefreshLoader));
+
+        let refreshed = storage.maybe_refresh().await.unwrap();
+        assert!(refreshed, "Expected maybe_refresh to return true");
+    }
+
+    /// Verifies the inverse: when the loader returns `None`, no refresh happens
+    /// and `maybe_refresh` returns `Ok(false)`.
+    #[tokio::test]
+    async fn test_maybe_refresh_returns_false_when_no_new_credentials() {
+        let storage = build_memory_refreshable(Arc::new(NeverRefreshLoader));
+
+        let refreshed = storage.maybe_refresh().await.unwrap();
+        assert!(!refreshed, "Expected maybe_refresh to return false");
+    }
+
+    /// The loader needs access to current credentials to decide whether to refresh
+    /// (e.g. check expiry). This test ensures the initial credentials set during
+    /// construction are correctly forwarded to the loader's `existing_credentials` param.
+    #[tokio::test]
+    async fn test_maybe_refresh_passes_existing_credentials_to_loader() {
+        let initial_creds = StorageCredential {
+            prefix: "memory:/initial/".to_string(),
+            config: HashMap::from([("init_key".to_string(), "init_val".to_string())]),
+        };
+
+        let loader = Arc::new(TrackingRefreshLoader::new());
+        let storage = build_memory_refreshable_with_initial_creds(
+            Arc::clone(&loader) as _,
+            initial_creds.clone(),
+        );
+
+        // First call should receive the initial credentials
+        storage.maybe_refresh().await.unwrap();
+
+        let received = loader.received_existing();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0], Some(initial_creds));
+    }
+
+    /// After `do_refresh` stores new credentials in `current_credentials`, subsequent
+    /// loader calls must receive those updated credentials, not stale ones.
+    /// Critical for loaders that check credential expiry.
+    #[tokio::test]
+    async fn test_do_refresh_updates_current_credentials() {
+        let loader = Arc::new(TrackingRefreshLoader::new());
+        let storage = build_memory_refreshable(Arc::clone(&loader) as _);
+
+        // First refresh: no existing credentials passed (none were set initially)
+        storage.maybe_refresh().await.unwrap();
+        // Second refresh: should receive the credentials from first refresh
+        storage.maybe_refresh().await.unwrap();
+
+        let received = loader.received_existing();
+        assert_eq!(received.len(), 2);
+
+        // First call: no existing credentials
+        assert_eq!(received[0], None);
+
+        // Second call: should have the credentials produced by the first refresh
+        let first_refresh_creds = StorageCredential {
+            prefix: "memory:/refresh-1/".to_string(),
+            config: HashMap::from([("call".to_string(), "1".to_string())]),
+        };
+        assert_eq!(received[1], Some(first_refresh_creds));
+    }
+
+    /// Verifies two things about `do_refresh`:
+    /// 1. It actually rebuilds `inner_storage` with a fresh instance (data isolation —
+    ///    data written to the old storage is gone after refresh).
+    /// 2. The new credentials end up stored in `current_credentials` (the second
+    ///    `maybe_refresh` call receives credentials from the first refresh, not old ones).
+    #[tokio::test]
+    async fn test_do_refresh_rebuilds_inner_storage() {
+        let loader = Arc::new(TrackingRefreshLoader::new());
+        let storage = build_memory_refreshable(Arc::clone(&loader) as _);
+
+        // Write data via the current inner storage
+        let path = "memory:/test-file".to_string();
+        {
+            let inner = storage.inner_storage.lock().unwrap();
+            let (op, rel) = inner.create_operator(&path).unwrap();
+            drop(inner);
+
+            op.write(rel, bytes::Bytes::from("hello")).await.unwrap();
+
+            // Verify the data is there
+            let inner = storage.inner_storage.lock().unwrap();
+            let (op2, rel2) = inner.create_operator(&path).unwrap();
+            drop(inner);
+            let data = op2.read(rel2).await.unwrap().to_bytes();
+            assert_eq!(data, bytes::Bytes::from("hello"));
+        }
+
+        // Refresh credentials — this rebuilds inner_storage with a fresh memory backend
+        let refreshed = storage.maybe_refresh().await.unwrap();
+        assert!(refreshed);
+
+        // The new inner storage is a fresh memory instance; old data should be gone
+        let inner = storage.inner_storage.lock().unwrap();
+        let (op3, rel3) = inner.create_operator(&path).unwrap();
+        drop(inner);
+        let exists = op3.exists(rel3).await.unwrap();
+        assert!(
+            !exists,
+            "Data from old storage should not exist after rebuild"
+        );
+
+        // Verify the new credentials are tracked: second maybe_refresh should
+        // receive the credentials from the first refresh (call=1)
+        storage.maybe_refresh().await.unwrap();
+        let received = loader.received_existing();
+        assert_eq!(loader.call_count(), 2);
+        let second_existing = received[1].as_ref().unwrap();
+        assert_eq!(
+            second_existing.config.get("call"),
+            Some(&"1".to_string()),
+            "Second refresh should receive creds from first refresh"
+        );
+    }
+
+    /// End-to-end sanity check that `refreshable_create_operator` produces a working
+    /// `Operator` that wraps the inner storage correctly via `RefreshableAccessor`.
+    #[tokio::test]
+    async fn test_refreshable_operator_can_write_and_read() {
+        let storage = build_memory_refreshable(Arc::new(NeverRefreshLoader));
+
+        let (op, rel) = storage
+            .refreshable_create_operator("memory:/roundtrip-file")
+            .unwrap();
+
+        op.write(&rel, bytes::Bytes::from("roundtrip data"))
+            .await
+            .unwrap();
+
+        let read_back = op.read(&rel).await.unwrap().to_bytes();
+        assert_eq!(read_back, bytes::Bytes::from("roundtrip data"));
+    }
+}

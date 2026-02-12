@@ -192,3 +192,298 @@ impl Access for RefreshableAccessor {
         .await
     }
 }
+
+/// Tests for the `with_credential_retry` logic in `RefreshableAccessor`.
+///
+/// `with_credential_retry` works as follows:
+/// 1. Proactively refreshes credentials before each operation (via `get_accessor`).
+/// 2. On `PermissionDenied`, calls `maybe_refresh` again.
+/// 3. If refresh succeeded, retries the operation once with a new accessor.
+/// 4. Otherwise, returns the original error.
+///
+/// To test this, we inject a `FailingAccessor` (returns a configurable error on `stat`)
+/// as the initial inner accessor, while the shared storage's `inner_storage` is a real
+/// memory backend. When credential refresh triggers a rebuild, the accessor switches
+/// from `FailingAccessor` to the real memory backend — observable as a change in error
+/// kind (e.g. `PermissionDenied` → `NotFound`).
+///
+/// A `SequenceLoader` controls exactly which loader calls trigger refresh (`Some`) and
+/// which don't (`None`), so we can test each branch of the retry logic.
+#[cfg(all(test, feature = "storage-memory"))]
+mod tests {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::io::refreshable_storage::RefreshableOpenDalStorageBuilder;
+    use crate::io::{StorageCredential, StorageCredentialsLoader};
+
+    // --- Test helpers ---
+
+    /// Returns pre-configured responses in order from a `VecDeque`.
+    /// After the sequence is exhausted, returns `None`. Tracks call count.
+    struct SequenceLoader {
+        responses: Mutex<VecDeque<Option<StorageCredential>>>,
+        call_count: AtomicUsize,
+    }
+
+    impl std::fmt::Debug for SequenceLoader {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SequenceLoader").finish()
+        }
+    }
+
+    impl SequenceLoader {
+        fn new(responses: Vec<Option<StorageCredential>>) -> Self {
+            Self {
+                responses: Mutex::new(VecDeque::from(responses)),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageCredentialsLoader for SequenceLoader {
+        async fn maybe_load_credentials(
+            &self,
+            _location: &str,
+            _existing_credentials: Option<&StorageCredential>,
+        ) -> crate::Result<Option<StorageCredential>> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let mut responses = self.responses.lock().unwrap();
+            Ok(responses.pop_front().flatten())
+        }
+    }
+
+    /// `Access` impl that always returns a configurable `opendal::ErrorKind` on `stat`.
+    /// All other methods return `Unexpected` (not expected to be called by these tests).
+    struct FailingAccessor {
+        error_kind: opendal::ErrorKind,
+        info: Arc<AccessorInfo>,
+    }
+
+    impl std::fmt::Debug for FailingAccessor {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("FailingAccessor").finish()
+        }
+    }
+
+    impl FailingAccessor {
+        fn new(error_kind: opendal::ErrorKind, info: Arc<AccessorInfo>) -> Self {
+            Self { error_kind, info }
+        }
+    }
+
+    impl Access for FailingAccessor {
+        type Reader = oio::Reader;
+        type Writer = oio::Writer;
+        type Lister = oio::Lister;
+        type Deleter = oio::Deleter;
+
+        fn info(&self) -> Arc<AccessorInfo> {
+            Arc::clone(&self.info)
+        }
+
+        async fn stat(&self, _path: &str, _args: OpStat) -> opendal::Result<RpStat> {
+            Err(opendal::Error::new(self.error_kind, "test error"))
+        }
+
+        async fn read(
+            &self,
+            _path: &str,
+            _args: OpRead,
+        ) -> opendal::Result<(RpRead, Self::Reader)> {
+            Err(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "not implemented in test",
+            ))
+        }
+
+        async fn write(
+            &self,
+            _path: &str,
+            _args: OpWrite,
+        ) -> opendal::Result<(RpWrite, Self::Writer)> {
+            Err(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "not implemented in test",
+            ))
+        }
+
+        async fn delete(&self) -> opendal::Result<(RpDelete, Self::Deleter)> {
+            Err(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "not implemented in test",
+            ))
+        }
+
+        async fn list(
+            &self,
+            _path: &str,
+            _args: OpList,
+        ) -> opendal::Result<(RpList, Self::Lister)> {
+            Err(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "not implemented in test",
+            ))
+        }
+
+        async fn create_dir(
+            &self,
+            _path: &str,
+            _args: OpCreateDir,
+        ) -> opendal::Result<RpCreateDir> {
+            Err(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "not implemented in test",
+            ))
+        }
+
+        async fn rename(
+            &self,
+            _from: &str,
+            _to: &str,
+            _args: OpRename,
+        ) -> opendal::Result<RpRename> {
+            Err(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "not implemented in test",
+            ))
+        }
+    }
+
+    fn dummy_credential() -> StorageCredential {
+        StorageCredential {
+            prefix: "memory:/".to_string(),
+            config: HashMap::from([("dummy".to_string(), "cred".to_string())]),
+        }
+    }
+
+    /// Builds a `RefreshableAccessor` whose initial inner accessor is a `FailingAccessor`
+    /// (returns `error_kind` on stat), but whose shared storage is a real memory backend.
+    /// After credential refresh + rebuild, `get_accessor` will produce accessors from the
+    /// real memory backend instead of the failing one.
+    fn build_refreshable_storage_and_accessor(
+        loader: Arc<dyn StorageCredentialsLoader>,
+        error_kind: opendal::ErrorKind,
+    ) -> RefreshableAccessor {
+        let storage = RefreshableOpenDalStorageBuilder::new()
+            .scheme("memory".to_string())
+            .base_props(HashMap::new())
+            .credentials_loader(Arc::clone(&loader))
+            .build()
+            .expect("Failed to build storage");
+
+        let info = {
+            let inner = storage.inner_storage.lock().unwrap();
+            let path = "memory:/dummy".to_string();
+            let (op, _) = inner.create_operator(&path).unwrap();
+            op.into_inner().info()
+        };
+
+        *storage.cached_info.lock().unwrap() = Some(Arc::clone(&info));
+
+        let failing_accessor: Accessor = Arc::new(FailingAccessor::new(error_kind, info));
+        RefreshableAccessor::new(failing_accessor, storage)
+    }
+
+    // --- Tests ---
+
+    /// Core retry scenario: when temporary credentials expire mid-operation,
+    /// the accessor should transparently refresh and retry.
+    ///
+    /// Flow:
+    /// 1. `get_accessor` → loader call #1 → None → no refresh → FailingAccessor used
+    /// 2. `stat` → PermissionDenied
+    /// 3. Retry: `maybe_refresh` → loader call #2 → Some → do_refresh rebuilds inner_storage
+    /// 4. `get_accessor` again → loader call #3 → Some → rebuilds → memory accessor used
+    /// 5. Memory backend `stat("nonexistent")` → NotFound (not PermissionDenied)
+    #[tokio::test]
+    async fn test_retry_on_permission_denied_with_successful_refresh() {
+        let loader = Arc::new(SequenceLoader::new(vec![
+            None,
+            Some(dummy_credential()),
+            Some(dummy_credential()),
+        ]));
+
+        let accessor = build_refreshable_storage_and_accessor(
+            Arc::clone(&loader) as _,
+            opendal::ErrorKind::PermissionDenied,
+        );
+
+        let result = accessor.stat("nonexistent", OpStat::new()).await;
+
+        // The retry should have happened — the error should be NotFound
+        // (from the memory backend), not PermissionDenied
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            opendal::ErrorKind::NotFound,
+            "Expected NotFound after retry, got {:?}",
+            err.kind()
+        );
+
+        // All 3 loader calls should have been made
+        assert_eq!(loader.call_count(), 3);
+    }
+
+    /// If the loader can't provide new credentials (e.g. the user genuinely lacks
+    /// access), the original PermissionDenied error must be returned, not masked.
+    ///
+    /// Flow:
+    /// 1. `get_accessor` → loader call #1 → None → FailingAccessor → PermissionDenied
+    /// 2. Retry: `maybe_refresh` → loader call #2 → None → no refresh
+    /// 3. Returns original PermissionDenied
+    #[tokio::test]
+    async fn test_permission_denied_without_refresh_returns_original_error() {
+        let loader = Arc::new(SequenceLoader::new(vec![None, None]));
+
+        let accessor = build_refreshable_storage_and_accessor(
+            Arc::clone(&loader) as _,
+            opendal::ErrorKind::PermissionDenied,
+        );
+
+        let result = accessor.stat("nonexistent", OpStat::new()).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            opendal::ErrorKind::PermissionDenied,
+            "Expected PermissionDenied to be propagated"
+        );
+
+        // 2 loader calls: proactive + retry check
+        assert_eq!(loader.call_count(), 2);
+    }
+
+    /// Only PermissionDenied should trigger credential retry. Other errors (network,
+    /// not-found, etc.) should not — retrying with fresh credentials wouldn't help.
+    ///
+    /// Flow:
+    /// 1. `get_accessor` → loader call #1 → None → FailingAccessor → NotFound
+    /// 2. `with_credential_retry` sees NotFound → no retry → returns error immediately
+    #[tokio::test]
+    async fn test_non_permission_denied_error_is_not_retried() {
+        let loader = Arc::new(SequenceLoader::new(vec![None]));
+
+        let accessor = build_refreshable_storage_and_accessor(
+            Arc::clone(&loader) as _,
+            opendal::ErrorKind::NotFound,
+        );
+
+        let result = accessor.stat("nonexistent", OpStat::new()).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), opendal::ErrorKind::NotFound);
+
+        // Only 1 loader call: the proactive one in get_accessor
+        assert_eq!(loader.call_count(), 1);
+    }
+}
