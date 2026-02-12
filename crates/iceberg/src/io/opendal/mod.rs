@@ -529,10 +529,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageCredentialsLoader for TestCredentialLoader {
-        async fn load_credentials(
-            &self,
-            _location: &str,
-        ) -> crate::Result<StorageCredential> {
+        async fn load_credentials(&self, _location: &str) -> crate::Result<StorageCredential> {
             Ok(StorageCredential {
                 prefix: "s3://test/".to_string(),
                 config: HashMap::new(),

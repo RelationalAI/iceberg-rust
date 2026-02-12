@@ -3030,10 +3030,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl StorageCredentialsLoader for DummyCredentialLoader {
-            async fn load_credentials(
-                &self,
-                _location: &str,
-            ) -> Result<StorageCredential> {
+            async fn load_credentials(&self, _location: &str) -> Result<StorageCredential> {
                 self.was_called.store(true, Ordering::SeqCst);
                 let mut config = HashMap::new();
                 config.insert("custom.key".to_string(), "custom.value".to_string());

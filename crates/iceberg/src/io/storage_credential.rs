@@ -49,10 +49,7 @@ pub struct StorageCredential {
 ///
 /// #[async_trait::async_trait]
 /// impl StorageCredentialsLoader for MyCredentialLoader {
-///     async fn load_credentials(
-///         &self,
-///         location: &str,
-///     ) -> iceberg::Result<StorageCredential> {
+///     async fn load_credentials(&self, location: &str) -> iceberg::Result<StorageCredential> {
 ///         // Fetch fresh credentials from your credential service
 ///         let mut config = HashMap::new();
 ///         config.insert("access_key_id".to_string(), "fresh-key".to_string());
@@ -84,8 +81,5 @@ pub trait StorageCredentialsLoader: Send + Sync + Debug {
     ///
     /// # Arguments
     /// * `location` - The full path being accessed (e.g., "s3://bucket/path/file.parquet")
-    async fn load_credentials(
-        &self,
-        location: &str,
-    ) -> Result<StorageCredential>;
+    async fn load_credentials(&self, location: &str) -> Result<StorageCredential>;
 }

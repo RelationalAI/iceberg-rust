@@ -259,10 +259,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageCredentialsLoader for SequenceLoader {
-        async fn load_credentials(
-            &self,
-            _location: &str,
-        ) -> crate::Result<StorageCredential> {
+        async fn load_credentials(&self, _location: &str) -> crate::Result<StorageCredential> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             let mut responses = self.responses.lock().unwrap();
             Ok(responses.pop_front().unwrap_or_else(|| dummy_credential()))

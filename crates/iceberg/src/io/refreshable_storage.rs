@@ -19,10 +19,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::Mutex as AsyncMutex;
-
 use opendal::Operator;
 use opendal::raw::*;
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::opendal::OpenDalStorage;
 use super::refreshable_accessor::RefreshableAccessor;
@@ -175,10 +174,7 @@ impl RefreshableOpenDalStorage {
     ///    already refreshed while we waited — return the current version.
     /// 4. Call the loader, then `do_refresh`.
     /// 5. Return the new version.
-    pub(crate) async fn refresh_on_permission_denied(
-        &self,
-        accessor_version: u64,
-    ) -> Result<u64> {
+    pub(crate) async fn refresh_on_permission_denied(&self, accessor_version: u64) -> Result<u64> {
         // Fast path: someone already refreshed since this accessor was built
         let current = self.credential_version.load(Ordering::Acquire);
         if current > accessor_version {
@@ -277,10 +273,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageCredentialsLoader for SimpleLoader {
-        async fn load_credentials(
-            &self,
-            _location: &str,
-        ) -> Result<StorageCredential> {
+        async fn load_credentials(&self, _location: &str) -> Result<StorageCredential> {
             Ok(StorageCredential {
                 prefix: "memory:/refreshed/".to_string(),
                 config: HashMap::from([("refreshed_key".to_string(), "refreshed_val".to_string())]),
@@ -314,10 +307,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageCredentialsLoader for TrackingRefreshLoader {
-        async fn load_credentials(
-            &self,
-            _location: &str,
-        ) -> Result<StorageCredential> {
+        async fn load_credentials(&self, _location: &str) -> Result<StorageCredential> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(StorageCredential {
                 prefix: format!("memory:/refresh-{n}/"),
