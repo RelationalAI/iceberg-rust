@@ -44,9 +44,9 @@ use crate::client::{
     deserialize_unexpected_catalog_error,
 };
 use crate::types::{
-    CatalogConfig, CommitTableRequest, CommitTableResponse, CreateTableRequest,
-    ListNamespaceResponse, ListTableResponse, LoadCredentialsResponse, LoadTableResponse,
-    NamespaceSerde, RegisterTableRequest, RenameTableRequest, StorageCredential,
+    CatalogConfig, CommitTableRequest, CommitTableResponse, CreateNamespaceRequest,
+    CreateTableRequest, ListNamespaceResponse, ListTablesResponse, LoadCredentialsResponse,
+    LoadTableResult, NamespaceResponse, RegisterTableRequest, RenameTableRequest, StorageCredential,
 };
 
 /// REST catalog URI
@@ -508,7 +508,7 @@ impl RestCatalog {
 
         let response = match http_response.status() {
             StatusCode::OK | StatusCode::NOT_MODIFIED => {
-                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
             }
             StatusCode::NOT_FOUND => {
                 return Err(Error::new(
@@ -525,7 +525,6 @@ impl RestCatalog {
         // 3. storage_credentials (vended credentials - highest priority)
         let mut config: HashMap<String, String> = response
             .config
-            .unwrap_or_default()
             .into_iter()
             .chain(self.user_config.props.clone())
             .collect();
@@ -663,13 +662,7 @@ impl Catalog for RestCatalog {
                         deserialize_catalog_response::<ListNamespaceResponse>(http_response)
                             .await?;
 
-                    let ns_identifiers = response
-                        .namespaces
-                        .into_iter()
-                        .map(NamespaceIdent::from_vec)
-                        .collect::<Result<Vec<NamespaceIdent>>>()?;
-
-                    namespaces.extend(ns_identifiers);
+                    namespaces.extend(response.namespaces);
 
                     match response.next_page_token {
                         Some(token) => next_token = Some(token),
@@ -699,9 +692,9 @@ impl Catalog for RestCatalog {
         let request = context
             .client
             .request(Method::POST, context.config.namespaces_endpoint())
-            .json(&NamespaceSerde {
-                namespace: namespace.as_ref().clone(),
-                properties: Some(properties),
+            .json(&CreateNamespaceRequest {
+                namespace: namespace.clone(),
+                properties,
             })
             .build()?;
 
@@ -710,8 +703,8 @@ impl Catalog for RestCatalog {
         match http_response.status() {
             StatusCode::OK => {
                 let response =
-                    deserialize_catalog_response::<NamespaceSerde>(http_response).await?;
-                Namespace::try_from(response)
+                    deserialize_catalog_response::<NamespaceResponse>(http_response).await?;
+                Ok(Namespace::from(response))
             }
             StatusCode::CONFLICT => Err(Error::new(
                 ErrorKind::Unexpected,
@@ -734,8 +727,8 @@ impl Catalog for RestCatalog {
         match http_response.status() {
             StatusCode::OK => {
                 let response =
-                    deserialize_catalog_response::<NamespaceSerde>(http_response).await?;
-                Namespace::try_from(response)
+                    deserialize_catalog_response::<NamespaceResponse>(http_response).await?;
+                Ok(Namespace::from(response))
             }
             StatusCode::NOT_FOUND => Err(Error::new(
                 ErrorKind::Unexpected,
@@ -811,7 +804,7 @@ impl Catalog for RestCatalog {
             match http_response.status() {
                 StatusCode::OK => {
                     let response =
-                        deserialize_catalog_response::<ListTableResponse>(http_response).await?;
+                        deserialize_catalog_response::<ListTablesResponse>(http_response).await?;
 
                     identifiers.extend(response.identifiers);
 
@@ -858,11 +851,7 @@ impl Catalog for RestCatalog {
                 partition_spec: creation.partition_spec,
                 write_order: creation.sort_order,
                 stage_create: Some(false),
-                properties: if creation.properties.is_empty() {
-                    None
-                } else {
-                    Some(creation.properties)
-                },
+                properties: creation.properties,
             })
             .build()?;
 
@@ -870,7 +859,7 @@ impl Catalog for RestCatalog {
 
         let response = match http_response.status() {
             StatusCode::OK => {
-                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
             }
             StatusCode::NOT_FOUND => {
                 return Err(Error::new(
@@ -894,7 +883,6 @@ impl Catalog for RestCatalog {
 
         let config = response
             .config
-            .unwrap_or_default()
             .into_iter()
             .chain(self.user_config.props.clone())
             .collect();
@@ -1017,9 +1005,9 @@ impl Catalog for RestCatalog {
 
         let http_response = context.client.query_catalog(request).await?;
 
-        let response: LoadTableResponse = match http_response.status() {
+        let response: LoadTableResult = match http_response.status() {
             StatusCode::OK => {
-                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
             }
             StatusCode::NOT_FOUND => {
                 return Err(Error::new(
@@ -1064,7 +1052,7 @@ impl Catalog for RestCatalog {
                 context.config.table_endpoint(commit.identifier()),
             )
             .json(&CommitTableRequest {
-                identifier: commit.identifier().clone(),
+                identifier: Some(commit.identifier().clone()),
                 requirements: commit.take_requirements(),
                 updates: commit.take_updates(),
             })
@@ -2589,7 +2577,7 @@ mod tests {
             ))
             .unwrap();
             let reader = BufReader::new(file);
-            let resp = serde_json::from_reader::<_, LoadTableResponse>(reader).unwrap();
+            let resp = serde_json::from_reader::<_, LoadTableResult>(reader).unwrap();
 
             Table::builder()
                 .metadata(resp.metadata)
@@ -2729,7 +2717,7 @@ mod tests {
             ))
             .unwrap();
             let reader = BufReader::new(file);
-            let resp = serde_json::from_reader::<_, LoadTableResponse>(reader).unwrap();
+            let resp = serde_json::from_reader::<_, LoadTableResult>(reader).unwrap();
 
             Table::builder()
                 .metadata(resp.metadata)
@@ -2911,7 +2899,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert(
             "credential".to_string(),
-            format!("{}:{}", client_id, client_secret),
+            format!("{client_id}:{client_secret}"),
         );
         props.insert("scope".to_string(), "PRINCIPAL_ROLE:ALL".to_string());
         props.insert(
@@ -2945,7 +2933,7 @@ mod tests {
                 assert!(!credentials.storage_credentials.is_empty());
             }
             Err(e) => {
-                panic!("Failed to load table credentials: {:?}", e);
+                panic!("Failed to load table credentials: {e:?}");
             }
         }
 
@@ -2977,17 +2965,17 @@ mod tests {
                             println!("  Batch: {} rows", batch.num_rows());
                         }
                         Err(e) => {
-                            panic!("Failed to read batch: {:?}", e);
+                            panic!("Failed to read batch: {e:?}");
                         }
                     }
                 }
 
-                println!("Total rows scanned: {}", row_count);
+                println!("Total rows scanned: {row_count}");
                 assert_eq!(row_count, 25, "Expected 25 rows in nation table");
                 println!("✓ Successfully verified 25 rows in table");
             }
             Err(e) => {
-                panic!("Failed to load table with vended credentials: {:?}", e);
+                panic!("Failed to load table with vended credentials: {e:?}");
             }
         }
 
@@ -3014,23 +3002,99 @@ mod tests {
                     }
                     Err(e) => {
                         println!("✓ Scan failed as expected without vended credentials");
-                        println!("Error: {}", e);
+                        println!("Error: {e}");
                         // Verify it's a permission/authentication error
                         let error_msg = e.to_string();
                         assert!(
                             error_msg.contains("PermissionDenied")
                                 && error_msg.contains("InvalidAccessKeyId")
                                 && error_msg.contains("403"),
-                            "Expected permission/authentication error, got: {}",
-                            error_msg
+                            "Expected permission/authentication error, got: {error_msg}"
                         );
                     }
                 }
             }
             Err(e) => {
-                panic!("Failed to load table without vended credentials: {:?}", e);
+                panic!("Failed to load table without vended credentials: {e:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_load_table_with_custom_credential_loader() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Dummy credential loader that just marks that it was called
+        #[derive(Debug)]
+        struct DummyCredentialLoader {
+            was_called: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl StorageCredentialsLoader for DummyCredentialLoader {
+            async fn maybe_load_credentials(
+                &self,
+                _location: &str,
+                _existing_credentials: Option<&StorageCredential>,
+            ) -> Result<Option<StorageCredential>> {
+                self.was_called.store(true, Ordering::SeqCst);
+                let mut config = HashMap::new();
+                config.insert("custom.key".to_string(), "custom.value".to_string());
+                Ok(Some(StorageCredential {
+                    prefix: "custom".to_string(),
+                    config,
+                }))
+            }
+        }
+
+        let mut server = Server::new_async().await;
+
+        let config_mock = create_config_mock(&mut server).await;
+
+        let load_table_mock = server
+            .mock("GET", "/v1/namespaces/ns1/tables/test1")
+            .with_status(200)
+            .with_body_from_file(format!(
+                "{}/testdata/{}",
+                env!("CARGO_MANIFEST_DIR"),
+                "load_table_response.json"
+            ))
+            .create_async()
+            .await;
+
+        let was_called = Arc::new(AtomicBool::new(false));
+        let loader = Arc::new(DummyCredentialLoader {
+            was_called: was_called.clone(),
+        });
+
+        let catalog = RestCatalog::new(
+            RestCatalogConfig::builder()
+                .uri(server.url())
+                .storage_credentials_loader(Some(loader))
+                .build(),
+        );
+
+        let table = catalog
+            .load_table(&TableIdent::new(
+                NamespaceIdent::new("ns1".to_string()),
+                "test1".to_string(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            &TableIdent::from_strs(vec!["ns1", "test1"]).unwrap(),
+            table.identifier()
+        );
+
+        // Verify that the custom credential loader was called
+        assert!(
+            was_called.load(Ordering::SeqCst),
+            "Custom credential loader should have been called"
+        );
+
+        config_mock.assert_async().await;
+        load_table_mock.assert_async().await;
     }
 
     #[tokio::test]
