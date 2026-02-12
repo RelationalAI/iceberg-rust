@@ -22,22 +22,22 @@ use opendal::raw::*;
 
 use crate::{Error, ErrorKind, Result};
 
-use super::refreshable_storage::RefreshableStorage;
+use super::refreshable_storage::RefreshableOpenDalStorage;
 
 /// An OpenDAL accessor that wraps another accessor and refreshes credentials before operations.
 ///
 /// Each instance has its own inner accessor and shares credential state with
-/// other accessors via `Arc<RefreshableStorage>`.
+/// other accessors via `Arc<RefreshableOpenDalStorage>`.
 pub(crate) struct RefreshableAccessor {
     /// The current backend's accessor (per-instance)
     inner: Mutex<Option<Accessor>>,
 
     /// Shared storage holding credentials and configuration
-    storage: Arc<RefreshableStorage>,
+    storage: Arc<RefreshableOpenDalStorage>,
 }
 
 impl RefreshableAccessor {
-    pub(crate) fn new(accessor: Accessor, storage: Arc<RefreshableStorage>) -> Self {
+    pub(crate) fn new(accessor: Accessor, storage: Arc<RefreshableOpenDalStorage>) -> Self {
         Self {
             inner: Mutex::new(Some(accessor)),
             storage,

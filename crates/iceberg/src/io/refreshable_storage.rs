@@ -30,9 +30,9 @@ use super::refreshable_accessor::RefreshableAccessor;
 
 /// Holds shared configuration and state for credential refresh.
 ///
-/// Multiple `RefreshableAccessor` instances share a single `RefreshableStorage`
+/// Multiple `RefreshableAccessor` instances share a single `RefreshableOpenDalStorage`
 /// via `Arc`, allowing credential refreshes to be visible across all accessors.
-pub struct RefreshableStorage {
+pub struct RefreshableOpenDalStorage {
     /// Scheme of the inner backend (e.g., "s3", "azdls")
     scheme: String,
 
@@ -55,14 +55,14 @@ pub struct RefreshableStorage {
     pub(crate) cached_info: Mutex<Option<Arc<AccessorInfo>>>,
 }
 
-impl std::fmt::Debug for RefreshableStorage {
+impl std::fmt::Debug for RefreshableOpenDalStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RefreshableStorage").finish()
+        f.debug_struct("RefreshableOpenDalStorage").finish()
     }
 }
 
-impl RefreshableStorage {
-    /// Creates a new RefreshableStorage.
+impl RefreshableOpenDalStorage {
+    /// Creates a new RefreshableOpenDalStorage.
     ///
     /// # Arguments
     /// * `scheme` - Storage scheme (e.g., "s3", "azdls")
@@ -160,9 +160,9 @@ impl RefreshableStorage {
     }
 }
 
-/// Builder for RefreshableStorage
+/// Builder for RefreshableOpenDalStorage
 #[derive(Default, Debug)]
-pub struct RefreshableStorageBuilder {
+pub struct RefreshableOpenDalStorageBuilder {
     scheme: Option<String>,
     base_props: HashMap<String, String>,
     credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
@@ -170,7 +170,7 @@ pub struct RefreshableStorageBuilder {
     extensions: Extensions,
 }
 
-impl RefreshableStorageBuilder {
+impl RefreshableOpenDalStorageBuilder {
     /// Create a new builder
     pub fn new() -> Self {
         Self::default()
@@ -206,9 +206,9 @@ impl RefreshableStorageBuilder {
         self
     }
 
-    /// Build the RefreshableStorage wrapped in Arc
-    pub fn build(self) -> Result<Arc<RefreshableStorage>> {
-        Ok(Arc::new(RefreshableStorage::new(
+    /// Build the RefreshableOpenDalStorage wrapped in Arc
+    pub fn build(self) -> Result<Arc<RefreshableOpenDalStorage>> {
+        Ok(Arc::new(RefreshableOpenDalStorage::new(
             self.scheme.ok_or_else(|| {
                 Error::new(ErrorKind::DataInvalid, "scheme is required")
             })?,

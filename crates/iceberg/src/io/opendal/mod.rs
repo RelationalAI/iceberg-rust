@@ -40,7 +40,7 @@ pub use s3::CustomAwsCredentialLoader;
 use serde::{Deserialize, Serialize};
 
 use super::file_io::Extensions;
-use super::refreshable_storage::RefreshableStorageBuilder;
+use super::refreshable_storage::RefreshableOpenDalStorageBuilder;
 use super::{
     FileIOBuilder, FileMetadata, FileRead, FileWrite, InputFile, OutputFile, Storage,
     StorageConfig, StorageCredential, StorageCredentialsLoader, StorageFactory,
@@ -215,7 +215,7 @@ pub enum OpenDalStorage {
         /// The refreshable storage backend.
         /// `None` only after deserialization (cannot be reconstructed from serialized form).
         #[serde(skip)]
-        backend: Option<Arc<super::refreshable_storage::RefreshableStorage>>,
+        backend: Option<Arc<super::refreshable_storage::RefreshableOpenDalStorage>>,
     },
 }
 
@@ -229,7 +229,7 @@ impl OpenDalStorage {
         // Check if credential refresh is requested
         if let Some(loader) = extensions.get::<Arc<dyn StorageCredentialsLoader>>() {
             let initial_creds = extensions.get::<StorageCredential>().map(|c| (*c).clone());
-            let backend = RefreshableStorageBuilder::new()
+            let backend = RefreshableOpenDalStorageBuilder::new()
                 .scheme(scheme_str)
                 .base_props(props)
                 .credentials_loader(Arc::clone(&loader))
@@ -247,7 +247,7 @@ impl OpenDalStorage {
 
     /// Build storage from scheme, properties, and extensions.
     ///
-    /// This is the core builder used by both `build()` and `RefreshableStorage`.
+    /// This is the core builder used by both `build()` and `RefreshableOpenDalStorage`.
     pub(crate) fn build_from_props(
         scheme_str: &str,
         props: HashMap<String, String>,
@@ -384,7 +384,7 @@ impl OpenDalStorage {
                 let backend = backend.as_ref().ok_or_else(|| {
                     Error::new(
                         ErrorKind::Unexpected,
-                        "Deserialized RefreshableStorage cannot create operators",
+                        "Deserialized RefreshableOpenDalStorage cannot create operators",
                     )
                 })?;
                 let (operator, relative_path) = backend.refreshable_create_operator(path)?;
