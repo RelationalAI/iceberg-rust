@@ -16,7 +16,10 @@
 // under the License.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use tokio::sync::Mutex as AsyncMutex;
 
 use opendal::Operator;
 use opendal::raw::*;
@@ -52,6 +55,16 @@ pub struct RefreshableOpenDalStorage {
 
     /// Cached AccessorInfo (created lazily from first operator)
     pub(crate) cached_info: Mutex<Option<Arc<AccessorInfo>>>,
+
+    /// Monotonically increasing version number, incremented each time credentials
+    /// are refreshed via do_refresh. Used by RefreshableAccessor instances to detect
+    /// whether someone else has already refreshed since their accessor was built.
+    credential_version: AtomicU64,
+
+    /// Async mutex that serializes calls to the external credential loader.
+    /// Held across the await point of maybe_load_credentials to ensure only
+    /// one concurrent caller invokes the loader at a time.
+    refresh_lock: AsyncMutex<()>,
 }
 
 impl std::fmt::Debug for RefreshableOpenDalStorage {
@@ -91,6 +104,8 @@ impl RefreshableOpenDalStorage {
             extensions,
             current_credentials: Mutex::new(initial_credentials),
             cached_info: Mutex::new(None),
+            credential_version: AtomicU64::new(0),
+            refresh_lock: AsyncMutex::new(()),
         })
     }
 
@@ -115,7 +130,9 @@ impl RefreshableOpenDalStorage {
             }
         }
 
-        let refreshable_accessor = RefreshableAccessor::new(accessor, Arc::clone(self));
+        let version = self.credential_version();
+        let refreshable_accessor =
+            RefreshableAccessor::new(accessor, version, path.to_string(), Arc::clone(self));
 
         let wrapped_operator = Operator::from_inner(Arc::new(refreshable_accessor));
         Ok((wrapped_operator, relative_path))
@@ -124,6 +141,7 @@ impl RefreshableOpenDalStorage {
     /// Load credentials if available, and refresh inner storage if new ones are returned.
     ///
     /// Returns `Ok(true)` if credentials were refreshed, `Ok(false)` otherwise.
+    #[cfg(test)]
     pub(crate) async fn maybe_refresh(&self) -> Result<bool> {
         // Get existing credentials (without holding lock across await)
         let existing_creds = {
@@ -144,7 +162,7 @@ impl RefreshableOpenDalStorage {
         }
     }
 
-    /// Rebuild inner storage from new credentials.
+    /// Rebuild inner storage from new credentials and bump the credential version.
     fn do_refresh(&self, new_creds: StorageCredential) -> Result<()> {
         let mut full_props = self.base_props.clone();
         full_props.extend(new_creds.config.clone());
@@ -154,8 +172,64 @@ impl RefreshableOpenDalStorage {
 
         *self.inner_storage.lock().unwrap() = new_storage;
         *self.current_credentials.lock().unwrap() = Some(new_creds);
+        self.credential_version.fetch_add(1, Ordering::Release);
 
         Ok(())
+    }
+
+    /// Returns the current credential version number.
+    pub(crate) fn credential_version(&self) -> u64 {
+        self.credential_version.load(Ordering::Acquire)
+    }
+
+    /// Refresh credentials in response to a PermissionDenied error.
+    ///
+    /// Uses double-checked locking with a version number:
+    /// 1. If `credential_version > accessor_version`, someone already refreshed —
+    ///    return `(true, current_version)` without calling the loader.
+    /// 2. Acquire `refresh_lock` (async, serializes loader calls).
+    /// 3. Double-check: if `credential_version > accessor_version`, another caller
+    ///    already refreshed while we waited — return `(true, current_version)`.
+    /// 4. Call the loader. If new credentials, call `do_refresh`.
+    /// 5. Return `(refreshed, current_version)`.
+    pub(crate) async fn refresh_on_permission_denied(
+        &self,
+        accessor_version: u64,
+    ) -> Result<(bool, u64)> {
+        // Fast path: someone already refreshed since this accessor was built
+        let current = self.credential_version.load(Ordering::Acquire);
+        if current > accessor_version {
+            return Ok((true, current));
+        }
+
+        // Acquire the async lock to serialize loader calls
+        let _guard = self.refresh_lock.lock().await;
+
+        // Double-check after acquiring lock
+        let current = self.credential_version.load(Ordering::Acquire);
+        if current > accessor_version {
+            return Ok((true, current));
+        }
+
+        // We are the one who should call the loader
+        let existing_creds = {
+            let creds_guard = self.current_credentials.lock().unwrap();
+            creds_guard.clone()
+        };
+
+        let new_creds = self
+            .credentials_loader
+            .maybe_load_credentials("", existing_creds.as_ref())
+            .await?;
+
+        if let Some(new_creds) = new_creds {
+            self.do_refresh(new_creds)?;
+            let new_version = self.credential_version.load(Ordering::Acquire);
+            Ok((true, new_version))
+        } else {
+            let current = self.credential_version.load(Ordering::Acquire);
+            Ok((false, current))
+        }
     }
 }
 
@@ -462,6 +536,20 @@ mod tests {
             Some(&"1".to_string()),
             "Second refresh should receive creds from first refresh"
         );
+    }
+
+    /// Verifies that `credential_version` increments on each `do_refresh` (via `maybe_refresh`).
+    #[tokio::test]
+    async fn test_credential_version_increments_on_refresh() {
+        let storage = build_memory_refreshable(Arc::new(AlwaysRefreshLoader));
+
+        assert_eq!(storage.credential_version(), 0);
+
+        storage.maybe_refresh().await.unwrap();
+        assert_eq!(storage.credential_version(), 1);
+
+        storage.maybe_refresh().await.unwrap();
+        assert_eq!(storage.credential_version(), 2);
     }
 
     /// End-to-end sanity check that `refreshable_create_operator` produces a working

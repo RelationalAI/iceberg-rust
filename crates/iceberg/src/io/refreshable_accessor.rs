@@ -21,89 +21,101 @@ use std::sync::{Arc, Mutex};
 use opendal::raw::*;
 
 use super::refreshable_storage::RefreshableOpenDalStorage;
-use crate::{Error, ErrorKind, Result};
+use crate::Result;
 
-/// An OpenDAL accessor that wraps another accessor and refreshes credentials before operations.
+/// An OpenDAL accessor that wraps another accessor and retries on PermissionDenied
+/// after refreshing credentials.
 ///
 /// Each instance has its own inner accessor and shares credential state with
-/// other accessors via `Arc<RefreshableOpenDalStorage>`.
+/// other accessors via `Arc<RefreshableOpenDalStorage>`. Credentials are only
+/// refreshed when an operation fails with PermissionDenied, not proactively.
+///
+/// Concurrency: if multiple accessors hit PermissionDenied simultaneously, only
+/// one will call the external credential loader (via double-checked locking on
+/// `RefreshableOpenDalStorage::refresh_on_permission_denied`). The others will
+/// detect the version bump and simply rebuild their accessor from the already-refreshed
+/// credentials.
 pub(crate) struct RefreshableAccessor {
-    /// The current backend's accessor (per-instance)
-    inner: Mutex<Option<Accessor>>,
+    /// The current backend's accessor paired with the credential version it was built from.
+    inner: Mutex<(Accessor, u64)>,
+
+    /// The full original path (e.g. "memory:/some-file") used to create the operator.
+    /// Needed to rebuild the accessor after credential refresh.
+    original_path: String,
 
     /// Shared storage holding credentials and configuration
     storage: Arc<RefreshableOpenDalStorage>,
 }
 
 impl RefreshableAccessor {
-    pub(crate) fn new(accessor: Accessor, storage: Arc<RefreshableOpenDalStorage>) -> Self {
+    pub(crate) fn new(
+        accessor: Accessor,
+        credential_version: u64,
+        original_path: String,
+        storage: Arc<RefreshableOpenDalStorage>,
+    ) -> Self {
         Self {
-            inner: Mutex::new(Some(accessor)),
+            inner: Mutex::new((accessor, credential_version)),
+            original_path,
             storage,
         }
     }
 
-    /// Get the current inner accessor (with potential credential refresh).
-    ///
-    /// If credentials are refreshed, rebuilds the inner accessor from the
-    /// updated shared storage.
-    async fn get_accessor(&self, path: &str) -> Result<Accessor> {
-        let refreshed = self.storage.maybe_refresh().await?;
-
-        if refreshed {
-            // Rebuild accessor from the updated shared storage
-            let storage_guard = self.storage.inner_storage.lock().unwrap();
-            let path_string = path.to_string();
-            let (operator, _) = storage_guard.create_operator(&path_string)?;
-            drop(storage_guard);
-
-            let new_accessor = operator.into_inner();
-            *self.inner.lock().unwrap() = Some(new_accessor.clone());
-            return Ok(new_accessor);
-        }
-
+    /// Get the current inner accessor and its credential version.
+    fn get_accessor(&self) -> (Accessor, u64) {
         let guard = self.inner.lock().unwrap();
-        guard.as_ref().cloned().ok_or_else(|| {
-            Error::new(
-                ErrorKind::Unexpected,
-                "Inner accessor not initialized. create_operator must be called first.",
-            )
-        })
+        guard.clone()
+    }
+
+    /// Rebuild the inner accessor from the shared storage after a credential refresh.
+    ///
+    /// Uses `original_path` (the full path passed to `refreshable_create_operator`)
+    /// to call `create_operator` on the refreshed `inner_storage`.
+    fn rebuild_accessor(&self, new_version: u64) -> Result<Accessor> {
+        let storage_guard = self.storage.inner_storage.lock().unwrap();
+        let (operator, _) = storage_guard.create_operator(&self.original_path)?;
+        drop(storage_guard);
+
+        let new_accessor = operator.into_inner();
+        *self.inner.lock().unwrap() = (new_accessor.clone(), new_version);
+        Ok(new_accessor)
     }
 
     /// Run an operation with automatic retry on PermissionDenied after credential refresh.
     ///
-    /// 1. Gets accessor (which proactively refreshes credentials) and runs the operation.
-    /// 2. If it fails with PermissionDenied, calls maybe_refresh to get fresh credentials.
-    /// 3. If refresh happened, retries the operation once with the new accessor.
+    /// 1. Gets the current accessor (no refresh) and runs the operation.
+    /// 2. If it fails with PermissionDenied, calls `refresh_on_permission_denied`
+    ///    with the accessor's credential version.
+    /// 3. If credentials were refreshed (by us or another concurrent accessor),
+    ///    rebuilds our accessor and retries the operation once.
     /// 4. Otherwise, returns the original error.
-    async fn with_credential_retry<F, Fut, T>(&self, path: &str, op: F) -> opendal::Result<T>
+    async fn with_credential_retry<F, Fut, T>(&self, op: F) -> opendal::Result<T>
     where
         F: Fn(Accessor) -> Fut,
         Fut: Future<Output = opendal::Result<T>>,
     {
-        let accessor = self.get_accessor(path).await.map_err(|e| {
-            opendal::Error::new(opendal::ErrorKind::Unexpected, "Failed to get accessor")
-                .set_source(e)
-        })?;
-
+        let (accessor, version) = self.get_accessor();
         let result = op(accessor).await;
 
         match result {
             Err(err) if err.kind() == opendal::ErrorKind::PermissionDenied => {
-                let refreshed = self.storage.maybe_refresh().await.map_err(|e| {
-                    opendal::Error::new(
-                        opendal::ErrorKind::Unexpected,
-                        "Failed to refresh credentials after PermissionDenied",
-                    )
-                    .set_source(e)
-                })?;
-
-                if refreshed {
-                    let new_accessor = self.get_accessor(path).await.map_err(|e| {
+                let (refreshed, new_version) = self
+                    .storage
+                    .refresh_on_permission_denied(version)
+                    .await
+                    .map_err(|e| {
                         opendal::Error::new(
                             opendal::ErrorKind::Unexpected,
-                            "Failed to get accessor after credential refresh",
+                            "Failed to refresh credentials after PermissionDenied",
+                        )
+                        .set_source(e)
+                    })?;
+
+                if refreshed {
+                    let new_accessor = self.rebuild_accessor(new_version).map_err(|e| {
+                        opendal::Error::new(
+                            opendal::ErrorKind::Unexpected,
+                            "Failed to rebuild accessor after credential refresh",
                         )
                         .set_source(e)
                     })?;
@@ -140,7 +152,7 @@ impl Access for RefreshableAccessor {
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> opendal::Result<RpStat> {
-        self.with_credential_retry(path, |accessor| {
+        self.with_credential_retry(|accessor| {
             let args = args.clone();
             async move { accessor.stat(path, args).await }
         })
@@ -148,7 +160,7 @@ impl Access for RefreshableAccessor {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> opendal::Result<(RpRead, Self::Reader)> {
-        self.with_credential_retry(path, |accessor| {
+        self.with_credential_retry(|accessor| {
             let args = args.clone();
             async move { accessor.read(path, args).await }
         })
@@ -156,7 +168,7 @@ impl Access for RefreshableAccessor {
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> opendal::Result<(RpWrite, Self::Writer)> {
-        self.with_credential_retry(path, |accessor| {
+        self.with_credential_retry(|accessor| {
             let args = args.clone();
             async move { accessor.write(path, args).await }
         })
@@ -164,12 +176,12 @@ impl Access for RefreshableAccessor {
     }
 
     async fn delete(&self) -> opendal::Result<(RpDelete, Self::Deleter)> {
-        self.with_credential_retry("", |accessor| async move { accessor.delete().await })
+        self.with_credential_retry(|accessor| async move { accessor.delete().await })
             .await
     }
 
     async fn list(&self, path: &str, args: OpList) -> opendal::Result<(RpList, Self::Lister)> {
-        self.with_credential_retry(path, |accessor| {
+        self.with_credential_retry(|accessor| {
             let args = args.clone();
             async move { accessor.list(path, args).await }
         })
@@ -177,7 +189,7 @@ impl Access for RefreshableAccessor {
     }
 
     async fn create_dir(&self, path: &str, args: OpCreateDir) -> opendal::Result<RpCreateDir> {
-        self.with_credential_retry(path, |accessor| {
+        self.with_credential_retry(|accessor| {
             let args = args.clone();
             async move { accessor.create_dir(path, args).await }
         })
@@ -185,7 +197,7 @@ impl Access for RefreshableAccessor {
     }
 
     async fn rename(&self, from: &str, to: &str, args: OpRename) -> opendal::Result<RpRename> {
-        self.with_credential_retry(from, |accessor| {
+        self.with_credential_retry(|accessor| {
             let args = args.clone();
             async move { accessor.rename(from, to, args).await }
         })
@@ -196,9 +208,10 @@ impl Access for RefreshableAccessor {
 /// Tests for the `with_credential_retry` logic in `RefreshableAccessor`.
 ///
 /// `with_credential_retry` works as follows:
-/// 1. Proactively refreshes credentials before each operation (via `get_accessor`).
-/// 2. On `PermissionDenied`, calls `maybe_refresh` again.
-/// 3. If refresh succeeded, retries the operation once with a new accessor.
+/// 1. Gets the current accessor (no refresh) and runs the operation.
+/// 2. On `PermissionDenied`, calls `refresh_on_permission_denied` with the
+///    accessor's credential version.
+/// 3. If credentials were refreshed, rebuilds the accessor and retries once.
 /// 4. Otherwise, returns the original error.
 ///
 /// To test this, we inject a `FailingAccessor` (returns a configurable error on `stat`)
@@ -365,8 +378,8 @@ mod tests {
 
     /// Builds a `RefreshableAccessor` whose initial inner accessor is a `FailingAccessor`
     /// (returns `error_kind` on stat), but whose shared storage is a real memory backend.
-    /// After credential refresh + rebuild, `get_accessor` will produce accessors from the
-    /// real memory backend instead of the failing one.
+    /// After credential refresh + rebuild, the accessor switches from `FailingAccessor`
+    /// to the real memory backend.
     fn build_refreshable_storage_and_accessor(
         loader: Arc<dyn StorageCredentialsLoader>,
         error_kind: opendal::ErrorKind,
@@ -387,8 +400,14 @@ mod tests {
 
         *storage.cached_info.lock().unwrap() = Some(Arc::clone(&info));
 
+        let version = storage.credential_version();
         let failing_accessor: Accessor = Arc::new(FailingAccessor::new(error_kind, info));
-        RefreshableAccessor::new(failing_accessor, storage)
+        RefreshableAccessor::new(
+            failing_accessor,
+            version,
+            "memory:/dummy".to_string(),
+            storage,
+        )
     }
 
     // --- Tests ---
@@ -397,18 +416,14 @@ mod tests {
     /// the accessor should transparently refresh and retry.
     ///
     /// Flow:
-    /// 1. `get_accessor` → loader call #1 → None → no refresh → FailingAccessor used
+    /// 1. `get_accessor` → no refresh → FailingAccessor used
     /// 2. `stat` → PermissionDenied
-    /// 3. Retry: `maybe_refresh` → loader call #2 → Some → do_refresh rebuilds inner_storage
-    /// 4. `get_accessor` again → loader call #3 → Some → rebuilds → memory accessor used
+    /// 3. `refresh_on_permission_denied` → loader call #1 → Some → do_refresh
+    /// 4. `rebuild_accessor` → memory accessor used
     /// 5. Memory backend `stat("nonexistent")` → NotFound (not PermissionDenied)
     #[tokio::test]
     async fn test_retry_on_permission_denied_with_successful_refresh() {
-        let loader = Arc::new(SequenceLoader::new(vec![
-            None,
-            Some(dummy_credential()),
-            Some(dummy_credential()),
-        ]));
+        let loader = Arc::new(SequenceLoader::new(vec![Some(dummy_credential())]));
 
         let accessor = build_refreshable_storage_and_accessor(
             Arc::clone(&loader) as _,
@@ -428,20 +443,20 @@ mod tests {
             err.kind()
         );
 
-        // All 3 loader calls should have been made
-        assert_eq!(loader.call_count(), 3);
+        // Only 1 loader call: the retry on PermissionDenied
+        assert_eq!(loader.call_count(), 1);
     }
 
     /// If the loader can't provide new credentials (e.g. the user genuinely lacks
     /// access), the original PermissionDenied error must be returned, not masked.
     ///
     /// Flow:
-    /// 1. `get_accessor` → loader call #1 → None → FailingAccessor → PermissionDenied
-    /// 2. Retry: `maybe_refresh` → loader call #2 → None → no refresh
+    /// 1. `get_accessor` → no refresh → FailingAccessor → PermissionDenied
+    /// 2. `refresh_on_permission_denied` → loader call #1 → None → no refresh
     /// 3. Returns original PermissionDenied
     #[tokio::test]
     async fn test_permission_denied_without_refresh_returns_original_error() {
-        let loader = Arc::new(SequenceLoader::new(vec![None, None]));
+        let loader = Arc::new(SequenceLoader::new(vec![None]));
 
         let accessor = build_refreshable_storage_and_accessor(
             Arc::clone(&loader) as _,
@@ -458,19 +473,19 @@ mod tests {
             "Expected PermissionDenied to be propagated"
         );
 
-        // 2 loader calls: proactive + retry check
-        assert_eq!(loader.call_count(), 2);
+        // 1 loader call: the retry check
+        assert_eq!(loader.call_count(), 1);
     }
 
     /// Only PermissionDenied should trigger credential retry. Other errors (network,
     /// not-found, etc.) should not — retrying with fresh credentials wouldn't help.
     ///
     /// Flow:
-    /// 1. `get_accessor` → loader call #1 → None → FailingAccessor → NotFound
+    /// 1. `get_accessor` → no refresh → FailingAccessor → NotFound
     /// 2. `with_credential_retry` sees NotFound → no retry → returns error immediately
     #[tokio::test]
     async fn test_non_permission_denied_error_is_not_retried() {
-        let loader = Arc::new(SequenceLoader::new(vec![None]));
+        let loader = Arc::new(SequenceLoader::new(vec![]));
 
         let accessor = build_refreshable_storage_and_accessor(
             Arc::clone(&loader) as _,
@@ -483,7 +498,42 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), opendal::ErrorKind::NotFound);
 
-        // Only 1 loader call: the proactive one in get_accessor
+        // No loader calls at all — only PermissionDenied triggers refresh
+        assert_eq!(loader.call_count(), 0);
+    }
+
+    /// When multiple concurrent callers hit PermissionDenied, only one should
+    /// call the external credential loader. The others should detect the version
+    /// bump and skip the loader call.
+    #[tokio::test]
+    async fn test_concurrent_permission_denied_calls_loader_only_once() {
+        let loader = Arc::new(SequenceLoader::new(vec![Some(dummy_credential())]));
+
+        let storage = RefreshableOpenDalStorageBuilder::new()
+            .scheme("memory".to_string())
+            .base_props(HashMap::new())
+            .credentials_loader(Arc::clone(&loader) as _)
+            .build()
+            .expect("Failed to build storage");
+
+        let version = storage.credential_version();
+
+        // Spawn 10 concurrent refresh_on_permission_denied calls with the same version
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let storage = Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                storage.refresh_on_permission_denied(version).await
+            }));
+        }
+
+        for handle in handles {
+            let (refreshed, new_version) = handle.await.unwrap().unwrap();
+            assert!(refreshed, "All callers should see refreshed=true");
+            assert_eq!(new_version, 1, "Version should be 1 after one refresh");
+        }
+
+        // Only 1 loader call should have been made
         assert_eq!(loader.call_count(), 1);
     }
 }
