@@ -46,6 +46,7 @@ use crate::io::{
     FileIOBuilder, FileMetadata, FileRead, FileWrite, InputFile, MetadataLocation, OutputFile,
     Storage, StorageConfig, StorageCredential, StorageCredentialsLoader, StorageFactory,
 };
+use crate::catalog::TableIdent;
 use crate::{Error, ErrorKind, Result};
 
 #[cfg(feature = "storage-azdls")]
