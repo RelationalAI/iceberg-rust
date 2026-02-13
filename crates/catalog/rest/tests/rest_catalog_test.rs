@@ -530,9 +530,9 @@ async fn test_authenticator_token_refresh() {
         count: token_request_count_clone,
     });
 
-    let catalog_with_auth = get_catalog(Some(authenticator)).await;
+    let catalog_with_auth = get_catalog(Some(authenticator.clone())).await;
 
-    // Perform multiple operations that should trigger token requests
+    // Perform multiple operations that should reuse the cached token
     let ns1 = Namespace::with_properties(
         NamespaceIdent::from_strs(["test_refresh_1"]).unwrap(),
         HashMap::new(),
@@ -551,11 +551,30 @@ async fn test_authenticator_token_refresh() {
         .await
         .unwrap();
 
-    // Verify authenticator was called multiple times
+    // With lazy authentication, the token is fetched once and cached for reuse
     let count = *token_request_count.lock().unwrap();
-    assert!(
-        count >= 2,
-        "Authenticator should have been called at least twice, but was called {count} times"
+    assert_eq!(
+        count, 1,
+        "Authenticator should have been called once for lazy token caching, but was called {count} times"
+    );
+
+    // Test that token is refreshed when invalidated
+    catalog_with_auth.client.invalidate_token().await.unwrap();
+
+    let ns3 = Namespace::with_properties(
+        NamespaceIdent::from_strs(["test_refresh_3"]).unwrap(),
+        HashMap::new(),
+    );
+    catalog_with_auth
+        .create_namespace(ns3.name(), HashMap::new())
+        .await
+        .unwrap();
+
+    // After invalidating and making another request, authenticator should be called again
+    let count = *token_request_count.lock().unwrap();
+    assert_eq!(
+        count, 2,
+        "Authenticator should have been called twice (once initial, once after invalidation), but was called {count} times"
     );
 }
 
