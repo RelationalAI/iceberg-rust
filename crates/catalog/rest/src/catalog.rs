@@ -148,6 +148,18 @@ impl RestCatalogBuilder {
         self.0.authenticator = Some(authenticator);
         self
     }
+
+    /// Set a custom storage credentials loader.
+    ///
+    /// The loader will be used to obtain storage credentials instead of expecting
+    /// them to be vended from the catalog.
+    pub fn with_storage_credentials_loader(
+        mut self,
+        loader: Arc<dyn StorageCredentialsLoader>,
+    ) -> Self {
+        self.0.storage_credentials_loader = Some(loader);
+        self
+    }
 }
 
 /// Trait for custom storage credential loader.
