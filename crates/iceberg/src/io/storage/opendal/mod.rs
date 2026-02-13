@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use super::file_io::Extensions;
 use super::refreshable_storage::RefreshableOpenDalStorageBuilder;
-use super::{
+use crate::io::{
     FileIOBuilder, FileMetadata, FileRead, FileWrite, InputFile, MetadataLocation, OutputFile,
     Storage, StorageConfig, StorageCredential, StorageCredentialsLoader, StorageFactory,
 };
