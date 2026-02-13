@@ -23,7 +23,8 @@
 //!
 //! ```rust
 //! use iceberg::Result;
-//! use iceberg::io::{FileIOBuilder, S3_REGION};
+//! use iceberg::io::FileIOBuilder;
+//! use iceberg::io::storage::config::S3_REGION;
 //!
 //! # fn test() -> Result<()> {
 //! // Build a memory file io.
@@ -42,7 +43,8 @@
 //!
 //! ```rust
 //! use iceberg::Result;
-//! use iceberg::io::{FileIO, S3_REGION};
+//! use iceberg::io::FileIO;
+//! use iceberg::io::storage::config::S3_REGION;
 //!
 //! # fn test() -> Result<()> {
 //! // Build a memory file io.
