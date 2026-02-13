@@ -559,7 +559,7 @@ async fn test_authenticator_token_refresh() {
     );
 
     // Test that token is refreshed when invalidated
-    catalog_with_auth.client.invalidate_token().await.unwrap();
+    catalog_with_auth.invalidate_token().await.unwrap();
 
     let ns3 = Namespace::with_properties(
         NamespaceIdent::from_strs(["test_refresh_3"]).unwrap(),
