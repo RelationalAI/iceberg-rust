@@ -148,7 +148,6 @@ impl RestCatalogBuilder {
         self.0.authenticator = Some(authenticator);
         self
     }
-
 }
 
 /// Trait for custom storage credential loader.
@@ -382,10 +381,7 @@ impl RestCatalog {
     /// This is intended to be called after catalog construction, so the loader
     /// can hold a reference to the catalog (e.g., `Arc<RestCatalog>`) and call
     /// catalog-specific methods like `load_table_with_credentials`.
-    pub fn set_storage_credentials_loader(
-        &mut self,
-        loader: Arc<dyn StorageCredentialsLoader>,
-    ) {
+    pub fn set_storage_credentials_loader(&mut self, loader: Arc<dyn StorageCredentialsLoader>) {
         self.user_config.storage_credentials_loader = Some(loader);
     }
 
@@ -587,7 +583,10 @@ impl RestCatalog {
             &self.user_config.storage_credentials_loader
         {
             let credential = storage_credentials_loader
-                .load_credentials(table_ident, response.metadata_location.as_deref().unwrap_or(""))
+                .load_credentials(
+                    table_ident,
+                    response.metadata_location.as_deref().unwrap_or(""),
+                )
                 .await?;
             config.extend(credential.config.clone());
             Some(credential)

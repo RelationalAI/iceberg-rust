@@ -281,9 +281,8 @@ impl RefreshableOpenDalStorageBuilder {
             })?,
             self.initial_credentials,
             self.location,
-            self.table_ident.ok_or_else(|| {
-                Error::new(ErrorKind::DataInvalid, "table_ident is required")
-            })?,
+            self.table_ident
+                .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "table_ident is required"))?,
             self.extensions,
         )?))
     }
@@ -294,8 +293,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::io::StorageCredential;
     use crate::NamespaceIdent;
+    use crate::io::StorageCredential;
 
     // --- Test helpers ---
 
@@ -357,7 +356,10 @@ mod tests {
     }
 
     fn test_table_ident() -> TableIdent {
-        TableIdent::new(NamespaceIdent::new("test_ns".to_string()), "test_table".to_string())
+        TableIdent::new(
+            NamespaceIdent::new("test_ns".to_string()),
+            "test_table".to_string(),
+        )
     }
 
     fn build_memory_refreshable(

@@ -227,10 +227,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::NamespaceIdent;
     use crate::catalog::TableIdent;
     use crate::io::refreshable_storage::RefreshableOpenDalStorageBuilder;
     use crate::io::{StorageCredential, StorageCredentialsLoader};
-    use crate::NamespaceIdent;
 
     // --- Test helpers ---
 
