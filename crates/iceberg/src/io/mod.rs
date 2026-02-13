@@ -69,7 +69,7 @@
 mod file_io;
 mod refreshable_accessor;
 mod refreshable_storage;
-mod storage;
+pub mod storage;
 mod storage_credential;
 
 pub use file_io::*;

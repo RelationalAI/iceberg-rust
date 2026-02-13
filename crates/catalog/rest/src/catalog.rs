@@ -634,7 +634,7 @@ impl RestCatalog {
                 ErrorKind::Unexpected,
                 "Tried to load credentials for a table that does not exist",
             )),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(http_response, context.client.disable_header_redaction()).await),
         }
     }
 
