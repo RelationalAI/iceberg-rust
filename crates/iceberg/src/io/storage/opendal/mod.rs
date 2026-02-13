@@ -39,9 +39,10 @@ use opendal::{Operator, Scheme};
 pub use s3::CustomAwsCredentialLoader;
 use serde::{Deserialize, Serialize};
 
-use super::file_io::Extensions;
-use super::refreshable_storage::RefreshableOpenDalStorageBuilder;
-use super::{
+use crate::catalog::TableIdent;
+use crate::io::file_io::Extensions;
+use crate::io::refreshable_storage::RefreshableOpenDalStorageBuilder;
+use crate::io::{
     FileIOBuilder, FileMetadata, FileRead, FileWrite, InputFile, MetadataLocation, OutputFile,
     Storage, StorageConfig, StorageCredential, StorageCredentialsLoader, StorageFactory,
 };
@@ -215,7 +216,7 @@ pub enum OpenDalStorage {
         /// The refreshable storage backend.
         /// `None` only after deserialization (cannot be reconstructed from serialized form).
         #[serde(skip)]
-        backend: Option<Arc<super::refreshable_storage::RefreshableOpenDalStorage>>,
+        backend: Option<Arc<crate::io::refreshable_storage::RefreshableOpenDalStorage>>,
     },
 }
 
@@ -233,12 +234,22 @@ impl OpenDalStorage {
                 .get::<MetadataLocation>()
                 .map(|l| l.0.clone())
                 .unwrap_or_default();
+            let table_ident = extensions
+                .get::<TableIdent>()
+                .map(|arc| (*arc).clone())
+                .unwrap_or_else(|| {
+                    TableIdent::new(
+                        crate::NamespaceIdent::new("unknown".to_string()),
+                        "unknown".to_string(),
+                    )
+                });
             let backend = RefreshableOpenDalStorageBuilder::new()
                 .scheme(scheme_str)
                 .base_props(props)
                 .credentials_loader(Arc::clone(&loader))
                 .initial_credentials(initial_creds)
                 .location(location)
+                .table_ident(table_ident)
                 .extensions(extensions)
                 .build()?;
             return Ok(Self::Refreshable {
@@ -534,7 +545,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageCredentialsLoader for TestCredentialLoader {
-        async fn load_credentials(&self, _location: &str) -> crate::Result<StorageCredential> {
+        async fn load_credentials(
+            &self,
+            _table_ident: &TableIdent,
+            _location: &str,
+        ) -> crate::Result<StorageCredential> {
             Ok(StorageCredential {
                 prefix: "s3://test/".to_string(),
                 config: HashMap::new(),

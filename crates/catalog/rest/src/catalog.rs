@@ -54,6 +54,8 @@ use crate::types::{
 pub const REST_CATALOG_PROP_URI: &str = "uri";
 /// REST catalog warehouse location
 pub const REST_CATALOG_PROP_WAREHOUSE: &str = "warehouse";
+/// Disable header redaction in error logs (defaults to false for security)
+pub const REST_CATALOG_PROP_DISABLE_HEADER_REDACTION: &str = "disable-header-redaction";
 
 const ICEBERG_REST_SPEC_VERSION: &str = "0.14.1";
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -330,6 +332,17 @@ impl RestCatalogConfig {
         params
     }
 
+    /// Check if header redaction is disabled in error logs.
+    ///
+    /// Returns true if the `disable-header-redaction` property is set to "true".
+    /// Defaults to false for security (headers are redacted by default).
+    pub(crate) fn disable_header_redaction(&self) -> bool {
+        self.props
+            .get(REST_CATALOG_PROP_DISABLE_HEADER_REDACTION)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
     /// Merge the `RestCatalogConfig` with the a [`CatalogConfig`] (fetched from the REST server).
     pub(crate) fn merge_with_config(mut self, mut config: CatalogConfig) -> Self {
         if let Some(uri) = config.overrides.remove("uri") {
@@ -374,6 +387,15 @@ impl RestCatalog {
             ctx: OnceCell::new(),
             file_io_extensions: io::Extensions::default(),
         }
+    }
+
+    /// Set a custom storage credentials loader.
+    ///
+    /// This is intended to be called after catalog construction, so the loader
+    /// can hold a reference to the catalog (e.g., `Arc<RestCatalog>`) and call
+    /// catalog-specific methods like `load_table_with_credentials`.
+    pub fn set_storage_credentials_loader(&mut self, loader: Arc<dyn StorageCredentialsLoader>) {
+        self.user_config.storage_credentials_loader = Some(loader);
     }
 
     /// Add an extension to the file IO builder.
@@ -421,7 +443,11 @@ impl RestCatalog {
 
         match http_response.status() {
             StatusCode::OK => deserialize_catalog_response(http_response).await,
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -430,6 +456,7 @@ impl RestCatalog {
         metadata_location: Option<&str>,
         extra_config: Option<HashMap<String, String>>,
         storage_credential: Option<StorageCredential>,
+        table_ident: Option<&TableIdent>,
     ) -> Result<FileIO> {
         let mut props = self.context().await?.config.props.clone();
         if let Some(config) = extra_config {
@@ -457,6 +484,9 @@ impl RestCatalog {
                     if let Some(loc) = metadata_location {
                         file_io_builder =
                             file_io_builder.with_extension(MetadataLocation(loc.to_string()));
+                    }
+                    if let Some(ident) = table_ident {
+                        file_io_builder = file_io_builder.with_extension(ident.clone());
                     }
                     file_io_builder = file_io_builder.with_extension(loader.clone());
                 }
@@ -521,7 +551,13 @@ impl RestCatalog {
                     "Tried to load a table that does not exist",
                 ));
             }
-            _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => {
+                return Err(deserialize_unexpected_catalog_error(
+                    http_response,
+                    context.client.disable_header_redaction(),
+                )
+                .await);
+            }
         };
 
         // Build config with proper precedence, with each next config overriding previous one:
@@ -570,7 +606,10 @@ impl RestCatalog {
             &self.user_config.storage_credentials_loader
         {
             let credential = storage_credentials_loader
-                .load_credentials(response.metadata_location.as_deref().unwrap_or(""))
+                .load_credentials(
+                    table_ident,
+                    response.metadata_location.as_deref().unwrap_or(""),
+                )
                 .await?;
             config.extend(credential.config.clone());
             Some(credential)
@@ -583,6 +622,7 @@ impl RestCatalog {
                 response.metadata_location.as_deref(),
                 Some(config),
                 final_credential,
+                Some(table_ident),
             )
             .await?;
 
@@ -617,7 +657,11 @@ impl RestCatalog {
                 ErrorKind::Unexpected,
                 "Tried to load credentials for a table that does not exist",
             )),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -677,7 +721,13 @@ impl Catalog for RestCatalog {
                         "The parent parameter of the namespace provided does not exist",
                     ));
                 }
-                _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+                _ => {
+                    return Err(deserialize_unexpected_catalog_error(
+                        http_response,
+                        context.client.disable_header_redaction(),
+                    )
+                    .await);
+                }
             }
         }
 
@@ -712,7 +762,11 @@ impl Catalog for RestCatalog {
                 ErrorKind::Unexpected,
                 "Tried to create a namespace that already exists",
             )),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -736,7 +790,11 @@ impl Catalog for RestCatalog {
                 ErrorKind::Unexpected,
                 "Tried to get a namespace that does not exist",
             )),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -753,7 +811,11 @@ impl Catalog for RestCatalog {
         match http_response.status() {
             StatusCode::NO_CONTENT | StatusCode::OK => Ok(true),
             StatusCode::NOT_FOUND => Ok(false),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -784,7 +846,11 @@ impl Catalog for RestCatalog {
                 ErrorKind::Unexpected,
                 "Tried to drop a namespace that does not exist",
             )),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -821,7 +887,13 @@ impl Catalog for RestCatalog {
                         "Tried to list tables of a namespace that does not exist",
                     ));
                 }
-                _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+                _ => {
+                    return Err(deserialize_unexpected_catalog_error(
+                        http_response,
+                        context.client.disable_header_redaction(),
+                    )
+                    .await);
+                }
             }
         }
 
@@ -875,7 +947,13 @@ impl Catalog for RestCatalog {
                     "The table already exists",
                 ));
             }
-            _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => {
+                return Err(deserialize_unexpected_catalog_error(
+                    http_response,
+                    context.client.disable_header_redaction(),
+                )
+                .await);
+            }
         };
 
         let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
@@ -891,7 +969,7 @@ impl Catalog for RestCatalog {
 
         // TODO: Support vended credentials here.
         let file_io = self
-            .load_file_io(Some(metadata_location), Some(config), None)
+            .load_file_io(Some(metadata_location), Some(config), None, None)
             .await?;
 
         let table_builder = Table::builder()
@@ -932,7 +1010,11 @@ impl Catalog for RestCatalog {
                 ErrorKind::Unexpected,
                 "Tried to drop a table that does not exist",
             )),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -950,7 +1032,11 @@ impl Catalog for RestCatalog {
         match http_response.status() {
             StatusCode::NO_CONTENT | StatusCode::OK => Ok(true),
             StatusCode::NOT_FOUND => Ok(false),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -979,7 +1065,11 @@ impl Catalog for RestCatalog {
                 ErrorKind::Unexpected,
                 "Tried to rename a table to a name that already exists",
             )),
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
@@ -1023,7 +1113,13 @@ impl Catalog for RestCatalog {
                     "The given table already exists.",
                 ));
             }
-            _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => {
+                return Err(deserialize_unexpected_catalog_error(
+                    http_response,
+                    context.client.disable_header_redaction(),
+                )
+                .await);
+            }
         };
 
         let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
@@ -1033,7 +1129,7 @@ impl Catalog for RestCatalog {
 
         // TODO: Support vended credentials here.
         let file_io = self
-            .load_file_io(Some(metadata_location), None, None)
+            .load_file_io(Some(metadata_location), None, None, None)
             .await?;
 
         Table::builder()
@@ -1095,12 +1191,18 @@ impl Catalog for RestCatalog {
                     "A server-side gateway timeout occurred; the commit state is unknown.",
                 ));
             }
-            _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => {
+                return Err(deserialize_unexpected_catalog_error(
+                    http_response,
+                    context.client.disable_header_redaction(),
+                )
+                .await);
+            }
         };
 
         // TODO: Support vended credentials here.
         let file_io = self
-            .load_file_io(Some(&response.metadata_location), None, None)
+            .load_file_io(Some(&response.metadata_location), None, None, None)
             .await?;
 
         Table::builder()
@@ -3034,7 +3136,11 @@ mod tests {
 
         #[async_trait::async_trait]
         impl StorageCredentialsLoader for DummyCredentialLoader {
-            async fn load_credentials(&self, _location: &str) -> Result<StorageCredential> {
+            async fn load_credentials(
+                &self,
+                _table_ident: &TableIdent,
+                _location: &str,
+            ) -> Result<StorageCredential> {
                 self.was_called.store(true, Ordering::SeqCst);
                 let mut config = HashMap::new();
                 config.insert("custom.key".to_string(), "custom.value".to_string());
