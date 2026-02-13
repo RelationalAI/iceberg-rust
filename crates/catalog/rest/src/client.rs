@@ -313,8 +313,10 @@ impl HttpClient {
             }
 
             // Send request with authentication
-            let response = self.execute(request.try_clone()
-                .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "Unable to clone request"))?)
+            let response =
+                self.execute(request.try_clone().ok_or_else(|| {
+                    Error::new(ErrorKind::DataInvalid, "Unable to clone request")
+                })?)
                 .await?;
 
             // Check if we got a permission denied error
