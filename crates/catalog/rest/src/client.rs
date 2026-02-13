@@ -346,6 +346,11 @@ impl HttpClient {
     pub(crate) fn disable_header_redaction(&self) -> bool {
         self.disable_header_redaction
     }
+
+    /// Returns whether header redaction is disabled for this client.
+    pub(crate) fn disable_header_redaction(&self) -> bool {
+        self.disable_header_redaction
+    }
 }
 
 /// Deserializes a catalog response into the given [`DeserializedOwned`] type.
