@@ -538,7 +538,13 @@ impl RestCatalog {
                     "Tried to load a table that does not exist",
                 ));
             }
-            _ => return Err(deserialize_unexpected_catalog_error(http_response, context.client.disable_header_redaction()).await),
+            _ => {
+                return Err(deserialize_unexpected_catalog_error(
+                    http_response,
+                    context.client.disable_header_redaction(),
+                )
+                .await);
+            }
         };
 
         // Build config with proper precedence, with each next config overriding previous one:
@@ -634,7 +640,11 @@ impl RestCatalog {
                 ErrorKind::Unexpected,
                 "Tried to load credentials for a table that does not exist",
             )),
-            _ => Err(deserialize_unexpected_catalog_error(http_response, context.client.disable_header_redaction()).await),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
         }
     }
 
