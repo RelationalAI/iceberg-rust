@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["config","opendal"],"struct":["LocalFsStorage","LocalFsStorageFactory","MemoryStorage","MemoryStorageFactory"],"trait":["Storage","StorageFactory"]};
