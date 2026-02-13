@@ -532,26 +532,27 @@ async fn test_authenticator_token_refresh() {
 
     let catalog_with_auth = get_catalog(Some(authenticator.clone())).await;
 
+    // Clean up from any previous test runs
+    let ns1_ident = NamespaceIdent::from_strs(["test_refresh_1"]).unwrap();
+    let ns2_ident = NamespaceIdent::from_strs(["test_refresh_2"]).unwrap();
+    cleanup_namespace(&catalog_with_auth, &ns1_ident).await;
+    cleanup_namespace(&catalog_with_auth, &ns2_ident).await;
+
     // Perform multiple operations that should reuse the cached token
-    let ns1 = Namespace::with_properties(
-        NamespaceIdent::from_strs(["test_refresh_1"]).unwrap(),
-        HashMap::new(),
-    );
+    let ns1 = Namespace::with_properties(ns1_ident.clone(), HashMap::new());
     catalog_with_auth
         .create_namespace(ns1.name(), HashMap::new())
         .await
         .unwrap();
 
-    let ns2 = Namespace::with_properties(
-        NamespaceIdent::from_strs(["test_refresh_2"]).unwrap(),
-        HashMap::new(),
-    );
+    let ns2 = Namespace::with_properties(ns2_ident.clone(), HashMap::new());
     catalog_with_auth
         .create_namespace(ns2.name(), HashMap::new())
         .await
         .unwrap();
 
     // With lazy authentication, the token is fetched once and cached for reuse
+    // across multiple operations, rather than being called on every request
     let count = *token_request_count.lock().unwrap();
     assert_eq!(
         count, 1,
@@ -561,10 +562,10 @@ async fn test_authenticator_token_refresh() {
     // Test that token is refreshed when invalidated
     catalog_with_auth.invalidate_token().await.unwrap();
 
-    let ns3 = Namespace::with_properties(
-        NamespaceIdent::from_strs(["test_refresh_3"]).unwrap(),
-        HashMap::new(),
-    );
+    let ns3_ident = NamespaceIdent::from_strs(["test_refresh_3"]).unwrap();
+    cleanup_namespace(&catalog_with_auth, &ns3_ident).await;
+
+    let ns3 = Namespace::with_properties(ns3_ident.clone(), HashMap::new());
     catalog_with_auth
         .create_namespace(ns3.name(), HashMap::new())
         .await
@@ -576,6 +577,11 @@ async fn test_authenticator_token_refresh() {
         count, 2,
         "Authenticator should have been called twice (once initial, once after invalidation), but was called {count} times"
     );
+
+    // Clean up
+    cleanup_namespace(&catalog_with_auth, &ns1_ident).await;
+    cleanup_namespace(&catalog_with_auth, &ns2_ident).await;
+    cleanup_namespace(&catalog_with_auth, &ns3_ident).await;
 }
 
 #[tokio::test]
@@ -589,11 +595,13 @@ async fn test_authenticator_persists_across_operations() {
 
     let catalog_with_auth = get_catalog(Some(authenticator)).await;
 
+    // Clean up from any previous test runs
+    let ns_ident = NamespaceIdent::from_strs(["test_persist", "auth"]).unwrap();
+    let parent_ident = NamespaceIdent::from_strs(["test_persist"]).unwrap();
+    cleanup_namespace(&catalog_with_auth, &ns_ident).await;
+
     // Create a namespace
-    let ns = Namespace::with_properties(
-        NamespaceIdent::from_strs(["test_persist", "auth"]).unwrap(),
-        HashMap::new(),
-    );
+    let ns = Namespace::with_properties(ns_ident.clone(), HashMap::new());
     catalog_with_auth
         .create_namespace(ns.name(), HashMap::new())
         .await
@@ -604,11 +612,11 @@ async fn test_authenticator_persists_across_operations() {
     // List the namespace children (should reuse the cached token from the create operation)
     // We need to list children of "test_persist" to find "auth"
     let list_result = catalog_with_auth
-        .list_namespaces(Some(&NamespaceIdent::from_strs(["test_persist"]).unwrap()))
+        .list_namespaces(Some(&parent_ident))
         .await
         .unwrap();
     assert!(
-        list_result.contains(&NamespaceIdent::from_strs(["test_persist", "auth"]).unwrap()),
+        list_result.contains(&ns_ident),
         "Namespace {:?} not found in list {:?}",
         ns.name(),
         list_result
@@ -626,4 +634,7 @@ async fn test_authenticator_persists_across_operations() {
         count_after_list, 1,
         "Authenticator should still have been called only once (token is cached and reused for list)"
     );
+
+    // Clean up
+    cleanup_namespace(&catalog_with_auth, &ns_ident).await;
 }
