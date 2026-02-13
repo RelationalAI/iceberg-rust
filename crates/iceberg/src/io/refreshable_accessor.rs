@@ -72,7 +72,7 @@ impl RefreshableAccessor {
     /// Uses `original_path` (the full path passed to `refreshable_create_operator`)
     /// to call `create_operator` on the refreshed `inner_storage`.
     fn rebuild_accessor(&self, new_version: u64) -> Result<Accessor> {
-        let storage_guard = self.storage.inner_storage.lock().unwrap();
+        let storage_guard = self.storage.lock_inner_storage();
         let (operator, _) = storage_guard.create_operator(&self.original_path)?;
         drop(storage_guard);
 
@@ -141,7 +141,7 @@ impl Access for RefreshableAccessor {
     type Deleter = oio::Deleter;
 
     fn info(&self) -> Arc<AccessorInfo> {
-        let info_guard = self.storage.cached_info.lock().unwrap();
+        let info_guard = self.storage.lock_cached_info();
         if let Some(info) = info_guard.as_ref() {
             Arc::clone(info)
         } else {
@@ -386,13 +386,13 @@ mod tests {
             .expect("Failed to build storage");
 
         let info = {
-            let inner = storage.inner_storage.lock().unwrap();
+            let inner = storage.lock_inner_storage();
             let path = "memory:/dummy".to_string();
             let (op, _) = inner.create_operator(&path).unwrap();
             op.into_inner().info()
         };
 
-        *storage.cached_info.lock().unwrap() = Some(Arc::clone(&info));
+        *storage.lock_cached_info() = Some(Arc::clone(&info));
 
         let version = storage.credential_version();
         let failing_accessor: Accessor = Arc::new(FailingAccessor::new(error_kind, info));

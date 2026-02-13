@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use opendal::Operator;
 use opendal::raw::*;
@@ -41,7 +41,7 @@ pub struct RefreshableOpenDalStorage {
     base_props: HashMap<String, String>,
 
     /// Inner storage (built in new, rebuilt on credential refresh)
-    pub(crate) inner_storage: Mutex<OpenDalStorage>,
+    inner_storage: Mutex<OpenDalStorage>,
 
     /// Credential loader
     credentials_loader: Arc<dyn StorageCredentialsLoader>,
@@ -53,7 +53,7 @@ pub struct RefreshableOpenDalStorage {
     location: String,
 
     /// Cached AccessorInfo (created lazily from first operator)
-    pub(crate) cached_info: Mutex<Option<Arc<AccessorInfo>>>,
+    cached_info: Mutex<Option<Arc<AccessorInfo>>>,
 
     /// Monotonically increasing version number, incremented each time credentials
     /// are refreshed via do_refresh. Used by RefreshableAccessor instances to detect
@@ -115,7 +115,7 @@ impl RefreshableOpenDalStorage {
     /// Builds a `RefreshableAccessor` that wraps the inner storage operator and
     /// delegates all operations through credential refresh logic.
     pub fn refreshable_create_operator(self: &Arc<Self>, path: &str) -> Result<(Operator, String)> {
-        let storage_guard = self.inner_storage.lock().unwrap();
+        let storage_guard = self.lock_inner_storage();
         let path_string = path.to_string();
         let (operator, relative_path) = storage_guard.create_operator(&path_string)?;
         let relative_path = relative_path.to_string();
@@ -125,7 +125,7 @@ impl RefreshableOpenDalStorage {
 
         // Cache AccessorInfo if not already cached
         {
-            let mut info_guard = self.cached_info.lock().unwrap();
+            let mut info_guard = self.lock_cached_info();
             if info_guard.is_none() {
                 *info_guard = Some(accessor.info());
             }
@@ -147,7 +147,7 @@ impl RefreshableOpenDalStorage {
         let new_storage =
             OpenDalStorage::build_from_props(&self.scheme, full_props, &self.extensions)?;
 
-        *self.inner_storage.lock().unwrap() = new_storage;
+        *self.lock_inner_storage() = new_storage;
         self.credential_version.fetch_add(1, Ordering::Release);
 
         Ok(())
@@ -156,6 +156,16 @@ impl RefreshableOpenDalStorage {
     /// Returns the current credential version number.
     pub(crate) fn credential_version(&self) -> u64 {
         self.credential_version.load(Ordering::Acquire)
+    }
+
+    /// Lock and return the inner storage guard.
+    pub(crate) fn lock_inner_storage(&self) -> MutexGuard<'_, OpenDalStorage> {
+        self.inner_storage.lock().unwrap()
+    }
+
+    /// Lock and return the cached info guard.
+    pub(crate) fn lock_cached_info(&self) -> MutexGuard<'_, Option<Arc<AccessorInfo>>> {
+        self.cached_info.lock().unwrap()
     }
 
     /// Refresh credentials in response to a PermissionDenied error.
@@ -366,14 +376,14 @@ mod tests {
         let path = "memory:/test-file".to_string();
         {
             let (op, rel) = {
-                let inner = storage.inner_storage.lock().unwrap();
+                let inner = storage.lock_inner_storage();
                 inner.create_operator(&path).unwrap()
             };
             op.write(rel, bytes::Bytes::from("hello")).await.unwrap();
 
             // Verify the data is there
             let (op2, rel2) = {
-                let inner = storage.inner_storage.lock().unwrap();
+                let inner = storage.lock_inner_storage();
                 inner.create_operator(&path).unwrap()
             };
             let data = op2.read(rel2).await.unwrap().to_bytes();
@@ -385,7 +395,7 @@ mod tests {
 
         // The new inner storage is a fresh memory instance; old data should be gone
         let (op3, rel3) = {
-            let inner = storage.inner_storage.lock().unwrap();
+            let inner = storage.lock_inner_storage();
             inner.create_operator(&path).unwrap()
         };
         let exists = op3.exists(rel3).await.unwrap();
