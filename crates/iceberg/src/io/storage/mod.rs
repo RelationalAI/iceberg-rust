@@ -17,10 +17,10 @@
 
 //! Storage interfaces for Iceberg.
 
-mod config;
+pub mod config;
 mod local_fs;
 mod memory;
-mod opendal;
+pub mod opendal;
 
 use std::fmt::Debug;
 use std::sync::Arc;

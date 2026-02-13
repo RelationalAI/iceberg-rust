@@ -39,8 +39,8 @@ use opendal::{Operator, Scheme};
 pub use s3::CustomAwsCredentialLoader;
 use serde::{Deserialize, Serialize};
 
-use super::file_io::Extensions;
-use super::refreshable_storage::RefreshableOpenDalStorageBuilder;
+use crate::io::file_io::Extensions;
+use crate::io::refreshable_storage::RefreshableOpenDalStorageBuilder;
 use crate::io::{
     FileIOBuilder, FileMetadata, FileRead, FileWrite, InputFile, MetadataLocation, OutputFile,
     Storage, StorageConfig, StorageCredential, StorageCredentialsLoader, StorageFactory,
@@ -215,7 +215,7 @@ pub enum OpenDalStorage {
         /// The refreshable storage backend.
         /// `None` only after deserialization (cannot be reconstructed from serialized form).
         #[serde(skip)]
-        backend: Option<Arc<super::refreshable_storage::RefreshableOpenDalStorage>>,
+        backend: Option<Arc<crate::io::refreshable_storage::RefreshableOpenDalStorage>>,
     },
 }
 
