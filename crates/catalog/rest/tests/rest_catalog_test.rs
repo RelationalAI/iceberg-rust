@@ -601,7 +601,7 @@ async fn test_authenticator_persists_across_operations() {
 
     let count_after_create = *operation_count.lock().unwrap();
 
-    // List the namespace children (should use the same authenticator)
+    // List the namespace children (should reuse the cached token from the create operation)
     // We need to list children of "test_persist" to find "auth"
     let list_result = catalog_with_auth
         .list_namespaces(Some(&NamespaceIdent::from_strs(["test_persist"]).unwrap()))
@@ -616,13 +616,14 @@ async fn test_authenticator_persists_across_operations() {
 
     let count_after_list = *operation_count.lock().unwrap();
 
-    // Verify authenticator was used for both operations
-    assert!(
-        count_after_create > 0,
-        "Authenticator should be used for create"
+    // With lazy authentication, the token is fetched once on the first operation
+    // and then reused for subsequent operations without calling the authenticator again
+    assert_eq!(
+        count_after_create, 1,
+        "Authenticator should be called once for the create operation"
     );
-    assert!(
-        count_after_list > count_after_create,
-        "Authenticator should be used for list operation too"
+    assert_eq!(
+        count_after_list, 1,
+        "Authenticator should still have been called only once (token is cached and reused for list)"
     );
 }
