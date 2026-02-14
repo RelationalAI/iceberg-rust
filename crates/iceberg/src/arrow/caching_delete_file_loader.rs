@@ -601,7 +601,7 @@ mod tests {
 
     use super::*;
     use crate::arrow::delete_filter::tests::setup;
-    use crate::scan::FileScanTaskDeleteFile;
+    use crate::scan::{BaseFileScanTask, FileScanTaskDeleteFile};
     use crate::spec::{DataContentType, Schema};
 
     #[tokio::test]
@@ -927,19 +927,21 @@ mod tests {
         };
 
         let file_scan_task = FileScanTask {
-            start: 0,
-            length: 0,
-            record_count: None,
-            data_file_path: format!("{}/data-1.parquet", table_location.to_str().unwrap()),
-            data_file_format: DataFileFormat::Parquet,
-            schema: data_file_schema.clone(),
-            project_field_ids: vec![2, 3],
-            predicate: None,
+            base: BaseFileScanTask {
+                start: 0,
+                length: 0,
+                record_count: None,
+                data_file_path: format!("{}/data-1.parquet", table_location.to_str().unwrap()),
+                data_file_format: DataFileFormat::Parquet,
+                schema: data_file_schema.clone(),
+                project_field_ids: vec![2, 3],
+                predicate: None,
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            },
             deletes: vec![pos_del, eq_del],
-            partition: None,
-            partition_spec: None,
-            name_mapping: None,
-            case_sensitive: false,
         };
 
         // Load the deletes - should handle both types without error

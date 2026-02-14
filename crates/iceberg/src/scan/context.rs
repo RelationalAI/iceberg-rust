@@ -124,28 +124,29 @@ impl ManifestEntryContext {
             .await;
 
         Ok(FileScanTask {
-            start: 0,
-            length: self.manifest_entry.file_size_in_bytes(),
-            record_count: Some(self.manifest_entry.record_count()),
+            base: crate::scan::task::BaseFileScanTask {
+                start: 0,
+                length: self.manifest_entry.file_size_in_bytes(),
+                record_count: Some(self.manifest_entry.record_count()),
 
-            data_file_path: self.manifest_entry.file_path().to_string(),
-            data_file_format: self.manifest_entry.file_format(),
+                data_file_path: self.manifest_entry.file_path().to_string(),
+                data_file_format: self.manifest_entry.file_format(),
 
-            schema: self.snapshot_schema,
-            project_field_ids: self.field_ids.to_vec(),
-            predicate: self
-                .bound_predicates
-                .map(|x| x.as_ref().snapshot_bound_predicate.clone()),
+                schema: self.snapshot_schema,
+                project_field_ids: self.field_ids.to_vec(),
+                predicate: self
+                    .bound_predicates
+                    .map(|x| x.as_ref().snapshot_bound_predicate.clone()),
 
+                // Include partition data and spec from manifest entry
+                partition: Some(self.manifest_entry.data_file.partition.clone()),
+                // TODO: Pass actual PartitionSpec through context chain for native flow
+                partition_spec: None,
+                // TODO: Extract name_mapping from table metadata property "schema.name-mapping.default"
+                name_mapping: None,
+                case_sensitive: self.case_sensitive,
+            },
             deletes,
-
-            // Include partition data and spec from manifest entry
-            partition: Some(self.manifest_entry.data_file.partition.clone()),
-            // TODO: Pass actual PartitionSpec through context chain for native flow
-            partition_spec: None,
-            // TODO: Extract name_mapping from table metadata property "schema.name-mapping.default"
-            name_mapping: None,
-            case_sensitive: self.case_sensitive,
         })
     }
 }

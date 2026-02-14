@@ -22,7 +22,8 @@ use cache::*;
 mod context;
 use context::*;
 pub mod incremental;
-mod task;
+/// File scan task types used in table scans.
+pub mod task;
 
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ use arrow_array::RecordBatch;
 use futures::channel::mpsc::{Sender, channel};
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt, TryStreamExt};
-pub use task::*;
+pub use task::{BaseFileScanTask, *};
 
 use crate::arrow::ArrowReaderBuilder;
 use crate::delete_file_index::DeleteFileIndex;
@@ -679,7 +680,7 @@ pub mod tests {
     use crate::expr::{BoundPredicate, Reference};
     use crate::io::{FileIO, OutputFile};
     use crate::metadata_columns::{RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS};
-    use crate::scan::FileScanTask;
+    use crate::scan::{BaseFileScanTask, FileScanTask};
     use crate::spec::{
         DataContentType, DataFileBuilder, DataFileFormat, Datum, Literal, ManifestEntry,
         ManifestListWriter, ManifestStatus, ManifestWriterBuilder, NestedField, PartitionSpec,
@@ -1457,17 +1458,17 @@ pub mod tests {
 
         assert_eq!(tasks.len(), 2);
 
-        tasks.sort_by_key(|t| t.data_file_path.to_string());
+        tasks.sort_by_key(|t| t.data_file_path().to_string());
 
         // Check first task is added data file
         assert_eq!(
-            tasks[0].data_file_path,
+            tasks[0].data_file_path(),
             format!("{}/1.parquet", &fixture.table_location)
         );
 
         // Check second task is existing data file
         assert_eq!(
-            tasks[1].data_file_path,
+            tasks[1].data_file_path(),
             format!("{}/3.parquet", &fixture.table_location)
         );
     }
@@ -1943,12 +1944,12 @@ pub mod tests {
             let serialized = serde_json::to_string(&task).unwrap();
             let deserialized: FileScanTask = serde_json::from_str(&serialized).unwrap();
 
-            assert_eq!(task.data_file_path, deserialized.data_file_path);
-            assert_eq!(task.start, deserialized.start);
-            assert_eq!(task.length, deserialized.length);
-            assert_eq!(task.project_field_ids, deserialized.project_field_ids);
-            assert_eq!(task.predicate, deserialized.predicate);
-            assert_eq!(task.schema, deserialized.schema);
+            assert_eq!(task.data_file_path(), deserialized.data_file_path());
+            assert_eq!(task.base.start, deserialized.base.start);
+            assert_eq!(task.base.length, deserialized.base.length);
+            assert_eq!(task.project_field_ids(), deserialized.project_field_ids());
+            assert_eq!(task.predicate(), deserialized.predicate());
+            assert_eq!(task.schema(), deserialized.schema());
         };
 
         // without predicate
@@ -1963,37 +1964,41 @@ pub mod tests {
                 .unwrap(),
         );
         let task = FileScanTask {
-            data_file_path: "data_file_path".to_string(),
-            start: 0,
-            length: 100,
-            project_field_ids: vec![1, 2, 3],
-            predicate: None,
-            schema: schema.clone(),
-            record_count: Some(100),
-            data_file_format: DataFileFormat::Parquet,
+            base: BaseFileScanTask {
+                data_file_path: "data_file_path".to_string(),
+                start: 0,
+                length: 100,
+                project_field_ids: vec![1, 2, 3],
+                predicate: None,
+                schema: schema.clone(),
+                record_count: Some(100),
+                data_file_format: DataFileFormat::Parquet,
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            },
             deletes: vec![],
-            partition: None,
-            partition_spec: None,
-            name_mapping: None,
-            case_sensitive: false,
         };
         test_fn(task);
 
         // with predicate
         let task = FileScanTask {
-            data_file_path: "data_file_path".to_string(),
-            start: 0,
-            length: 100,
-            project_field_ids: vec![1, 2, 3],
-            predicate: Some(BoundPredicate::AlwaysTrue),
-            schema,
-            record_count: None,
-            data_file_format: DataFileFormat::Avro,
+            base: BaseFileScanTask {
+                data_file_path: "data_file_path".to_string(),
+                start: 0,
+                length: 100,
+                project_field_ids: vec![1, 2, 3],
+                predicate: Some(BoundPredicate::AlwaysTrue),
+                schema,
+                record_count: None,
+                data_file_format: DataFileFormat::Avro,
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            },
             deletes: vec![],
-            partition: None,
-            partition_spec: None,
-            name_mapping: None,
-            case_sensitive: false,
         };
         test_fn(task);
     }
