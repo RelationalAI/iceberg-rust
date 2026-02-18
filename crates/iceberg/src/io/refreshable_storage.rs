@@ -174,7 +174,7 @@ impl RefreshableOpenDalStorage {
         self.cached_info.lock().unwrap()
     }
 
-    /// Refresh credentials in response to a PermissionDenied error.
+    /// Try to refresh credentials after an operation failure.
     ///
     /// Uses double-checked locking with a version number:
     /// 1. If `credential_version > accessor_version`, someone already refreshed —
@@ -184,7 +184,7 @@ impl RefreshableOpenDalStorage {
     ///    already refreshed while we waited — return the current version.
     /// 4. Call the loader, then `do_refresh`.
     /// 5. Return the new version.
-    pub(crate) async fn refresh_on_permission_denied(&self, accessor_version: u64) -> Result<u64> {
+    pub(crate) async fn try_refresh_credentials(&self, accessor_version: u64) -> Result<u64> {
         // Fast path: someone already refreshed since this accessor was built
         let current = self.credential_version.load(Ordering::Acquire);
         if current > accessor_version {
