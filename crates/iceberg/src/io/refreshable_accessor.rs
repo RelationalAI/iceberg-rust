@@ -23,17 +23,17 @@ use opendal::raw::*;
 use super::refreshable_storage::RefreshableOpenDalStorage;
 use crate::Result;
 
-/// An OpenDAL accessor that wraps another accessor and retries on PermissionDenied
-/// after refreshing credentials.
+/// An OpenDAL accessor that wraps another accessor and retries after refreshing
+/// credentials when any operation fails.
 ///
 /// Each instance has its own inner accessor and shares credential state with
 /// other accessors via `Arc<RefreshableOpenDalStorage>`. Credentials are only
-/// refreshed when an operation fails with PermissionDenied, not proactively.
+/// refreshed when an operation fails, not proactively.
 ///
-/// Concurrency: if multiple accessors hit PermissionDenied simultaneously, only
-/// one will call the external credential loader (via double-checked locking on
-/// `RefreshableOpenDalStorage::refresh_on_permission_denied`). The others will
-/// detect the version bump and simply rebuild their accessor from the already-refreshed
+/// Concurrency: if multiple accessors hit errors simultaneously, only one will
+/// call the external credential loader (via double-checked locking on
+/// `RefreshableOpenDalStorage::try_refresh_credentials`). The others will detect
+/// the version bump and simply rebuild their accessor from the already-refreshed
 /// credentials.
 pub(crate) struct RefreshableAccessor {
     /// The current backend's accessor paired with the credential version it was built from.
@@ -81,14 +81,15 @@ impl RefreshableAccessor {
         Ok(new_accessor)
     }
 
-    /// Run an operation with automatic retry on PermissionDenied after credential refresh.
+    /// Run an operation with automatic retry after credential refresh on any error.
     ///
-    /// 1. Gets the current accessor (no refresh) and runs the operation.
-    /// 2. If it fails with PermissionDenied, calls `refresh_on_permission_denied`
-    ///    with the accessor's credential version.
+    /// 1. Gets the current accessor and runs the operation.
+    /// 2. If it fails (any error), calls `try_refresh_credentials` with the
+    ///    accessor's credential version.
     /// 3. If credentials were refreshed (by us or another concurrent accessor),
     ///    rebuilds our accessor and retries the operation once.
-    /// 4. Otherwise, returns the original error.
+    /// 4. If the retry also fails, returns an error that preserves both the
+    ///    original and retry error messages.
     async fn with_credential_retry<F, Fut, T>(&self, op: F) -> opendal::Result<T>
     where
         F: Fn(Accessor) -> Fut,
@@ -98,30 +99,44 @@ impl RefreshableAccessor {
         let result = op(accessor).await;
 
         match result {
-            Err(err) if err.kind() == opendal::ErrorKind::PermissionDenied => {
+            Err(original_err) => {
+                let original_display = original_err.to_string();
+                let original_kind = original_err.kind();
+
                 let new_version = self
                     .storage
-                    .refresh_on_permission_denied(version)
+                    .try_refresh_credentials(version)
                     .await
                     .map_err(|e| {
                         opendal::Error::new(
-                            opendal::ErrorKind::PermissionDenied,
+                            original_kind,
                             format!(
-                                "Operation failed with PermissionDenied and credential \
-                                 refresh also failed: {e}"
+                                "Operation failed and credential refresh also failed: \
+                                 {e}. Original error: {original_display}"
                             ),
                         )
-                        .set_source(err)
                     })?;
 
                 let new_accessor = self.rebuild_accessor(new_version).map_err(|e| {
                     opendal::Error::new(
                         opendal::ErrorKind::Unexpected,
-                        "Failed to rebuild accessor after credential refresh",
+                        format!(
+                            "Failed to rebuild accessor after credential refresh. \
+                             Original error: {original_display}"
+                        ),
                     )
                     .set_source(e)
                 })?;
-                op(new_accessor).await
+
+                op(new_accessor).await.map_err(|retry_err| {
+                    opendal::Error::new(
+                        retry_err.kind(),
+                        format!(
+                            "Retry after credential refresh also failed: {retry_err}. \
+                             Original error: {original_display}"
+                        ),
+                    )
+                })
             }
             other => other,
         }
@@ -208,10 +223,11 @@ impl Access for RefreshableAccessor {
 ///
 /// `with_credential_retry` works as follows:
 /// 1. Gets the current accessor (no refresh) and runs the operation.
-/// 2. On `PermissionDenied`, calls `refresh_on_permission_denied` with the
-///    accessor's credential version.
+/// 2. On any error, calls `try_refresh_credentials` with the accessor's
+///    credential version.
 /// 3. If credentials were refreshed, rebuilds the accessor and retries once.
-/// 4. Otherwise, returns the original error.
+/// 4. If the retry also fails, returns an error preserving both original and
+///    retry error messages.
 ///
 /// To test this, we inject a `FailingAccessor` (returns a configurable error on `stat`)
 /// as the initial inner accessor, while the shared storage's `inner_storage` is a real
@@ -422,11 +438,11 @@ mod tests {
     /// Flow:
     /// 1. `get_accessor` → no refresh → FailingAccessor used
     /// 2. `stat` → PermissionDenied
-    /// 3. `refresh_on_permission_denied` → loader call #1 → do_refresh
+    /// 3. `try_refresh_credentials` → loader call #1 → do_refresh
     /// 4. `rebuild_accessor` → memory accessor used
     /// 5. Memory backend `stat("nonexistent")` → NotFound (not PermissionDenied)
     #[tokio::test]
-    async fn test_retry_on_permission_denied_with_successful_refresh() {
+    async fn test_retry_after_credential_refresh() {
         let loader = Arc::new(SequenceLoader::new(vec![dummy_credential()]));
 
         let accessor = build_refreshable_storage_and_accessor(
@@ -451,36 +467,56 @@ mod tests {
         assert_eq!(loader.call_count(), 1);
     }
 
-    /// Only PermissionDenied should trigger credential retry. Other errors (network,
-    /// not-found, etc.) should not — retrying with fresh credentials wouldn't help.
+    /// Any error triggers credential retry. When both the original and retry
+    /// operations fail, the error message should preserve both.
     ///
     /// Flow:
-    /// 1. `get_accessor` → no refresh → FailingAccessor → NotFound
-    /// 2. `with_credential_retry` sees NotFound → no retry → returns error immediately
+    /// 1. `get_accessor` → FailingAccessor → Unexpected error
+    /// 2. `try_refresh_credentials` → loader call → do_refresh
+    /// 3. `rebuild_accessor` → memory accessor
+    /// 4. Memory backend `stat("nonexistent")` → NotFound
+    /// 5. Final error includes both "Unexpected" original and "NotFound" retry info
     #[tokio::test]
-    async fn test_non_permission_denied_error_is_not_retried() {
-        let loader = Arc::new(SequenceLoader::new(vec![]));
+    async fn test_any_error_triggers_retry_and_preserves_both_errors() {
+        let loader = Arc::new(SequenceLoader::new(vec![dummy_credential()]));
 
         let accessor = build_refreshable_storage_and_accessor(
             Arc::clone(&loader) as _,
-            opendal::ErrorKind::NotFound,
+            opendal::ErrorKind::Unexpected,
         );
 
         let result = accessor.stat("nonexistent", OpStat::new()).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), opendal::ErrorKind::NotFound);
+        // The retry error kind comes from the memory backend (NotFound)
+        assert_eq!(
+            err.kind(),
+            opendal::ErrorKind::NotFound,
+            "Expected NotFound from retry, got {:?}",
+            err.kind()
+        );
 
-        // No loader calls at all — only PermissionDenied triggers refresh
-        assert_eq!(loader.call_count(), 0);
+        // Error message should mention both the retry failure and original error
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Original error"),
+            "Error should reference original error: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("Unexpected"),
+            "Error should contain original Unexpected error kind: {err_msg}"
+        );
+
+        // 1 loader call — retry happened
+        assert_eq!(loader.call_count(), 1);
     }
 
-    /// When multiple concurrent callers hit PermissionDenied, only one should
-    /// call the external credential loader. The others should detect the version
-    /// bump and skip the loader call.
+    /// When multiple concurrent callers trigger credential refresh, only one
+    /// should call the external credential loader. The others should detect the
+    /// version bump and skip the loader call.
     #[tokio::test]
-    async fn test_concurrent_permission_denied_calls_loader_only_once() {
+    async fn test_concurrent_refresh_calls_loader_only_once() {
         let loader = Arc::new(SequenceLoader::new(vec![dummy_credential()]));
 
         let storage = RefreshableOpenDalStorageBuilder::new()
@@ -496,12 +532,12 @@ mod tests {
 
         let version = storage.credential_version();
 
-        // Spawn 10 concurrent refresh_on_permission_denied calls with the same version
+        // Spawn 10 concurrent try_refresh_credentials calls with the same version
         let mut handles = Vec::new();
         for _ in 0..10 {
             let storage = Arc::clone(&storage);
             handles.push(tokio::spawn(async move {
-                storage.refresh_on_permission_denied(version).await
+                storage.try_refresh_credentials(version).await
             }));
         }
 
