@@ -174,7 +174,7 @@
 <a href=#174 id=174 data-nosnippet>174</a>        <span class="self">self</span>.cached_info.lock().unwrap()
 <a href=#175 id=175 data-nosnippet>175</a>    }
 <a href=#176 id=176 data-nosnippet>176</a>
-<a href=#177 id=177 data-nosnippet>177</a>    <span class="doccomment">/// Refresh credentials in response to a PermissionDenied error.
+<a href=#177 id=177 data-nosnippet>177</a>    <span class="doccomment">/// Try to refresh credentials after an operation failure.
 <a href=#178 id=178 data-nosnippet>178</a>    ///
 <a href=#179 id=179 data-nosnippet>179</a>    /// Uses double-checked locking with a version number:
 <a href=#180 id=180 data-nosnippet>180</a>    /// 1. If `credential_version &gt; accessor_version`, someone already refreshed —
@@ -184,7 +184,7 @@
 <a href=#184 id=184 data-nosnippet>184</a>    ///    already refreshed while we waited — return the current version.
 <a href=#185 id=185 data-nosnippet>185</a>    /// 4. Call the loader, then `do_refresh`.
 <a href=#186 id=186 data-nosnippet>186</a>    /// 5. Return the new version.
-<a href=#187 id=187 data-nosnippet>187</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>refresh_on_permission_denied(<span class="kw-2">&amp;</span><span class="self">self</span>, accessor_version: u64) -&gt; <span class="prelude-ty">Result</span>&lt;u64&gt; {
+<a href=#187 id=187 data-nosnippet>187</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>try_refresh_credentials(<span class="kw-2">&amp;</span><span class="self">self</span>, accessor_version: u64) -&gt; <span class="prelude-ty">Result</span>&lt;u64&gt; {
 <a href=#188 id=188 data-nosnippet>188</a>        <span class="comment">// Fast path: someone already refreshed since this accessor was built
 <a href=#189 id=189 data-nosnippet>189</a>        </span><span class="kw">let </span>current = <span class="self">self</span>.credential_version.load(Ordering::Acquire);
 <a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">if </span>current &gt; accessor_version {
