@@ -732,7 +732,7 @@ impl RestCatalog {
             }
         };
 
-        let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
+        let _metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
             ErrorKind::DataInvalid,
             "Metadata location missing in `create_table` response!",
         ))?;
