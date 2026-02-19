@@ -520,6 +520,71 @@ impl RestCatalog {
         self.context().await?.client.regenerate_token().await
     }
 
+    /// Helper method to resolve storage credentials from catalog response or custom loader.
+    ///
+    /// This method implements the credential resolution logic:
+    /// 1. If catalog vended credentials via storage_credentials field, find the best match by prefix
+    /// 2. Otherwise, use custom storage_credentials_loader if configured
+    /// 3. Merge matched credentials into the config HashMap
+    ///
+    /// Returns the matched/loaded credential (if any) and updates the config in-place.
+    async fn resolve_storage_credentials(
+        &self,
+        table_ident: &TableIdent,
+        metadata_location: Option<&String>,
+        storage_credentials: Option<Vec<StorageCredential>>,
+        config: &mut HashMap<String, String>,
+    ) -> Result<Option<StorageCredential>> {
+        // Per the OpenAPI spec: "Clients must first check whether the respective credentials
+        // exist in the storage-credentials field before checking the config for credentials."
+        // When vended-credentials header is set, credentials are returned in storage_credentials field.
+        let matched_credential = if let Some(storage_credentials) = storage_credentials {
+            // Find the credential with the longest prefix that matches the metadata_location
+            let mut best_match: Option<&StorageCredential> = None;
+            let mut longest_prefix_len = 0;
+
+            if let Some(metadata_location) = metadata_location {
+                for cred in &storage_credentials {
+                    if metadata_location.starts_with(&cred.prefix)
+                        && cred.prefix.len() > longest_prefix_len
+                    {
+                        longest_prefix_len = cred.prefix.len();
+                        best_match = Some(cred);
+                    }
+                }
+            }
+
+            // Extend config with the best match
+            if let Some(cred) = best_match {
+                config.extend(cred.config.clone());
+            }
+
+            best_match.cloned()
+        } else {
+            None
+        };
+
+        // Use custom storage credential loader only if no credentials were vended by the catalog.
+        let final_credential = if matched_credential.is_some() {
+            matched_credential
+        } else if let Some(storage_credentials_loader) =
+            &self.user_config.storage_credentials_loader
+        {
+            let credential = storage_credentials_loader
+                .load_credentials(
+                    table_ident,
+                    metadata_location.map(|s| s.as_str()).unwrap_or(""),
+                )
+                .await?;
+            config.extend(credential.config.clone());
+            Some(credential)
+        } else {
+            None
+        };
+
+        Ok(final_credential)
+    }
+
     /// The actual logic for loading table, that supports loading vended credentials if requested.
     async fn load_table_internal(
         &self,
@@ -570,52 +635,14 @@ impl RestCatalog {
             .chain(self.user_config.props.clone())
             .collect();
 
-        // Per the OpenAPI spec: "Clients must first check whether the respective credentials
-        // exist in the storage-credentials field before checking the config for credentials."
-        // When vended-credentials header is set, credentials are returned in storage_credentials field.
-        let matched_credential = if let Some(storage_credentials) = response.storage_credentials {
-            // Find the credential with the longest prefix that matches the metadata_location
-            let mut best_match: Option<&StorageCredential> = None;
-            let mut longest_prefix_len = 0;
-
-            if let Some(ref metadata_location) = response.metadata_location {
-                for cred in &storage_credentials {
-                    if metadata_location.starts_with(&cred.prefix)
-                        && cred.prefix.len() > longest_prefix_len
-                    {
-                        longest_prefix_len = cred.prefix.len();
-                        best_match = Some(cred);
-                    }
-                }
-            }
-
-            // Extend config with the best match
-            if let Some(cred) = best_match {
-                config.extend(cred.config.clone());
-            }
-
-            best_match.cloned()
-        } else {
-            None
-        };
-
-        // Use custom storage credential loader only if no credentials were vended by the catalog.
-        let final_credential = if matched_credential.is_some() {
-            matched_credential
-        } else if let Some(storage_credentials_loader) =
-            &self.user_config.storage_credentials_loader
-        {
-            let credential = storage_credentials_loader
-                .load_credentials(
-                    table_ident,
-                    response.metadata_location.as_deref().unwrap_or(""),
-                )
-                .await?;
-            config.extend(credential.config.clone());
-            Some(credential)
-        } else {
-            None
-        };
+        let final_credential = self
+            .resolve_storage_credentials(
+                table_ident,
+                response.metadata_location.as_ref(),
+                response.storage_credentials,
+                &mut config,
+            )
+            .await?;
 
         let file_io = self
             .load_file_io(
@@ -672,6 +699,122 @@ impl RestCatalog {
     /// FileIO configuration.
     pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
         self.load_table_internal(table_ident, true).await
+    }
+
+    /// Internal method to create a table with optional credential vending.
+    async fn create_table_internal(
+        &self,
+        namespace: &NamespaceIdent,
+        creation: TableCreation,
+        load_credentials: bool,
+    ) -> Result<Table> {
+        let context = self.context().await?;
+
+        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
+
+        let mut request_builder = context
+            .client
+            .request(Method::POST, context.config.tables_endpoint(namespace))
+            .json(&CreateTableRequest {
+                name: creation.name,
+                location: creation.location,
+                schema: creation.schema,
+                partition_spec: creation.partition_spec,
+                write_order: creation.sort_order,
+                stage_create: Some(false),
+                properties: creation.properties,
+            });
+
+        if load_credentials {
+            request_builder =
+                request_builder.header("X-Iceberg-Access-Delegation", "vended-credentials");
+        }
+
+        let request = request_builder.build()?;
+
+        let http_response = context.client.query_catalog(request).await?;
+
+        let response = match http_response.status() {
+            StatusCode::OK => {
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
+            }
+            StatusCode::NOT_FOUND => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "Tried to create a table under a namespace that does not exist",
+                ));
+            }
+            StatusCode::CONFLICT => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "The table already exists",
+                ));
+            }
+            _ => {
+                return Err(deserialize_unexpected_catalog_error(
+                    http_response,
+                    context.client.disable_header_redaction(),
+                )
+                .await);
+            }
+        };
+
+        let _metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
+            ErrorKind::DataInvalid,
+            "Metadata location missing in `create_table` response!",
+        ))?;
+
+        // Build config with proper precedence, with each next config overriding previous one:
+        // 1. response.config (server defaults)
+        // 2. user_config.props (user configuration)
+        // 3. storage_credentials (vended credentials - highest priority)
+        let mut config: HashMap<String, String> = response
+            .config
+            .into_iter()
+            .chain(self.user_config.props.clone())
+            .collect();
+
+        let final_credential = self
+            .resolve_storage_credentials(
+                &table_ident,
+                response.metadata_location.as_ref(),
+                response.storage_credentials,
+                &mut config,
+            )
+            .await?;
+
+        let file_io = self
+            .load_file_io(
+                response.metadata_location.as_deref(),
+                Some(config),
+                final_credential,
+                Some(&table_ident),
+            )
+            .await?;
+
+        let table_builder = Table::builder()
+            .identifier(table_ident.clone())
+            .file_io(file_io)
+            .metadata(response.metadata);
+
+        if let Some(metadata_location) = response.metadata_location {
+            table_builder.metadata_location(metadata_location).build()
+        } else {
+            table_builder.build()
+        }
+    }
+
+    /// Create a table with vended credentials from the catalog.
+    ///
+    /// This method creates the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn create_table_with_credentials(
+        &self,
+        namespace: &NamespaceIdent,
+        creation: TableCreation,
+    ) -> Result<Table> {
+        self.create_table_internal(namespace, creation, true).await
     }
 }
 
@@ -911,77 +1054,7 @@ impl Catalog for RestCatalog {
         namespace: &NamespaceIdent,
         creation: TableCreation,
     ) -> Result<Table> {
-        let context = self.context().await?;
-
-        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
-
-        let request = context
-            .client
-            .request(Method::POST, context.config.tables_endpoint(namespace))
-            .json(&CreateTableRequest {
-                name: creation.name,
-                location: creation.location,
-                schema: creation.schema,
-                partition_spec: creation.partition_spec,
-                write_order: creation.sort_order,
-                stage_create: Some(false),
-                properties: creation.properties,
-            })
-            .build()?;
-
-        let http_response = context.client.query_catalog(request).await?;
-
-        let response = match http_response.status() {
-            StatusCode::OK => {
-                deserialize_catalog_response::<LoadTableResult>(http_response).await?
-            }
-            StatusCode::NOT_FOUND => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "Tried to create a table under a namespace that does not exist",
-                ));
-            }
-            StatusCode::CONFLICT => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "The table already exists",
-                ));
-            }
-            _ => {
-                return Err(deserialize_unexpected_catalog_error(
-                    http_response,
-                    context.client.disable_header_redaction(),
-                )
-                .await);
-            }
-        };
-
-        let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
-            ErrorKind::DataInvalid,
-            "Metadata location missing in `create_table` response!",
-        ))?;
-
-        let config = response
-            .config
-            .into_iter()
-            .chain(self.user_config.props.clone())
-            .collect();
-
-        // TODO: Support vended credentials here.
-        let file_io = self
-            .load_file_io(Some(metadata_location), Some(config), None, None)
-            .await?;
-
-        let table_builder = Table::builder()
-            .identifier(table_ident.clone())
-            .file_io(file_io)
-            .metadata(response.metadata);
-
-        if let Some(metadata_location) = response.metadata_location {
-            table_builder.metadata_location(metadata_location).build()
-        } else {
-            table_builder.build()
-        }
+        self.create_table_internal(namespace, creation, false).await
     }
 
     /// Load table from the catalog.
