@@ -156,8 +156,13 @@ impl RefreshableOpenDalStorage {
         let new_storage =
             OpenDalStorage::build_from_props(&self.scheme, full_props, &self.extensions)?;
 
-        *self.lock_inner_storage() = new_storage;
+        // Update storage and bump version atomically (while holding the lock)
+        // so that refreshable_create_operator always sees a consistent
+        // (storage, version) pair.
+        let mut guard = self.lock_inner_storage();
+        *guard = new_storage;
         self.credential_version.fetch_add(1, Ordering::Release);
+        drop(guard);
 
         Ok(())
     }
