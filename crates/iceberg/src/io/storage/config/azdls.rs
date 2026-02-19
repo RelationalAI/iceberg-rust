@@ -92,39 +92,7 @@ impl TryFrom<&StorageConfig> for AzdlsConfig {
     type Error = crate::Error;
 
     fn try_from(config: &StorageConfig) -> Result<Self> {
-        let props = config.props();
-
-        let mut cfg = AzdlsConfig::default();
-
-        if let Some(connection_string) = props.get(ADLS_CONNECTION_STRING) {
-            cfg.connection_string = Some(connection_string.clone());
-        }
-        if let Some(account_name) = props.get(ADLS_ACCOUNT_NAME) {
-            cfg.account_name = Some(account_name.clone());
-        }
-        if let Some(account_key) = props.get(ADLS_ACCOUNT_KEY) {
-            cfg.account_key = Some(account_key.clone());
-        }
-        if let Some(sas_token) = props.get(ADLS_SAS_TOKEN) {
-            cfg.sas_token = Some(sas_token.clone());
-        }
-        if let Some(tenant_id) = props.get(ADLS_TENANT_ID) {
-            cfg.tenant_id = Some(tenant_id.clone());
-        }
-        if let Some(client_id) = props.get(ADLS_CLIENT_ID) {
-            cfg.client_id = Some(client_id.clone());
-        }
-        if let Some(client_secret) = props.get(ADLS_CLIENT_SECRET) {
-            cfg.client_secret = Some(client_secret.clone());
-        }
-        if let Some(authority_host) = props.get(ADLS_AUTHORITY_HOST) {
-            cfg.authority_host = Some(authority_host.clone());
-        }
-        if let Some(endpoint) = props.get(ADLS_ENDPOINT) {
-            cfg.endpoint = Some(endpoint.clone());
-        }
-
-        Ok(cfg)
+        crate::io::storage::opendal::azdls::azdls_config_parse(config.props().clone())
     }
 }
 
