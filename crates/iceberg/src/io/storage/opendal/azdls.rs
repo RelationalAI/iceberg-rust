@@ -367,7 +367,7 @@ mod tests {
                 "account name and SAS token",
                 HashMap::from([
                     (super::ADLS_ACCOUNT_NAME.to_string(), "test".to_string()),
-                    (super::ADLS_SAS_TOKEN.to_string(), "token".to_string()),
+                    (ADLS_SAS_TOKEN.to_string(), "token".to_string()),
                 ]),
                 Some(AzdlsConfig {
                     account_name: Some("test".to_string()),
@@ -435,7 +435,7 @@ mod tests {
                 "SAS token without account name picks shortest",
                 HashMap::from([
                     (
-                        super::ADLS_SAS_TOKEN.to_string(),
+                        ADLS_SAS_TOKEN.to_string(),
                         "token-generic".to_string(),
                     ),
                     (
