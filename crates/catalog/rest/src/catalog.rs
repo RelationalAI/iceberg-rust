@@ -520,6 +520,71 @@ impl RestCatalog {
         self.context().await?.client.regenerate_token().await
     }
 
+    /// Helper method to resolve storage credentials from catalog response or custom loader.
+    ///
+    /// This method implements the credential resolution logic:
+    /// 1. If catalog vended credentials via storage_credentials field, find the best match by prefix
+    /// 2. Otherwise, use custom storage_credentials_loader if configured
+    /// 3. Merge matched credentials into the config HashMap
+    ///
+    /// Returns the matched/loaded credential (if any) and updates the config in-place.
+    async fn resolve_storage_credentials(
+        &self,
+        table_ident: &TableIdent,
+        metadata_location: Option<&String>,
+        storage_credentials: Option<Vec<StorageCredential>>,
+        config: &mut HashMap<String, String>,
+    ) -> Result<Option<StorageCredential>> {
+        // Per the OpenAPI spec: "Clients must first check whether the respective credentials
+        // exist in the storage-credentials field before checking the config for credentials."
+        // When vended-credentials header is set, credentials are returned in storage_credentials field.
+        let matched_credential = if let Some(storage_credentials) = storage_credentials {
+            // Find the credential with the longest prefix that matches the metadata_location
+            let mut best_match: Option<&StorageCredential> = None;
+            let mut longest_prefix_len = 0;
+
+            if let Some(ref metadata_location) = metadata_location {
+                for cred in &storage_credentials {
+                    if metadata_location.starts_with(&cred.prefix)
+                        && cred.prefix.len() > longest_prefix_len
+                    {
+                        longest_prefix_len = cred.prefix.len();
+                        best_match = Some(cred);
+                    }
+                }
+            }
+
+            // Extend config with the best match
+            if let Some(cred) = best_match {
+                config.extend(cred.config.clone());
+            }
+
+            best_match.cloned()
+        } else {
+            None
+        };
+
+        // Use custom storage credential loader only if no credentials were vended by the catalog.
+        let final_credential = if matched_credential.is_some() {
+            matched_credential
+        } else if let Some(storage_credentials_loader) =
+            &self.user_config.storage_credentials_loader
+        {
+            let credential = storage_credentials_loader
+                .load_credentials(
+                    table_ident,
+                    metadata_location.map(|s| s.as_str()).unwrap_or(""),
+                )
+                .await?;
+            config.extend(credential.config.clone());
+            Some(credential)
+        } else {
+            None
+        };
+
+        Ok(final_credential)
+    }
+
     /// The actual logic for loading table, that supports loading vended credentials if requested.
     async fn load_table_internal(
         &self,
@@ -570,52 +635,14 @@ impl RestCatalog {
             .chain(self.user_config.props.clone())
             .collect();
 
-        // Per the OpenAPI spec: "Clients must first check whether the respective credentials
-        // exist in the storage-credentials field before checking the config for credentials."
-        // When vended-credentials header is set, credentials are returned in storage_credentials field.
-        let matched_credential = if let Some(storage_credentials) = response.storage_credentials {
-            // Find the credential with the longest prefix that matches the metadata_location
-            let mut best_match: Option<&StorageCredential> = None;
-            let mut longest_prefix_len = 0;
-
-            if let Some(ref metadata_location) = response.metadata_location {
-                for cred in &storage_credentials {
-                    if metadata_location.starts_with(&cred.prefix)
-                        && cred.prefix.len() > longest_prefix_len
-                    {
-                        longest_prefix_len = cred.prefix.len();
-                        best_match = Some(cred);
-                    }
-                }
-            }
-
-            // Extend config with the best match
-            if let Some(cred) = best_match {
-                config.extend(cred.config.clone());
-            }
-
-            best_match.cloned()
-        } else {
-            None
-        };
-
-        // Use custom storage credential loader only if no credentials were vended by the catalog.
-        let final_credential = if matched_credential.is_some() {
-            matched_credential
-        } else if let Some(storage_credentials_loader) =
-            &self.user_config.storage_credentials_loader
-        {
-            let credential = storage_credentials_loader
-                .load_credentials(
-                    table_ident,
-                    response.metadata_location.as_deref().unwrap_or(""),
-                )
-                .await?;
-            config.extend(credential.config.clone());
-            Some(credential)
-        } else {
-            None
-        };
+        let final_credential = self
+            .resolve_storage_credentials(
+                table_ident,
+                response.metadata_location.as_ref(),
+                response.storage_credentials,
+                &mut config,
+            )
+            .await?;
 
         let file_io = self
             .load_file_io(
@@ -747,52 +774,14 @@ impl RestCatalog {
             .chain(self.user_config.props.clone())
             .collect();
 
-        // Per the OpenAPI spec: "Clients must first check whether the respective credentials
-        // exist in the storage-credentials field before checking the config for credentials."
-        // When vended-credentials header is set, credentials are returned in storage_credentials field.
-        let matched_credential = if let Some(storage_credentials) = response.storage_credentials {
-            // Find the credential with the longest prefix that matches the metadata_location
-            let mut best_match: Option<&StorageCredential> = None;
-            let mut longest_prefix_len = 0;
-
-            if let Some(ref metadata_location) = response.metadata_location {
-                for cred in &storage_credentials {
-                    if metadata_location.starts_with(&cred.prefix)
-                        && cred.prefix.len() > longest_prefix_len
-                    {
-                        longest_prefix_len = cred.prefix.len();
-                        best_match = Some(cred);
-                    }
-                }
-            }
-
-            // Extend config with the best match
-            if let Some(cred) = best_match {
-                config.extend(cred.config.clone());
-            }
-
-            best_match.cloned()
-        } else {
-            None
-        };
-
-        // Use custom storage credential loader only if no credentials were vended by the catalog.
-        let final_credential = if matched_credential.is_some() {
-            matched_credential
-        } else if let Some(storage_credentials_loader) =
-            &self.user_config.storage_credentials_loader
-        {
-            let credential = storage_credentials_loader
-                .load_credentials(
-                    &table_ident,
-                    response.metadata_location.as_deref().unwrap_or(""),
-                )
-                .await?;
-            config.extend(credential.config.clone());
-            Some(credential)
-        } else {
-            None
-        };
+        let final_credential = self
+            .resolve_storage_credentials(
+                &table_ident,
+                response.metadata_location.as_ref(),
+                response.storage_credentials,
+                &mut config,
+            )
+            .await?;
 
         let file_io = self
             .load_file_io(
