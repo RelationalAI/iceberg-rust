@@ -125,6 +125,11 @@ impl RefreshableOpenDalStorage {
         let path_string = path.to_string();
         let (operator, relative_path) = storage_guard.create_operator(&path_string)?;
         let relative_path = relative_path.to_string();
+        // Read version while still holding the lock so the accessor and version
+        // are guaranteed to be consistent. Otherwise a concurrent do_refresh
+        // could bump the version between dropping the lock and reading it,
+        // causing the accessor to appear up-to-date when it's actually stale.
+        let version = self.credential_version();
         drop(storage_guard);
 
         let accessor = operator.into_inner();
@@ -136,8 +141,6 @@ impl RefreshableOpenDalStorage {
                 *info_guard = Some(accessor.info());
             }
         }
-
-        let version = self.credential_version();
         let refreshable_accessor =
             RefreshableAccessor::new(accessor, version, path.to_string(), Arc::clone(self));
 
@@ -153,8 +156,13 @@ impl RefreshableOpenDalStorage {
         let new_storage =
             OpenDalStorage::build_from_props(&self.scheme, full_props, &self.extensions)?;
 
-        *self.lock_inner_storage() = new_storage;
+        // Update storage and bump version atomically (while holding the lock)
+        // so that refreshable_create_operator always sees a consistent
+        // (storage, version) pair.
+        let mut guard = self.lock_inner_storage();
+        *guard = new_storage;
         self.credential_version.fetch_add(1, Ordering::Release);
+        drop(guard);
 
         Ok(())
     }
