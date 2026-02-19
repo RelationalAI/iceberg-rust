@@ -120,6 +120,9 @@ impl TryFrom<&StorageConfig> for AzdlsConfig {
         if let Some(authority_host) = props.get(ADLS_AUTHORITY_HOST) {
             cfg.authority_host = Some(authority_host.clone());
         }
+        if let Some(endpoint) = props.get(ADLS_ENDPOINT) {
+            cfg.endpoint = Some(endpoint.clone());
+        }
 
         Ok(cfg)
     }
@@ -178,5 +181,22 @@ mod tests {
         assert_eq!(azdls_config.tenant_id.as_deref(), Some("my-tenant"));
         assert_eq!(azdls_config.client_id.as_deref(), Some("my-client"));
         assert_eq!(azdls_config.client_secret.as_deref(), Some("my-secret"));
+    }
+
+    #[test]
+    fn test_azdls_config_with_endpoint() {
+        let storage_config = StorageConfig::new()
+            .with_prop(ADLS_ACCOUNT_NAME, "myaccount")
+            .with_prop(ADLS_ACCOUNT_KEY, "my-account-key")
+            .with_prop(ADLS_ENDPOINT, "https://myaccount.dfs.core.windows.net");
+
+        let azdls_config = AzdlsConfig::try_from(&storage_config).unwrap();
+
+        assert_eq!(azdls_config.account_name.as_deref(), Some("myaccount"));
+        assert_eq!(azdls_config.account_key.as_deref(), Some("my-account-key"));
+        assert_eq!(
+            azdls_config.endpoint.as_deref(),
+            Some("https://myaccount.dfs.core.windows.net")
+        );
     }
 }
