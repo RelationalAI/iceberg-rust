@@ -543,7 +543,7 @@ impl RestCatalog {
             let mut best_match: Option<&StorageCredential> = None;
             let mut longest_prefix_len = 0;
 
-            if let Some(ref metadata_location) = metadata_location {
+            if let Some(metadata_location) = metadata_location {
                 for cred in &storage_credentials {
                     if metadata_location.starts_with(&cred.prefix)
                         && cred.prefix.len() > longest_prefix_len
