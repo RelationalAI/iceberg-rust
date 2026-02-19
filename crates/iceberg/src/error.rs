@@ -336,7 +336,27 @@ macro_rules! define_from_err {
     ($source: path, $error_kind: path, $msg: expr) => {
         impl std::convert::From<$source> for crate::error::Error {
             fn from(v: $source) -> Self {
-                Self::new($error_kind, $msg).with_source(v)
+                // Some errors (e.g. reqwest) don't include their .source()
+                // in Display, so details like DNS/TLS/timeout errors would
+                // be swallowed. Walk the full source chain and collect any
+                // sources whose message isn't already visible in the
+                // top-level Display output.
+                let display = v.to_string();
+                let mut hidden = Vec::new();
+                let mut current: &dyn std::error::Error = &v;
+                while let Some(s) = current.source() {
+                    let s_msg = s.to_string();
+                    if !display.contains(&s_msg) {
+                        hidden.push(s_msg);
+                    }
+                    current = s;
+                }
+                let msg = if hidden.is_empty() {
+                    String::from($msg)
+                } else {
+                    format!("{} (hidden sources: {})", $msg, hidden.join(": "))
+                };
+                Self::new($error_kind, msg).with_source(v)
             }
         }
     };
