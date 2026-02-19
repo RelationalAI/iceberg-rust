@@ -88,11 +88,86 @@ pub struct AzdlsConfig {
     pub filesystem: String,
 }
 
+/// Finds the appropriate SAS token from properties based on account name.
+///
+/// This is a shared utility function used by both the config parsing and OpenDAL integration.
+///
+/// Strategy:
+/// 1. If account name is known, search for keys matching `adls.sas-token.<account_name>` prefix
+/// 2. If not found, fall back to searching for keys matching `adls.sas-token` prefix
+/// 3. Return the shortest matching key (least specific)
+/// 4. Trim leading '?' from the token if present
+pub(crate) fn find_sas_token(
+    properties: &std::collections::HashMap<String, String>,
+    account_name: Option<&str>,
+) -> Option<String> {
+    // Helper function to search for token with a given prefix
+    let find_with_prefix = |prefix: &str| {
+        properties
+            .iter()
+            .filter(|(key, _)| key.as_str() == prefix || key.starts_with(&format!("{prefix}.")))
+            .min_by_key(|(key, _)| key.len())
+            .map(|(_, value)| value.strip_prefix('?').unwrap_or(value).to_string())
+    };
+
+    // Try account-specific prefix first if account name is known, then fall back to base
+    if let Some(account) = account_name {
+        let account_prefix = format!("{ADLS_SAS_TOKEN}.{account}");
+        if let Some(token) = find_with_prefix(&account_prefix) {
+            return Some(token);
+        }
+    }
+
+    // Fall back to base prefix (adls.sas-token)
+    find_with_prefix(ADLS_SAS_TOKEN)
+}
+
 impl TryFrom<&StorageConfig> for AzdlsConfig {
     type Error = crate::Error;
 
     fn try_from(config: &StorageConfig) -> Result<Self> {
-        crate::io::storage::opendal::azdls::azdls_config_parse(config.props().clone())
+        let props = config.props();
+
+        let mut cfg = AzdlsConfig::default();
+
+        // Connection string - currently storing it, though OpenDAL doesn't support it yet
+        if let Some(connection_string) = props.get(ADLS_CONNECTION_STRING) {
+            cfg.connection_string = Some(connection_string.clone());
+        }
+
+        // Endpoint - parse early as it may be needed
+        if let Some(endpoint) = props.get(ADLS_ENDPOINT) {
+            cfg.endpoint = Some(endpoint.clone());
+        }
+
+        // Account name - parse early as it's needed for SAS token lookup
+        if let Some(account_name) = props.get(ADLS_ACCOUNT_NAME) {
+            cfg.account_name = Some(account_name.clone());
+        }
+
+        if let Some(account_key) = props.get(ADLS_ACCOUNT_KEY) {
+            cfg.account_key = Some(account_key.clone());
+        }
+
+        // Use sophisticated SAS token lookup that supports account-specific tokens
+        if let Some(sas_token) = find_sas_token(props, cfg.account_name.as_deref()) {
+            cfg.sas_token = Some(sas_token);
+        }
+
+        if let Some(tenant_id) = props.get(ADLS_TENANT_ID) {
+            cfg.tenant_id = Some(tenant_id.clone());
+        }
+        if let Some(client_id) = props.get(ADLS_CLIENT_ID) {
+            cfg.client_id = Some(client_id.clone());
+        }
+        if let Some(client_secret) = props.get(ADLS_CLIENT_SECRET) {
+            cfg.client_secret = Some(client_secret.clone());
+        }
+        if let Some(authority_host) = props.get(ADLS_AUTHORITY_HOST) {
+            cfg.authority_host = Some(authority_host.clone());
+        }
+
+        Ok(cfg)
     }
 }
 
@@ -165,6 +240,51 @@ mod tests {
         assert_eq!(
             azdls_config.endpoint.as_deref(),
             Some("https://myaccount.dfs.core.windows.net")
+        );
+    }
+
+    #[test]
+    fn test_azdls_config_with_account_specific_sas_token() {
+        let storage_config = StorageConfig::new()
+            .with_prop(ADLS_ACCOUNT_NAME, "myaccount")
+            .with_prop("adls.sas-token.myaccount", "?account-specific-token")
+            .with_prop(ADLS_SAS_TOKEN, "generic-token");
+
+        let azdls_config = AzdlsConfig::try_from(&storage_config).unwrap();
+
+        assert_eq!(azdls_config.account_name.as_deref(), Some("myaccount"));
+        // Should prefer account-specific token and strip leading '?'
+        assert_eq!(
+            azdls_config.sas_token.as_deref(),
+            Some("account-specific-token")
+        );
+    }
+
+    #[test]
+    fn test_azdls_config_with_generic_sas_token() {
+        let storage_config = StorageConfig::new()
+            .with_prop(ADLS_ACCOUNT_NAME, "myaccount")
+            .with_prop(ADLS_SAS_TOKEN, "?generic-token");
+
+        let azdls_config = AzdlsConfig::try_from(&storage_config).unwrap();
+
+        assert_eq!(azdls_config.account_name.as_deref(), Some("myaccount"));
+        // Should use generic token and strip leading '?'
+        assert_eq!(azdls_config.sas_token.as_deref(), Some("generic-token"));
+    }
+
+    #[test]
+    fn test_azdls_config_sas_token_without_question_mark() {
+        let storage_config = StorageConfig::new()
+            .with_prop(ADLS_ACCOUNT_NAME, "myaccount")
+            .with_prop(ADLS_SAS_TOKEN, "token-without-prefix");
+
+        let azdls_config = AzdlsConfig::try_from(&storage_config).unwrap();
+
+        // Token without '?' should be kept as-is
+        assert_eq!(
+            azdls_config.sas_token.as_deref(),
+            Some("token-without-prefix")
         );
     }
 }

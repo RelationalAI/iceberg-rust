@@ -24,6 +24,7 @@ use opendal::services::AzdlsConfig;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use super::super::config::azdls::find_sas_token;
 use super::super::config::{
     ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID, ADLS_CLIENT_SECRET,
     ADLS_CONNECTION_STRING, ADLS_SAS_TOKEN, ADLS_TENANT_ID,
@@ -74,38 +75,6 @@ pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Res
     }
 
     Ok(config)
-}
-
-/// Finds the appropriate SAS token from properties based on account name.
-///
-/// Strategy:
-/// 1. If account name is known, search for keys matching `adls.sas-token.<account_name>` prefix
-/// 2. If not found, fall back to searching for keys matching `adls.sas-token` prefix
-/// 3. Return the shortest matching key (least specific)
-/// 4. Trim leading '?' from the token if present
-fn find_sas_token(
-    properties: &HashMap<String, String>,
-    account_name: Option<&str>,
-) -> Option<String> {
-    // Helper function to search for token with a given prefix
-    let find_with_prefix = |prefix: &str| {
-        properties
-            .iter()
-            .filter(|(key, _)| key.as_str() == prefix || key.starts_with(&format!("{prefix}.")))
-            .min_by_key(|(key, _)| key.len())
-            .map(|(_, value)| value.strip_prefix('?').unwrap_or(value).to_string())
-    };
-
-    // Try account-specific prefix first if account name is known, then fall back to base
-    if let Some(account) = account_name {
-        let account_prefix = format!("{ADLS_SAS_TOKEN}.{account}");
-        if let Some(token) = find_with_prefix(&account_prefix) {
-            return Some(token);
-        }
-    }
-
-    // Fall back to base prefix (adls.sas-token)
-    find_with_prefix(ADLS_SAS_TOKEN)
 }
 
 /// Builds an OpenDAL operator from the AzdlsConfig and path.
