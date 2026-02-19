@@ -434,10 +434,7 @@ mod tests {
             (
                 "SAS token without account name picks shortest",
                 HashMap::from([
-                    (
-                        ADLS_SAS_TOKEN.to_string(),
-                        "token-generic".to_string(),
-                    ),
+                    (ADLS_SAS_TOKEN.to_string(), "token-generic".to_string()),
                     (
                         "adls.sas-token.someaccount".to_string(),
                         "token-account".to_string(),
