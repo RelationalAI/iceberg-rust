@@ -165,7 +165,11 @@ impl Display for Error {
         }
 
         if let Some(source) = &self.source {
-            write!(f, ", source: {source}")?;
+            // Use alternate format {:#} to print the full anyhow source chain.
+            // Without this, errors like reqwest whose Display doesn't include
+            // their own .source() would swallow the root cause (e.g. DNS/TLS
+            // errors).
+            write!(f, ", source: {source:#}")?;
         }
 
         Ok(())
