@@ -26,7 +26,7 @@ use url::Url;
 
 use super::super::config::{
     ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID, ADLS_CLIENT_SECRET,
-    ADLS_CONNECTION_STRING, ADLS_ENDPOINT, ADLS_SAS_TOKEN, ADLS_TENANT_ID, find_sas_token,
+    ADLS_CONNECTION_STRING, ADLS_ENDPOINT, ADLS_TENANT_ID, find_sas_token,
 };
 use crate::{Error, ErrorKind, Result, ensure_data_valid};
 
