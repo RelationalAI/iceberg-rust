@@ -426,7 +426,13 @@ impl OpenDalStorage {
 
         // Transient errors are common for object stores; however there's no
         // harm in retrying temporary failures for other storage backends as well.
-        let operator = operator.layer(RetryLayer::new());
+        // The Refreshable variant already has a RetryLayer from the inner
+        // create_operator call, so skip adding a second one to avoid
+        // unnecessary credential refreshes on transient errors.
+        let operator = match self {
+            OpenDalStorage::Refreshable { .. } => operator,
+            _ => operator.layer(RetryLayer::new()),
+        };
         Ok((operator, relative_path))
     }
 
