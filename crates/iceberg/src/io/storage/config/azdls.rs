@@ -130,30 +130,21 @@ impl TryFrom<&StorageConfig> for AzdlsConfig {
 
         let mut cfg = AzdlsConfig::default();
 
-        // Connection string - currently storing it, though OpenDAL doesn't support it yet
         if let Some(connection_string) = props.get(ADLS_CONNECTION_STRING) {
             cfg.connection_string = Some(connection_string.clone());
         }
-
-        // Endpoint - parse early as it may be needed
         if let Some(endpoint) = props.get(ADLS_ENDPOINT) {
             cfg.endpoint = Some(endpoint.clone());
         }
-
-        // Account name - parse early as it's needed for SAS token lookup
         if let Some(account_name) = props.get(ADLS_ACCOUNT_NAME) {
             cfg.account_name = Some(account_name.clone());
         }
-
         if let Some(account_key) = props.get(ADLS_ACCOUNT_KEY) {
             cfg.account_key = Some(account_key.clone());
         }
-
-        // Use sophisticated SAS token lookup that supports account-specific tokens
         if let Some(sas_token) = find_sas_token(props, cfg.account_name.as_deref()) {
             cfg.sas_token = Some(sas_token);
         }
-
         if let Some(tenant_id) = props.get(ADLS_TENANT_ID) {
             cfg.tenant_id = Some(tenant_id.clone());
         }
