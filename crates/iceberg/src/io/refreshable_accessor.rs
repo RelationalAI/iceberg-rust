@@ -132,10 +132,11 @@ impl RefreshableAccessor {
                     opendal::Error::new(
                         retry_err.kind(),
                         format!(
-                            "Retry after credential refresh also failed: {retry_err}. \
+                            "Retry after credential refresh also failed. \
                              Original error: {original_display}"
                         ),
                     )
+                    .set_source(retry_err)
                 })
             }
             other => other,
