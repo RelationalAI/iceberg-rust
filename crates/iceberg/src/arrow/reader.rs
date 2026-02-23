@@ -1815,7 +1815,11 @@ impl AsyncFileReader for ArrowFileReader {
         _options: Option<&'_ ArrowReaderOptions>,
     ) -> BoxFuture<'_, parquet::errors::Result<Arc<ParquetMetaData>>> {
         fn page_index_policy(enabled: bool) -> PageIndexPolicy {
-            if enabled { PageIndexPolicy::Optional } else { PageIndexPolicy::Skip }
+            if enabled {
+                PageIndexPolicy::Optional
+            } else {
+                PageIndexPolicy::Skip
+            }
         }
         async move {
             let reader = ParquetMetaDataReader::new()
