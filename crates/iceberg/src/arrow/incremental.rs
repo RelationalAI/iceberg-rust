@@ -62,6 +62,7 @@ async fn process_incremental_append_task(
     task: AppendedFileScanTask,
     batch_size: Option<usize>,
     file_io: FileIO,
+    metadata_size_hint: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
     let mut virtual_columns = Vec::new();
 
@@ -83,7 +84,7 @@ async fn process_incremental_append_task(
         file_io,
         true,
         arrow_reader_options,
-        None,
+        metadata_size_hint,
         task.base.file_size_in_bytes,
     )
     .await?;
@@ -246,6 +247,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
             channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
 
         let batch_size = reader.batch_size;
+        let metadata_size_hint = reader.metadata_size_hint;
 
         let (append_stream, delete_stream) = self;
 
@@ -258,9 +260,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                     let appends_tx = appends_tx.clone();
                     async move {
                         spawn(async move {
-                            let record_batch_stream =
-                                process_incremental_append_task(append_task, batch_size, file_io)
-                                    .await;
+                            let record_batch_stream = process_incremental_append_task(
+                                append_task,
+                                batch_size,
+                                file_io,
+                                metadata_size_hint,
+                            )
+                            .await;
 
                             process_record_batch_stream(
                                 record_batch_stream,

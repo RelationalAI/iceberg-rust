@@ -34,7 +34,7 @@ use bytes::Bytes;
 use fnv::FnvHashSet;
 use futures::channel::mpsc::channel;
 use futures::future::BoxFuture;
-use futures::{FutureExt, SinkExt, Stream, StreamExt, TryFutureExt, TryStreamExt, try_join};
+use futures::{FutureExt, SinkExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use parquet::arrow::arrow_reader::{
     ArrowPredicateFn, ArrowReaderOptions, RowFilter, RowSelection, RowSelector,
 };
