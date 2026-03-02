@@ -34,7 +34,7 @@ use bytes::Bytes;
 use fnv::FnvHashSet;
 use futures::channel::mpsc::channel;
 use futures::future::BoxFuture;
-use futures::{FutureExt, SinkExt, Stream, StreamExt, TryFutureExt, TryStreamExt, try_join};
+use futures::{FutureExt, SinkExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use parquet::arrow::arrow_reader::{
     ArrowPredicateFn, ArrowReaderOptions, RowFilter, RowSelection, RowSelector,
 };
@@ -71,6 +71,7 @@ pub struct ArrowReaderBuilder {
     concurrency_limit_data_files: usize,
     row_group_filtering_enabled: bool,
     row_selection_enabled: bool,
+    metadata_size_hint: Option<usize>,
 }
 
 impl ArrowReaderBuilder {
@@ -84,6 +85,7 @@ impl ArrowReaderBuilder {
             concurrency_limit_data_files: num_cpus,
             row_group_filtering_enabled: true,
             row_selection_enabled: false,
+            metadata_size_hint: None,
         }
     }
 
@@ -112,6 +114,15 @@ impl ArrowReaderBuilder {
         self
     }
 
+    /// Provide a hint as to the number of bytes to prefetch for parsing the Parquet metadata
+    ///
+    /// This hint can help reduce the number of fetch requests. For more details see the
+    /// [ParquetMetaDataReader documentation](https://docs.rs/parquet/latest/parquet/file/metadata/struct.ParquetMetaDataReader.html#method.with_prefetch_hint).
+    pub fn with_metadata_size_hint(mut self, metadata_size_hint: usize) -> Self {
+        self.metadata_size_hint = Some(metadata_size_hint);
+        self
+    }
+
     /// Build the ArrowReader.
     pub fn build(self) -> ArrowReader {
         ArrowReader {
@@ -124,6 +135,7 @@ impl ArrowReaderBuilder {
             concurrency_limit_data_files: self.concurrency_limit_data_files,
             row_group_filtering_enabled: self.row_group_filtering_enabled,
             row_selection_enabled: self.row_selection_enabled,
+            metadata_size_hint: self.metadata_size_hint,
         }
     }
 }
@@ -140,6 +152,7 @@ pub struct ArrowReader {
 
     pub(crate) row_group_filtering_enabled: bool,
     pub(crate) row_selection_enabled: bool,
+    pub(crate) metadata_size_hint: Option<usize>,
 }
 
 /// Trait indicating that the implementing type streams into a stream of type `S` using
@@ -188,6 +201,7 @@ impl ArrowReader {
         let concurrency_limit_data_files = self.concurrency_limit_data_files;
         let row_group_filtering_enabled = self.row_group_filtering_enabled;
         let row_selection_enabled = self.row_selection_enabled;
+        let metadata_size_hint = self.metadata_size_hint;
 
         // Fast-path for single concurrency to avoid overhead of try_flatten_unordered
         if concurrency_limit_data_files == 1 {
@@ -202,6 +216,7 @@ impl ArrowReader {
                         self.delete_file_loader.clone(),
                         row_group_filtering_enabled,
                         row_selection_enabled,
+                        metadata_size_hint,
                     )
                 })
                 .map_err(|err| {
@@ -234,6 +249,7 @@ impl ArrowReader {
                                     delete_file_loader,
                                     row_group_filtering_enabled,
                                     row_selection_enabled,
+                                    metadata_size_hint,
                                 )
                                 .await;
 
@@ -264,6 +280,7 @@ impl ArrowReader {
         delete_file_loader: CachingDeleteFileLoader,
         row_group_filtering_enabled: bool,
         row_selection_enabled: bool,
+        metadata_size_hint: Option<usize>,
     ) -> Result<ArrowRecordBatchStream> {
         let should_load_page_index =
             (row_selection_enabled && task.predicate.is_some()) || !task.deletes.is_empty();
@@ -287,6 +304,8 @@ impl ArrowReader {
             file_io.clone(),
             should_load_page_index,
             Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?),
+            metadata_size_hint,
+            task.file_size_in_bytes,
         )
         .await?;
 
@@ -341,6 +360,8 @@ impl ArrowReader {
                 file_io.clone(),
                 should_load_page_index,
                 Some(options),
+                metadata_size_hint,
+                task.file_size_in_bytes,
             )
             .await?
         } else {
@@ -550,16 +571,26 @@ impl ArrowReader {
         file_io: FileIO,
         should_load_page_index: bool,
         arrow_reader_options: Option<ArrowReaderOptions>,
+        metadata_size_hint: Option<usize>,
+        file_size_in_bytes: u64,
     ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
         // Get the metadata for the Parquet file we need to read and build
         // a reader for the data within
         let parquet_file = file_io.new_input(data_file_path)?;
-        let (parquet_metadata, parquet_reader) =
-            try_join!(parquet_file.metadata(), parquet_file.reader())?;
-        let parquet_file_reader = ArrowFileReader::new(parquet_metadata, parquet_reader)
-            .with_preload_column_index(true)
-            .with_preload_offset_index(true)
-            .with_preload_page_index(should_load_page_index);
+        let parquet_reader = parquet_file.reader().await?;
+        let mut parquet_file_reader = ArrowFileReader::new(
+            FileMetadata {
+                size: file_size_in_bytes,
+            },
+            parquet_reader,
+        )
+        .with_preload_column_index(true)
+        .with_preload_offset_index(true)
+        .with_preload_page_index(should_load_page_index);
+
+        if let Some(hint) = metadata_size_hint {
+            parquet_file_reader = parquet_file_reader.with_metadata_size_hint(hint);
+        }
 
         // Create the record batch stream builder, which wraps the parquet file reader
         let options = arrow_reader_options.unwrap_or_default();
@@ -2180,6 +2211,9 @@ message schema {
     ) -> Vec<Option<String>> {
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -2502,6 +2536,7 @@ message schema {
 
         // Task 1: read only the first row group
         let task1 = FileScanTask {
+            file_size_in_bytes: std::fs::metadata(&file_path).unwrap().len(),
             start: rg0_start,
             length: row_group_0.compressed_size() as u64,
             record_count: Some(100),
@@ -2519,6 +2554,7 @@ message schema {
 
         // Task 2: read the second and third row groups
         let task2 = FileScanTask {
+            file_size_in_bytes: std::fs::metadata(&file_path).unwrap().len(),
             start: rg1_start,
             length: file_end - rg1_start,
             record_count: Some(200),
@@ -2647,6 +2683,9 @@ message schema {
         let reader = ArrowReaderBuilder::new(file_io).build();
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/old_file.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -2814,6 +2853,7 @@ message schema {
         let reader = ArrowReaderBuilder::new(file_io).build();
 
         let task = FileScanTask {
+            file_size_in_bytes: std::fs::metadata(&data_file_path).unwrap().len(),
             start: 0,
             length: 0,
             record_count: Some(200),
@@ -2823,6 +2863,7 @@ message schema {
             project_field_ids: vec![1],
             predicate: None,
             deletes: vec![FileScanTaskDeleteFile {
+                file_size_in_bytes: std::fs::metadata(&delete_file_path).unwrap().len(),
                 file_path: delete_file_path,
                 file_type: DataContentType::PositionDeletes,
                 partition_spec_id: 0,
@@ -3032,6 +3073,7 @@ message schema {
 
         // Create FileScanTask that reads ONLY row group 1 via byte range filtering
         let task = FileScanTask {
+            file_size_in_bytes: std::fs::metadata(&data_file_path).unwrap().len(),
             start: rg1_start,
             length: rg1_length,
             record_count: Some(100), // Row group 1 has 100 rows
@@ -3041,6 +3083,7 @@ message schema {
             project_field_ids: vec![1],
             predicate: None,
             deletes: vec![FileScanTaskDeleteFile {
+                file_size_in_bytes: std::fs::metadata(&delete_file_path).unwrap().len(),
                 file_path: delete_file_path,
                 file_type: DataContentType::PositionDeletes,
                 partition_spec_id: 0,
@@ -3243,6 +3286,7 @@ message schema {
 
         // Create FileScanTask that reads ONLY row group 1 via byte range filtering
         let task = FileScanTask {
+            file_size_in_bytes: std::fs::metadata(&data_file_path).unwrap().len(),
             start: rg1_start,
             length: rg1_length,
             record_count: Some(100), // Row group 1 has 100 rows
@@ -3252,6 +3296,7 @@ message schema {
             project_field_ids: vec![1],
             predicate: None,
             deletes: vec![FileScanTaskDeleteFile {
+                file_size_in_bytes: std::fs::metadata(&delete_file_path).unwrap().len(),
                 file_path: delete_file_path,
                 file_type: DataContentType::PositionDeletes,
                 partition_spec_id: 0,
@@ -3352,6 +3397,9 @@ message schema {
 
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -3450,6 +3498,9 @@ message schema {
 
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -3537,6 +3588,9 @@ message schema {
 
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -3638,6 +3692,9 @@ message schema {
 
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -3768,6 +3825,9 @@ message schema {
 
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -3865,6 +3925,9 @@ message schema {
 
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -3975,6 +4038,9 @@ message schema {
 
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -4066,6 +4132,9 @@ message schema {
         // Create tasks in a specific order: file_0, file_1, file_2
         let tasks = vec![
             Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/file_0.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -4081,6 +4150,9 @@ message schema {
                 case_sensitive: false,
             }),
             Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/file_1.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -4096,6 +4168,9 @@ message schema {
                 case_sensitive: false,
             }),
             Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/file_2.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
@@ -4275,6 +4350,9 @@ message schema {
         let reader = ArrowReaderBuilder::new(file_io).build();
         let tasks = Box::pin(futures::stream::iter(
             vec![Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/data.parquet"))
+                    .unwrap()
+                    .len(),
                 start: 0,
                 length: 0,
                 record_count: None,
