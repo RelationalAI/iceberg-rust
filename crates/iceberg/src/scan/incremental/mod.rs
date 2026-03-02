@@ -768,6 +768,7 @@ impl IncrementalTableScan {
         let data_file_path = manifest_entry_context.manifest_entry.file_path();
         let file_scan_task = IncrementalFileScanTask::Delete(DeletedFileScanTask {
             base: BaseIncrementalFileScanTask {
+                file_size_in_bytes: manifest_entry_context.manifest_entry.file_size_in_bytes(),
                 start: 0,
                 length: manifest_entry_context.manifest_entry.file_size_in_bytes(),
                 record_count: Some(manifest_entry_context.manifest_entry.record_count()),

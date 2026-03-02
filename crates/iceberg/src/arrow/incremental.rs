@@ -83,6 +83,8 @@ async fn process_incremental_append_task(
         file_io,
         true,
         arrow_reader_options,
+        None,
+        task.base.file_size_in_bytes,
     )
     .await?;
 

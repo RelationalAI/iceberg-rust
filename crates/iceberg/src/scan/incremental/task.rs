@@ -28,6 +28,8 @@ use crate::spec::{DataFileFormat, Schema, SchemaRef};
 /// Base file scan task containing common attributes for incremental scan tasks.
 #[derive(Debug, Clone)]
 pub struct BaseIncrementalFileScanTask {
+    /// The total size of the data file in bytes.
+    pub file_size_in_bytes: u64,
     /// The start offset of the file to scan.
     pub start: u64,
     /// The length of the file to scan.
@@ -149,6 +151,7 @@ impl IncrementalFileScanTask {
         let data_file_path = manifest_entry_context.manifest_entry.file_path();
         IncrementalFileScanTask::Append(AppendedFileScanTask {
             base: BaseIncrementalFileScanTask {
+                file_size_in_bytes: manifest_entry_context.manifest_entry.file_size_in_bytes(),
                 start: 0,
                 length: manifest_entry_context.manifest_entry.file_size_in_bytes(),
                 record_count: Some(manifest_entry_context.manifest_entry.record_count()),
