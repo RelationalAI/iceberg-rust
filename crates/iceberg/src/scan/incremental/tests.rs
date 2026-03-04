@@ -169,10 +169,7 @@ impl IncrementalTestFixture {
         fs::create_dir_all(table_location.join("metadata")).unwrap();
         fs::create_dir_all(table_location.join("data")).unwrap();
 
-        let file_io = FileIO::from_path(table_location.as_os_str().to_str().unwrap())
-            .unwrap()
-            .build()
-            .unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let num_snapshots = operations.len();
         let current_snapshot_id = num_snapshots as i64;

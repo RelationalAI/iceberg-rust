@@ -2382,7 +2382,7 @@ message schema {
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
 
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let col = match col_a_type {
             DataType::Utf8 => Arc::new(StringArray::from(data_for_col_a)) as ArrayRef,
@@ -2643,7 +2643,7 @@ message schema {
             row_group_2.compressed_size()
         );
 
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
         let reader = ArrowReaderBuilder::new(file_io).build();
 
         // Task 1: read only the first row group
@@ -2778,7 +2778,7 @@ message schema {
         // Write old Parquet file with only column 'a'
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let data_a = Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef;
         let to_write = RecordBatch::try_new(arrow_schema_old.clone(), vec![data_a]).unwrap();
@@ -2961,7 +2961,7 @@ message schema {
         delete_writer.close().unwrap();
 
         // Step 3: Read the data file with the delete applied
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
         let reader = ArrowReaderBuilder::new(file_io).build();
 
         let task = FileScanTask {
@@ -3180,7 +3180,7 @@ message schema {
             row_group_1.compressed_size()
         );
 
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
         let reader = ArrowReaderBuilder::new(file_io).build();
 
         // Create FileScanTask that reads ONLY row group 1 via byte range filtering
@@ -3393,7 +3393,7 @@ message schema {
         let rg1_start = rg0_start + row_group_0.compressed_size() as u64;
         let rg1_length = row_group_1.compressed_size() as u64;
 
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
         let reader = ArrowReaderBuilder::new(file_io).build();
 
         // Create FileScanTask that reads ONLY row group 1 via byte range filtering
@@ -3484,7 +3484,7 @@ message schema {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let name_data = vec!["Alice", "Bob", "Charlie"];
         let age_data = vec![30, 25, 35];
@@ -3584,7 +3584,7 @@ message schema {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let col1_data = Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef;
         let col2_data = Arc::new(Int32Array::from(vec![10, 20])) as ArrayRef;
@@ -3678,7 +3678,7 @@ message schema {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let name_data = Arc::new(StringArray::from(vec!["Alice", "Bob"])) as ArrayRef;
         let age_data = Arc::new(Int32Array::from(vec![30, 25])) as ArrayRef;
@@ -3773,7 +3773,7 @@ message schema {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         // Small row group size to create multiple row groups
         let props = WriterProperties::builder()
@@ -3904,7 +3904,7 @@ message schema {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let id_data = Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef;
         let name_data = Arc::new(StringArray::from(vec!["Alice", "Bob"])) as ArrayRef;
@@ -4016,7 +4016,7 @@ message schema {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let col0_data = Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef;
         let col1_data = Arc::new(Int32Array::from(vec![10, 20])) as ArrayRef;
@@ -4119,7 +4119,7 @@ message schema {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         // Write data where all ids are >= 10
         let id_data = Arc::new(Int32Array::from(vec![10, 11, 12])) as ArrayRef;
@@ -4213,7 +4213,7 @@ message schema {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         // Create 3 parquet files with different data
         let props = WriterProperties::builder()
@@ -4441,7 +4441,7 @@ message schema {
         // Write Parquet file with data
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
-        let file_io = FileIO::from_path(&table_location).unwrap().build().unwrap();
+        let file_io = FileIO::new_with_fs();
 
         let id_data = Arc::new(Int32Array::from(vec![1, 5, 9, 13])) as ArrayRef;
         let name_data =

@@ -26,7 +26,6 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::refreshable_accessor::RefreshableAccessor;
 use super::storage::opendal::OpenDalStorage;
 use crate::catalog::TableIdent;
-use crate::io::file_io::Extensions;
 use crate::io::{StorageCredential, StorageCredentialsLoader};
 use crate::{Error, ErrorKind, Result};
 
@@ -46,9 +45,6 @@ pub struct RefreshableOpenDalStorage {
 
     /// Credential loader
     credentials_loader: Arc<dyn StorageCredentialsLoader>,
-
-    /// Extensions for building storage (e.g. custom S3 credential loaders)
-    extensions: Extensions,
 
     /// Metadata location passed to `load_credentials`
     location: String,
@@ -85,7 +81,6 @@ impl RefreshableOpenDalStorage {
     /// * `credentials_loader` - Loader for refreshing credentials
     /// * `initial_credentials` - Initial credentials (if any), used to build initial inner_storage
     /// * `location` - Metadata location passed to `load_credentials`
-    /// * `extensions` - Extensions for building storage
     pub fn new(
         scheme: String,
         base_props: HashMap<String, String>,
@@ -93,21 +88,19 @@ impl RefreshableOpenDalStorage {
         initial_credentials: Option<StorageCredential>,
         location: String,
         table_ident: TableIdent,
-        extensions: Extensions,
     ) -> Result<Self> {
         // Build initial inner_storage from base_props + initial_credentials
         let mut props = base_props.clone();
         if let Some(ref creds) = initial_credentials {
             props.extend(creds.config.clone());
         }
-        let inner_storage = OpenDalStorage::build_from_props(&scheme, props, &extensions)?;
+        let inner_storage = OpenDalStorage::build_from_props(&scheme, props)?;
 
         Ok(Self {
             scheme,
             base_props,
             inner_storage: Mutex::new(inner_storage),
             credentials_loader,
-            extensions,
             location,
             table_ident,
             cached_info: Mutex::new(None),
@@ -153,8 +146,7 @@ impl RefreshableOpenDalStorage {
         let mut full_props = self.base_props.clone();
         full_props.extend(new_creds.config.clone());
 
-        let new_storage =
-            OpenDalStorage::build_from_props(&self.scheme, full_props, &self.extensions)?;
+        let new_storage = OpenDalStorage::build_from_props(&self.scheme, full_props)?;
 
         // Update storage and bump version atomically (while holding the lock)
         // so that refreshable_create_operator always sees a consistent
@@ -227,7 +219,6 @@ pub struct RefreshableOpenDalStorageBuilder {
     initial_credentials: Option<StorageCredential>,
     location: String,
     table_ident: Option<TableIdent>,
-    extensions: Extensions,
 }
 
 impl RefreshableOpenDalStorageBuilder {
@@ -272,12 +263,6 @@ impl RefreshableOpenDalStorageBuilder {
         self
     }
 
-    /// Set the extensions
-    pub fn extensions(mut self, extensions: Extensions) -> Self {
-        self.extensions = extensions;
-        self
-    }
-
     /// Build the RefreshableOpenDalStorage wrapped in Arc
     pub fn build(self) -> Result<Arc<RefreshableOpenDalStorage>> {
         Ok(Arc::new(RefreshableOpenDalStorage::new(
@@ -291,7 +276,6 @@ impl RefreshableOpenDalStorageBuilder {
             self.location,
             self.table_ident
                 .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "table_ident is required"))?,
-            self.extensions,
         )?))
     }
 }

@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use iceberg::io::LocalFsStorageFactory;
 use iceberg::spec::{FormatVersion, NestedField, PrimitiveType, Schema, Type};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::{
@@ -68,7 +69,8 @@ async fn get_catalog(authenticator: Option<Arc<dyn CustomAuthenticator>>) -> Res
         }
     }
 
-    let mut builder = RestCatalogBuilder::default();
+    let mut builder =
+        RestCatalogBuilder::default().with_storage_factory(Arc::new(LocalFsStorageFactory));
     if let Some(auth) = authenticator {
         builder = builder.with_token_authenticator(auth);
     }

@@ -32,7 +32,7 @@ pub use local_fs::{LocalFsStorage, LocalFsStorageFactory};
 pub use memory::{MemoryStorage, MemoryStorageFactory};
 #[cfg(feature = "storage-s3")]
 pub use opendal::CustomAwsCredentialLoader;
-pub use opendal::{OpenDalStorage, OpenDalStorageFactory};
+pub use opendal::{OpenDalStorage, OpenDalStorageFactory, RefreshableStorageFactory};
 
 use super::{FileMetadata, FileRead, FileWrite, InputFile, OutputFile};
 use crate::Result;
