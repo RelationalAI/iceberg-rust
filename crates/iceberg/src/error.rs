@@ -405,12 +405,6 @@ define_from_err!(
 );
 
 define_from_err!(
-    opendal::Error,
-    ErrorKind::Unexpected,
-    "Failure in doing io operation"
-);
-
-define_from_err!(
     url::ParseError,
     ErrorKind::DataInvalid,
     "Failed to parse url"
@@ -447,6 +441,11 @@ define_from_err!(
 );
 
 define_from_err!(std::io::Error, ErrorKind::Unexpected, "IO Operation failed");
+define_from_err!(
+    opendal::Error,
+    ErrorKind::Unexpected,
+    "Failure in doing io operation"
+);
 
 /// Converts a timestamp in milliseconds to `DateTime<Utc>`, handling errors.
 ///
