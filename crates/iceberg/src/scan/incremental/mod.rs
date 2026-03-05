@@ -664,10 +664,8 @@ impl IncrementalTableScan {
                 )
                 .await;
 
-            let equality_deletes: Vec<_> = all_deletes
-                .into_iter()
-                .filter(is_equality_delete)
-                .collect();
+            let equality_deletes: Vec<_> =
+                all_deletes.into_iter().filter(is_equality_delete).collect();
 
             if !equality_deletes.is_empty() {
                 // The predicate from build_combined_equality_delete_predicate is a "survival"
@@ -857,7 +855,7 @@ impl IncrementalTableScan {
             &manifest_entry_context,
             delete_filter,
         )
-        .await;
+        .await?;
 
         file_scan_task_tx.send(Ok(file_scan_task)).await?;
         Ok(())

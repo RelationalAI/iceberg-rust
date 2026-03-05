@@ -23,7 +23,6 @@ use crate::Result;
 use crate::arrow::delete_filter::{DeleteFilter, is_equality_delete};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Predicate;
-use crate::scan::FileScanTaskDeleteFile;
 use crate::scan::context::ManifestEntryContext;
 use crate::spec::{DataFileFormat, Schema, SchemaRef};
 
@@ -72,12 +71,9 @@ pub struct AppendedFileScanTask {
     pub base: BaseIncrementalFileScanTask,
     /// The optional positional deletes associated with this data file.
     pub positional_deletes: Option<Arc<Mutex<DeleteVector>>>,
-    /// The optional equality delete files that apply to this data file.
-    /// These will filter out rows from the appended data based on equality predicates.
-    pub equality_deletes: Vec<FileScanTaskDeleteFile>,
-    /// The delete filter containing loaded equality delete predicates.
-    /// Used by the Arrow reader to apply equality deletes to appended records.
-    pub(crate) delete_filter: DeleteFilter,
+    /// The combined equality delete predicate for rows to filter out from this appended file.
+    /// Pre-computed during planning; `None` if no equality deletes apply.
+    pub equality_delete_predicate: Option<Predicate>,
 }
 
 impl AppendedFileScanTask {
@@ -185,7 +181,7 @@ impl IncrementalFileScanTask {
     pub(crate) async fn append_from_manifest_entry(
         manifest_entry_context: &ManifestEntryContext,
         delete_filter: &DeleteFilter,
-    ) -> Self {
+    ) -> Result<Self> {
         let data_file_path = manifest_entry_context.manifest_entry.file_path();
 
         // Query the delete file index to get all deletes that apply to this data file.
@@ -198,13 +194,19 @@ impl IncrementalFileScanTask {
             )
             .await;
 
-        // Filter to get only equality deletes
-        let equality_deletes: Vec<FileScanTaskDeleteFile> = all_deletes
-            .into_iter()
-            .filter(is_equality_delete)
-            .collect();
+        // Filter to get only equality deletes and eagerly build the combined predicate.
+        let equality_deletes: Vec<_> = all_deletes.into_iter().filter(is_equality_delete).collect();
+        let equality_delete_predicate = if equality_deletes.is_empty() {
+            None
+        } else {
+            Some(
+                delete_filter
+                    .build_combined_equality_delete_predicate(&equality_deletes)
+                    .await?,
+            )
+        };
 
-        IncrementalFileScanTask::Append(AppendedFileScanTask {
+        Ok(IncrementalFileScanTask::Append(AppendedFileScanTask {
             base: BaseIncrementalFileScanTask {
                 file_size_in_bytes: manifest_entry_context.manifest_entry.file_size_in_bytes(),
                 start: 0,
@@ -216,9 +218,8 @@ impl IncrementalFileScanTask {
                 project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
             },
             positional_deletes: delete_filter.get_delete_vector_for_path(data_file_path),
-            equality_deletes,
-            delete_filter: delete_filter.clone(),
-        })
+            equality_delete_predicate,
+        }))
     }
 
     /// Returns the data file path of this incremental file scan task.

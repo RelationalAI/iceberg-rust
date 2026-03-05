@@ -139,17 +139,11 @@ async fn process_incremental_append_task(
     }
 
     // Apply equality deletes as a row filter predicate.
-    if !task.equality_deletes.is_empty() {
-        // Build the combined equality delete predicate
-        let combined_predicate = task
-            .delete_filter
-            .build_combined_equality_delete_predicate(&task.equality_deletes)
-            .await?;
-
+    let schema_ref = task.schema_ref();
+    if let Some(combined_predicate) = task.equality_delete_predicate {
         // Bind the predicate to the schema
         let bound_predicate = combined_predicate.bind(
-            task.schema_ref(),
-            false, // case_sensitive - matches the behavior in reader.rs
+            schema_ref, false, // case_sensitive - matches the behavior in reader.rs
         )?;
 
         let (iceberg_field_ids, field_id_map) = ArrowReader::build_field_id_set_and_map(
