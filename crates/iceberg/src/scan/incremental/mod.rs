@@ -666,7 +666,7 @@ impl IncrementalTableScan {
 
             let equality_deletes: Vec<_> = all_deletes
                 .into_iter()
-                .filter(|delete| is_equality_delete(delete))
+                .filter(is_equality_delete)
                 .collect();
 
             if !equality_deletes.is_empty() {

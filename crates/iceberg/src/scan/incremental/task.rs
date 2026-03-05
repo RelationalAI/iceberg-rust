@@ -201,7 +201,7 @@ impl IncrementalFileScanTask {
         // Filter to get only equality deletes
         let equality_deletes: Vec<FileScanTaskDeleteFile> = all_deletes
             .into_iter()
-            .filter(|delete| is_equality_delete(delete))
+            .filter(is_equality_delete)
             .collect();
 
         IncrementalFileScanTask::Append(AppendedFileScanTask {
