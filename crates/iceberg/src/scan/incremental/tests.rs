@@ -3440,6 +3440,28 @@ async fn test_equality_delete_with_subsequent_appends() {
     fixture
         .verify_incremental_scan(1, 4, vec![(1, "a"), (3, "c"), (4, "d"), (5, "e")], vec![])
         .await;
+
+    let data_file_1_path = format!("{}/data/data-1.parquet", fixture.table_location);
+
+    // Verify incremental scan from 2 to 4
+    // from_snapshot=2 is exclusive: we see snapshots 3 and 4.
+    // data-1.parquet is now baseline (added in snapshot 2, before the range).
+    // The equality delete from snapshot 3 is new in this range and applies to it.
+    // n=2 is at row position 1 in data-1.parquet → (1, data-1.parquet) in deletes.
+    // data-2.parquet is appended in snapshot 4; the equality delete does not apply to it
+    // (its sequence number is higher than the delete's sequence number).
+    fixture
+        .verify_incremental_scan(2, 4, vec![(4, "d"), (5, "e")], vec![(1, &data_file_1_path)])
+        .await;
+
+    // Verify incremental scan from 3 to 4
+    // from_snapshot=3 is exclusive: we only see snapshot 4.
+    // The equality delete was already present at snapshot 3 (the from_snapshot), so it is
+    // not new in this range — no delete stream entries.
+    // data-2.parquet is appended in snapshot 4.
+    fixture
+        .verify_incremental_scan(3, 4, vec![(4, "d"), (5, "e")], vec![])
+        .await;
 }
 
 /// Test Case: Equality delete does NOT apply to data added after the delete
@@ -3480,6 +3502,28 @@ async fn test_equality_delete_does_not_apply_to_later_appends() {
     // Expected deletes: empty
     fixture
         .verify_incremental_scan(1, 4, vec![(1, "a"), (2, "b2"), (3, "c"), (4, "d")], vec![])
+        .await;
+
+    let data_file_1_path = format!("{}/data/data-1.parquet", fixture.table_location);
+
+    // Verify incremental scan from 2 to 4
+    // from_snapshot=2 is exclusive: we see snapshots 3 and 4.
+    // data-1.parquet is baseline (added in snapshot 2). The equality delete n=2 or n=4 is new
+    // in this range. n=2 is at row position 1; n=4 has no match in data-1.parquet.
+    // data-2.parquet is appended in snapshot 4; seq# > delete seq# → NOT filtered.
+    fixture
+        .verify_incremental_scan(2, 4, vec![(2, "b2"), (4, "d")], vec![(
+            1,
+            &data_file_1_path,
+        )])
+        .await;
+
+    // Verify incremental scan from 3 to 4
+    // from_snapshot=3 is exclusive: we only see snapshot 4.
+    // The equality delete was already present at snapshot 3 → not new, no delete stream entries.
+    // data-2.parquet is appended in snapshot 4.
+    fixture
+        .verify_incremental_scan(3, 4, vec![(2, "b2"), (4, "d")], vec![])
         .await;
 }
 
