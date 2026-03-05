@@ -204,22 +204,15 @@ impl DeleteFilter {
         }
     }
 
-    /// Builds eq delete predicate for the provided task.
-    pub(crate) async fn build_equality_delete_predicate(
+    /// Builds combined predicate from a list of equality delete files.
+    /// Retrieves predicates for each file, combines them with AND logic.
+    pub(crate) async fn build_combined_equality_delete_predicate(
         &self,
-        file_scan_task: &FileScanTask,
-    ) -> Result<Option<BoundPredicate>> {
-        // * Filter the task's deletes into just the Equality deletes
-        // * Retrieve the unbound predicate for each from self.state.equality_deletes
-        // * Logical-AND them all together to get a single combined `Predicate`
-        // * Bind the predicate to the task's schema to get a `BoundPredicate`
-
+        equality_delete_files: &[FileScanTaskDeleteFile],
+    ) -> Result<Predicate> {
         let mut combined_predicate = AlwaysTrue;
-        for delete in &file_scan_task.deletes {
-            if !is_equality_delete(delete) {
-                continue;
-            }
 
+        for delete in equality_delete_files {
             let Some(predicate) = self
                 .get_equality_delete_predicate_for_delete_file_path(&delete.file_path)
                 .await
@@ -236,9 +229,29 @@ impl DeleteFilter {
             combined_predicate = combined_predicate.and(predicate);
         }
 
-        if combined_predicate == AlwaysTrue {
+        Ok(combined_predicate)
+    }
+
+    /// Builds eq delete predicate for the provided task.
+    pub(crate) async fn build_equality_delete_predicate(
+        &self,
+        file_scan_task: &FileScanTask,
+    ) -> Result<Option<BoundPredicate>> {
+        // Filter the task's deletes into just the Equality deletes
+        let equality_deletes: Vec<FileScanTaskDeleteFile> = file_scan_task
+            .deletes
+            .iter()
+            .filter(|delete| is_equality_delete(delete))
+            .cloned()
+            .collect();
+
+        if equality_deletes.is_empty() {
             return Ok(None);
         }
+
+        let combined_predicate = self
+            .build_combined_equality_delete_predicate(&equality_deletes)
+            .await?;
 
         let bound_predicate = combined_predicate
             .bind(file_scan_task.schema.clone(), file_scan_task.case_sensitive)?;

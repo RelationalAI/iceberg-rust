@@ -718,7 +718,7 @@ impl ArrowReader {
         Ok(results.into())
     }
 
-    fn build_field_id_set_and_map(
+    pub(crate) fn build_field_id_set_and_map(
         parquet_schema: &SchemaDescriptor,
         predicate: &BoundPredicate,
     ) -> Result<(HashSet<i32>, HashMap<i32, usize>)> {
@@ -921,7 +921,7 @@ impl ArrowReader {
         }
     }
 
-    fn get_row_filter(
+    pub(crate) fn get_row_filter(
         predicates: &BoundPredicate,
         parquet_schema: &SchemaDescriptor,
         iceberg_field_ids: &HashSet<i32>,

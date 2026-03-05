@@ -108,13 +108,14 @@ impl DeleteFileIndex {
         }
     }
 
-    pub(crate) async fn positional_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
+    /// Get all delete files (both positional and equality deletes)
+    pub(crate) async fn all_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
         let notifier = {
             let guard = self.state.read().unwrap();
             match *guard {
                 DeleteFileIndexState::Populating(ref notifier) => notifier.clone(),
                 DeleteFileIndexState::Populated(ref index) => {
-                    return index.positional_deletes();
+                    return index.all_deletes();
                 }
             }
         };
@@ -123,7 +124,7 @@ impl DeleteFileIndex {
 
         let guard = self.state.read().unwrap();
         match guard.deref() {
-            DeleteFileIndexState::Populated(index) => index.positional_deletes(),
+            DeleteFileIndexState::Populated(index) => index.all_deletes(),
             _ => unreachable!("Cannot be any other state than loaded"),
         }
     }
@@ -231,12 +232,28 @@ impl PopulatedDeleteFileIndex {
         results
     }
 
-    fn positional_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
+    /// Get all delete files (both positional and equality deletes)
+    fn all_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
+        let mut result = vec![];
+
+        // Add global equality deletes
+        self.global_equality_deletes
+            .iter()
+            .for_each(|ctx| result.push(ctx.as_ref().into()));
+
+        // Add partition-specific equality deletes
+        self.eq_deletes_by_partition
+            .values()
+            .flatten()
+            .for_each(|ctx| result.push(ctx.as_ref().into()));
+
+        // Add partition-specific positional deletes
         self.pos_deletes_by_partition
             .values()
             .flatten()
-            .map(|ctx| ctx.as_ref().into())
-            .collect()
+            .for_each(|ctx| result.push(ctx.as_ref().into()));
+
+        result
     }
 }
 

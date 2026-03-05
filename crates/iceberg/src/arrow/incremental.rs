@@ -29,12 +29,13 @@ use crate::arrow::reader::process_record_batch_stream;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
+use crate::expr::Bind;
 use crate::io::FileIO;
 use crate::metadata_columns::{RESERVED_FIELD_ID_POS, row_pos_field};
 use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
-    AppendedFileScanTask, DeleteScanTask, IncrementalFileScanTaskStreams,
+    AppendedFileScanTask, DeleteScanTask, EqualityDeleteScanTask, IncrementalFileScanTaskStreams,
 };
 use crate::spec::{Datum, PrimitiveType};
 use crate::{Error, ErrorKind, Result};
@@ -123,7 +124,7 @@ async fn process_incremental_append_task(
     }
 
     // Apply positional deletes as row selections.
-    let row_selection = if let Some(positional_delete_indexes) = task.positional_deletes {
+    let row_selection = if let Some(ref positional_delete_indexes) = task.positional_deletes {
         Some(ArrowReader::build_deletes_row_selection(
             record_batch_stream_builder.metadata().row_groups(),
             &None,
@@ -135,6 +136,34 @@ async fn process_incremental_append_task(
 
     if let Some(row_selection) = row_selection {
         record_batch_stream_builder = record_batch_stream_builder.with_row_selection(row_selection);
+    }
+
+    // Apply equality deletes as a row filter predicate.
+    if !task.equality_deletes.is_empty() {
+        // Build the combined equality delete predicate
+        let combined_predicate = task
+            .delete_filter
+            .build_combined_equality_delete_predicate(&task.equality_deletes)
+            .await?;
+
+        // Bind the predicate to the schema
+        let bound_predicate = combined_predicate.bind(
+            task.schema_ref(),
+            false, // case_sensitive - matches the behavior in reader.rs
+        )?;
+
+        let (iceberg_field_ids, field_id_map) = ArrowReader::build_field_id_set_and_map(
+            record_batch_stream_builder.parquet_schema(),
+            &bound_predicate,
+        )?;
+
+        let row_filter = ArrowReader::get_row_filter(
+            &bound_predicate,
+            record_batch_stream_builder.parquet_schema(),
+            &iceberg_field_ids,
+            &field_id_map,
+        )?;
+        record_batch_stream_builder = record_batch_stream_builder.with_row_filter(row_filter);
     }
 
     // Build the batch stream and send all the RecordBatches that it generates
@@ -219,6 +248,108 @@ fn process_incremental_deleted_file_task(
     Ok(Box::pin(stream) as ArrowRecordBatchStream)
 }
 
+/// Process equality delete task by reading the data file with equality delete predicates applied
+/// as a row filter, and emitting record batches containing matching row positions.
+async fn process_equality_delete_task(
+    task: EqualityDeleteScanTask,
+    batch_size: Option<usize>,
+    file_io: crate::io::FileIO,
+) -> Result<ArrowRecordBatchStream> {
+    let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+    let file_path = task.data_file_path().to_string();
+
+    // Create output schema with _file column first, then pos (Int64)
+    let output_schema = Arc::new(ArrowSchema::new(vec![
+        Arc::clone(crate::metadata_columns::file_path_field()),
+        Arc::clone(crate::metadata_columns::pos_field_arrow()),
+    ]));
+
+    // Add _pos virtual column to track row positions
+    let virtual_columns = vec![Arc::clone(row_pos_field())];
+    let arrow_reader_options = ArrowReaderOptions::new().with_virtual_columns(virtual_columns)?;
+
+    // Create parquet reader with virtual columns to get schema and apply equality deletes
+    let mut record_batch_stream_builder = ArrowReader::create_parquet_record_batch_stream_builder(
+        &file_path,
+        file_io,
+        true,
+        Some(arrow_reader_options),
+        None,
+        task.base.file_size_in_bytes,
+    )
+    .await?;
+
+    // The combined_predicate is already negated (selects rows TO DELETE).
+    let schema = task.schema_ref();
+    let bound_predicate = task.combined_predicate.bind(schema, false)?;
+
+    // Get field ID mappings for the predicate
+    let (iceberg_field_ids, field_id_map) = ArrowReader::build_field_id_set_and_map(
+        record_batch_stream_builder.parquet_schema(),
+        &bound_predicate,
+    )?;
+
+    // Create row filter from the bound predicate
+    let row_filter = ArrowReader::get_row_filter(
+        &bound_predicate,
+        record_batch_stream_builder.parquet_schema(),
+        &iceberg_field_ids,
+        &field_id_map,
+    )?;
+
+    // Apply the row filter to get only rows matching equality delete predicates
+    record_batch_stream_builder = record_batch_stream_builder.with_row_filter(row_filter);
+
+    record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
+
+    // Build the stream of filtered records
+    let record_batch_stream = record_batch_stream_builder.build()?;
+
+    // Extract positions from the _pos column and emit delete batches
+    let output_schema_clone = output_schema.clone();
+    let file_path_clone = file_path.clone();
+
+    let stream = record_batch_stream
+        .then(move |batch_result| {
+            let schema = output_schema_clone.clone();
+            let path = file_path_clone.clone();
+            async move {
+                match batch_result {
+                    Ok(batch) => {
+                        // Extract _pos column (should be the last column due to virtual_columns)
+                        if let Some(pos_column) = batch
+                            .column(batch.num_columns() - 1)
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                        {
+                            // Collect positions from the _pos column
+                            let positions: Vec<u64> = pos_column
+                                .iter()
+                                .filter_map(|v| v.map(|p| p as u64))
+                                .collect();
+
+                            // Create delete batches with the matching positions
+                            if !positions.is_empty() {
+                                create_delete_batch(&schema, &path, positions)
+                            } else {
+                                Ok(RecordBatch::new_empty(Arc::clone(&schema)))
+                            }
+                        } else {
+                            Err(Error::new(
+                                ErrorKind::Unexpected,
+                                "Failed to extract _pos column from equality delete batch",
+                            ))
+                        }
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+        })
+        .boxed();
+
+    Ok(Box::pin(stream) as ArrowRecordBatchStream)
+}
+
 impl StreamsInto<ArrowReader, CombinedIncrementalBatchRecordStream>
     for IncrementalFileScanTaskStreams
 {
@@ -252,11 +383,11 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
         let (append_stream, delete_stream) = self;
 
         // Process append tasks
-        let file_io = reader.file_io.clone();
+        let file_io_append = reader.file_io.clone();
         spawn(async move {
             let _ = append_stream
                 .try_for_each_concurrent(reader.concurrency_limit_data_files, |append_task| {
-                    let file_io = file_io.clone();
+                    let file_io = file_io_append.clone();
                     let appends_tx = appends_tx.clone();
                     async move {
                         spawn(async move {
@@ -282,10 +413,12 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
         });
 
         // Process delete tasks
+        let file_io_delete = reader.file_io.clone();
         spawn(async move {
             let _ = delete_stream
                 .try_for_each_concurrent(reader.concurrency_limit_data_files, |delete_task| {
                     let deletes_tx = deletes_tx.clone();
+                    let file_io = file_io_delete.clone();
                     async move {
                         match delete_task {
                             DeleteScanTask::DeletedFile(deleted_file_task) => {
@@ -320,6 +453,23 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         record_batch_stream,
                                         deletes_tx,
                                         "failed to read deleted record batch",
+                                    )
+                                    .await;
+                                });
+                            }
+                            DeleteScanTask::EqualityDeletes(equality_delete_task) => {
+                                spawn(async move {
+                                    let record_batch_stream = process_equality_delete_task(
+                                        equality_delete_task,
+                                        batch_size,
+                                        file_io.clone(),
+                                    )
+                                    .await;
+
+                                    process_record_batch_stream(
+                                        record_batch_stream,
+                                        deletes_tx,
+                                        "failed to read equality delete record batch",
                                     )
                                     .await;
                                 });
