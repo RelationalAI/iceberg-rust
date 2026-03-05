@@ -444,12 +444,6 @@ impl IncrementalTableScan {
 
         let (delete_file_idx, delete_file_tx) = DeleteFileIndex::new();
 
-        // Spawn baseline file collection concurrently with manifest processing
-        let baseline_file_entry_rx = self.spawn_baseline_file_collection(
-            concurrency_limit_manifest_files,
-            file_scan_task_tx.clone(),
-        );
-
         let manifest_file_contexts = self
             .plan_context
             .build_manifest_file_contexts(
@@ -476,6 +470,7 @@ impl IncrementalTableScan {
 
         let mut channel_for_data_manifest_entry_error = file_scan_task_tx.clone();
         let mut channel_for_delete_manifest_entry_error = file_scan_task_tx.clone();
+        let baseline_file_task_tx = file_scan_task_tx.clone();
 
         // Process the delete file [`ManifestEntry`] stream in parallel. Builds the delete
         // index below.
@@ -504,6 +499,18 @@ impl IncrementalTableScan {
         // could directly stream into the CachingDeleteFileLoader and instantly load the
         // delete files.
         let all_deletes = delete_file_idx.all_deletes().await;
+
+        // Spawn baseline file collection if there are equality deletes in the scan range
+        // This runs in parallel with the rest of the planning
+        let baseline_file_entry_rx = if all_deletes.iter().any(|d| is_equality_delete(d)) {
+            Some(self.spawn_baseline_file_collection(
+                concurrency_limit_manifest_files,
+                baseline_file_task_tx,
+            ))
+        } else {
+            None
+        };
+
         let result = self
             .plan_context
             .caching_delete_file_loader
@@ -569,9 +576,6 @@ impl IncrementalTableScan {
 
         // Collect all tasks from manifest processing.
         let all_tasks = file_scan_task_rx.try_collect::<Vec<_>>().await?;
-
-        // Collect baseline data files (files alive at from_snapshot).
-        let baseline_data_files = Self::collect_baseline_data_files(baseline_file_entry_rx).await;
 
         // Separate tasks by type and compute file path sets in a single pass
         let mut append_tasks = Vec::new();
@@ -654,41 +658,45 @@ impl IncrementalTableScan {
             final_delete_tasks.push(DeleteScanTask::PositionalDeletes(path, delete_vector_inner));
         }
 
-        // Create equality delete tasks for baseline files directly.
-        // For each baseline data file, check if there are equality deletes in the scan range.
-        for baseline_entry in &baseline_data_files {
-            let all_deletes = delete_file_idx
-                .get_deletes_for_data_file(
-                    baseline_entry.data_file(),
-                    baseline_entry.sequence_number(),
-                )
-                .await;
+        // Create equality delete tasks for baseline files if there are equality deletes in the scan range.
+        if let Some(baseline_file_entry_rx) = baseline_file_entry_rx {
+            let baseline_data_files =
+                Self::collect_baseline_data_files(baseline_file_entry_rx).await;
 
-            let equality_deletes: Vec<_> =
-                all_deletes.into_iter().filter(is_equality_delete).collect();
+            for baseline_entry in &baseline_data_files {
+                let all_deletes = delete_file_idx
+                    .get_deletes_for_data_file(
+                        baseline_entry.data_file(),
+                        baseline_entry.sequence_number(),
+                    )
+                    .await;
 
-            if !equality_deletes.is_empty() {
-                // The predicate from build_combined_equality_delete_predicate is a "survival"
-                // filter (keeps non-deleted rows). Negate it to select rows TO DELETE.
-                let survival_predicate = delete_filter
-                    .build_combined_equality_delete_predicate(&equality_deletes)
-                    .await?;
-                let combined_predicate = survival_predicate.not();
+                let equality_deletes: Vec<_> =
+                    all_deletes.into_iter().filter(is_equality_delete).collect();
 
-                let equality_delete_task = EqualityDeleteScanTask {
-                    base: BaseIncrementalFileScanTask {
-                        file_size_in_bytes: baseline_entry.file_size_in_bytes(),
-                        start: 0,
-                        length: baseline_entry.file_size_in_bytes(),
-                        record_count: Some(baseline_entry.record_count()),
-                        data_file_path: baseline_entry.file_path().to_string(),
-                        data_file_format: baseline_entry.file_format(),
-                        schema: self.plan_context.to_snapshot_schema.clone(),
-                        project_field_ids: self.plan_context.field_ids.as_ref().clone(),
-                    },
-                    combined_predicate,
-                };
-                final_delete_tasks.push(DeleteScanTask::EqualityDeletes(equality_delete_task));
+                if !equality_deletes.is_empty() {
+                    // The predicate from build_combined_equality_delete_predicate is a "survival"
+                    // filter (keeps non-deleted rows). Negate it to select rows TO DELETE.
+                    let survival_predicate = delete_filter
+                        .build_combined_equality_delete_predicate(&equality_deletes)
+                        .await?;
+                    let combined_predicate = survival_predicate.not();
+
+                    let equality_delete_task = EqualityDeleteScanTask {
+                        base: BaseIncrementalFileScanTask {
+                            file_size_in_bytes: baseline_entry.file_size_in_bytes(),
+                            start: 0,
+                            length: baseline_entry.file_size_in_bytes(),
+                            record_count: Some(baseline_entry.record_count()),
+                            data_file_path: baseline_entry.file_path().to_string(),
+                            data_file_format: baseline_entry.file_format(),
+                            schema: self.plan_context.to_snapshot_schema.clone(),
+                            project_field_ids: self.plan_context.field_ids.as_ref().clone(),
+                        },
+                        combined_predicate,
+                    };
+                    final_delete_tasks.push(DeleteScanTask::EqualityDeletes(equality_delete_task));
+                }
             }
         }
 
