@@ -470,7 +470,6 @@ impl IncrementalTableScan {
 
         let mut channel_for_data_manifest_entry_error = file_scan_task_tx.clone();
         let mut channel_for_delete_manifest_entry_error = file_scan_task_tx.clone();
-        let baseline_file_task_tx = file_scan_task_tx.clone();
 
         // Process the delete file [`ManifestEntry`] stream in parallel. Builds the delete
         // index below.
@@ -503,6 +502,7 @@ impl IncrementalTableScan {
         // Spawn baseline file collection if there are equality deletes in the scan range
         // This runs in parallel with the rest of the planning
         let baseline_file_entry_rx = if all_deletes.iter().any(is_equality_delete) {
+            let baseline_file_task_tx = file_scan_task_tx.clone();
             Some(self.spawn_baseline_file_collection(
                 concurrency_limit_manifest_files,
                 baseline_file_task_tx,
