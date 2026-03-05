@@ -512,7 +512,7 @@ impl IncrementalTableScan {
 
         // Build the delete filter from the loaded deletes.
         let delete_filter = match result {
-            Ok(loaded_deletes) => loaded_deletes.unwrap(),
+            Ok(loaded_deletes) => loaded_deletes?,
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Unexpected,
