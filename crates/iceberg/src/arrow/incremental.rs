@@ -68,23 +68,19 @@ async fn process_incremental_append_task(
     file_io: FileIO,
     metadata_size_hint: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
-    // Check if _pos column is requested and add it as a virtual column
+    // Check if _pos column is requested and prepare virtual columns
     let has_pos_column = task.base.project_field_ids.contains(&RESERVED_FIELD_ID_POS);
-    let virtual_columns = if has_pos_column {
-        vec![Arc::clone(row_pos_field())]
-    } else {
-        vec![]
-    };
+    let mut virtual_columns = Vec::new();
+    if has_pos_column {
+        virtual_columns.push(Arc::clone(row_pos_field()));
+    }
 
     // Open the file, then resolve the schema for migrated tables lacking embedded field IDs.
     let initial_builder = ArrowReader::create_parquet_record_batch_stream_builder(
         &task.base.data_file_path,
         file_io.clone(),
         false,
-        Some(
-            parquet::arrow::arrow_reader::ArrowReaderOptions::new()
-                .with_virtual_columns(virtual_columns.clone())?,
-        ),
+        Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?),
         metadata_size_hint,
         task.base.file_size_in_bytes,
     )
