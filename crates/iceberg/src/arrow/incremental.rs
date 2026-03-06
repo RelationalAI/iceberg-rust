@@ -24,7 +24,7 @@ use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{Stream, StreamExt, TryStreamExt};
 
-use crate::arrow::reader::process_record_batch_stream;
+use crate::arrow::reader::{ParquetReadOptions, process_record_batch_stream};
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Bind;
@@ -74,13 +74,17 @@ async fn process_incremental_append_task(
         .map(|p| p.bind(base.schema.clone(), base.case_sensitive))
         .transpose()?;
 
+    let parquet_read_options = ParquetReadOptions::builder()
+        .with_metadata_size_hint(metadata_size_hint)
+        .with_preload_page_index(should_load_page_index)
+        .build();
+
     let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
         &base.data_file_path,
         base.file_size_in_bytes,
         file_io,
-        should_load_page_index,
+        parquet_read_options,
         ArrowReader::build_virtual_columns(&base.project_field_ids),
-        metadata_size_hint,
         batch_size,
         None, // name_mapping not yet supported in incremental scan
     )
@@ -200,13 +204,17 @@ async fn process_equality_delete_task(
         .combined_predicate
         .bind(task.schema_ref(), task.base.case_sensitive)?;
 
+    let parquet_read_options = ParquetReadOptions::builder()
+        .with_metadata_size_hint(metadata_size_hint)
+        .with_preload_page_index(true) // always load page index: we always have a predicate
+        .build();
+
     let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
         &task.base.data_file_path,
         task.base.file_size_in_bytes,
         file_io,
-        true, // always load page index: we always have a predicate
+        parquet_read_options,
         vec![Arc::clone(row_pos_field())],
-        metadata_size_hint,
         batch_size,
         None, // name_mapping not yet supported in incremental scan
     )
@@ -313,7 +321,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
             channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
 
         let batch_size = reader.batch_size;
-        let metadata_size_hint = reader.metadata_size_hint;
+        let metadata_size_hint = reader.parquet_read_options.metadata_size_hint();
 
         let (append_stream, delete_stream) = self;
 
