@@ -133,20 +133,13 @@ async fn process_incremental_append_task(
         record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
     }
 
-    // Apply positional deletes as row selections.
-    let row_selection = if let Some(ref positional_delete_indexes) = task.positional_deletes {
-        Some(ArrowReader::build_deletes_row_selection(
-            record_batch_stream_builder.metadata().row_groups(),
-            &None,
-            &positional_delete_indexes.lock().unwrap(),
-        )?)
-    } else {
-        None
-    };
-
-    if let Some(row_selection) = row_selection {
-        record_batch_stream_builder = record_batch_stream_builder.with_row_selection(row_selection);
-    }
+    // Byte-range row group filtering + positional delete row selection.
+    record_batch_stream_builder = ArrowReader::apply_byte_range_and_positional_deletes(
+        record_batch_stream_builder,
+        task.base.start,
+        task.base.length,
+        task.positional_deletes.as_deref(),
+    )?;
 
     // Apply equality deletes as a row filter predicate.
     if let Some(ref combined_predicate) = task.equality_delete_predicate {

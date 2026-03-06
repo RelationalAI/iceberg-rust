@@ -488,15 +488,11 @@ impl ArrowReader {
             };
         }
 
-        if let Some(row_selection) = row_selection {
-            record_batch_stream_builder =
-                record_batch_stream_builder.with_row_selection(row_selection);
-        }
-
-        if let Some(selected_row_group_indices) = selected_row_group_indices {
-            record_batch_stream_builder =
-                record_batch_stream_builder.with_row_groups(selected_row_group_indices);
-        }
+        record_batch_stream_builder = Self::apply_row_groups_and_selection(
+            record_batch_stream_builder,
+            selected_row_group_indices,
+            row_selection,
+        );
 
         // Build the batch stream and send all the RecordBatches that it generates
         // to the requester.
@@ -552,7 +548,7 @@ impl ArrowReader {
     /// Using the Parquet page index, we build a `RowSelection` that rejects rows that are indicated
     /// as having been deleted by a positional delete, taking into account any row groups that have
     /// been skipped entirely by the filter predicate
-    pub(crate) fn build_deletes_row_selection(
+    fn build_deletes_row_selection(
         row_group_metadata_list: &[RowGroupMetaData],
         selected_row_groups: &Option<Vec<usize>>,
         positional_deletes: &DeleteVector,
@@ -1110,8 +1106,63 @@ impl ArrowReader {
 
     /// Filters row groups by byte range to support Iceberg's file splitting.
     ///
-    /// Iceberg splits large files at row group boundaries, so we only read row groups
-    /// whose byte ranges overlap with [start, start+length).
+    /// Applies an optional row group list and optional `RowSelection` to a builder.
+    ///
+    /// Centralises the final "commit" step shared by all Parquet reading paths.
+    fn apply_row_groups_and_selection(
+        mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        row_groups: Option<Vec<usize>>,
+        row_selection: Option<RowSelection>,
+    ) -> ParquetRecordBatchStreamBuilder<ArrowFileReader> {
+        if let Some(sel) = row_selection {
+            builder = builder.with_row_selection(sel);
+        }
+        if let Some(groups) = row_groups {
+            builder = builder.with_row_groups(groups);
+        }
+        builder
+    }
+
+    /// Applies byte-range row group filtering and positional-delete row selection to a builder.
+    ///
+    /// Encapsulates the complete "no predicate row groups" pattern used by incremental append:
+    /// 1. If `start`/`length` are non-zero, restrict to overlapping row groups.
+    /// 2. If `positional_deletes` is present, build a `RowSelection` that skips deleted rows,
+    ///    taking the row group filter into account.
+    /// 3. Apply both to the builder.
+    pub(crate) fn apply_byte_range_and_positional_deletes(
+        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        start: u64,
+        length: u64,
+        positional_deletes: Option<&std::sync::Mutex<DeleteVector>>,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        let selected_row_groups = if start != 0 || length != 0 {
+            Some(Self::filter_row_groups_by_byte_range(
+                builder.metadata(),
+                start,
+                length,
+            )?)
+        } else {
+            None
+        };
+
+        let row_selection = if let Some(pd) = positional_deletes {
+            Some(Self::build_deletes_row_selection(
+                builder.metadata().row_groups(),
+                &selected_row_groups,
+                &pd.lock().unwrap(),
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self::apply_row_groups_and_selection(
+            builder,
+            selected_row_groups,
+            row_selection,
+        ))
+    }
+
     fn filter_row_groups_by_byte_range(
         parquet_metadata: &Arc<ParquetMetaData>,
         start: u64,
