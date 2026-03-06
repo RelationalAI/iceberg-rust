@@ -23,13 +23,14 @@ use arrow_schema::Schema as ArrowSchema;
 use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{Stream, StreamExt, TryStreamExt};
+use parquet::arrow::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
 
-use crate::arrow::reader::process_record_batch_stream;
+use crate::arrow::reader::{ArrowFileReader, process_record_batch_stream};
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
-use crate::expr::Bind;
+use crate::expr::{Bind, BoundPredicate};
 use crate::io::FileIO;
 use crate::metadata_columns::{RESERVED_FIELD_ID_POS, row_pos_field};
 use crate::runtime::spawn;
@@ -42,6 +43,27 @@ use crate::{Error, ErrorKind, Result};
 
 /// Default batch size for incremental delete operations.
 const DEFAULT_BATCH_SIZE: usize = 1024;
+
+/// Returns `ArrowReaderOptions` with the `_pos` virtual column enabled.
+fn pos_arrow_reader_options() -> Result<ArrowReaderOptions> {
+    Ok(ArrowReaderOptions::new().with_virtual_columns(vec![Arc::clone(row_pos_field())])?)
+}
+
+/// Applies a bound predicate as a row filter to a Parquet stream builder.
+fn apply_row_filter(
+    builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+    predicate: &BoundPredicate,
+) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+    let (iceberg_field_ids, field_id_map) =
+        ArrowReader::build_field_id_set_and_map(builder.parquet_schema(), predicate)?;
+    let row_filter = ArrowReader::get_row_filter(
+        predicate,
+        builder.parquet_schema(),
+        &iceberg_field_ids,
+        &field_id_map,
+    )?;
+    Ok(builder.with_row_filter(row_filter))
+}
 
 /// The type of incremental batch: appended data or deleted records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,17 +87,10 @@ async fn process_incremental_append_task(
     file_io: FileIO,
     metadata_size_hint: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
-    let mut virtual_columns = Vec::new();
-
     // Check if _pos column is requested and add it as a virtual column
     let has_pos_column = task.base.project_field_ids.contains(&RESERVED_FIELD_ID_POS);
-    if has_pos_column {
-        // Add _pos as a virtual column to be produced by the Parquet reader
-        virtual_columns.push(Arc::clone(row_pos_field()));
-    }
-
-    let arrow_reader_options = if !virtual_columns.is_empty() {
-        Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?)
+    let arrow_reader_options = if has_pos_column {
+        Some(pos_arrow_reader_options()?)
     } else {
         None
     };
@@ -139,25 +154,11 @@ async fn process_incremental_append_task(
     }
 
     // Apply equality deletes as a row filter predicate.
-    let schema_ref = task.schema_ref();
-    if let Some(combined_predicate) = task.equality_delete_predicate {
-        // Bind the predicate to the schema
-        let bound_predicate = combined_predicate.bind(
-            schema_ref, false, // case_sensitive - matches the behavior in reader.rs
-        )?;
-
-        let (iceberg_field_ids, field_id_map) = ArrowReader::build_field_id_set_and_map(
-            record_batch_stream_builder.parquet_schema(),
-            &bound_predicate,
-        )?;
-
-        let row_filter = ArrowReader::get_row_filter(
-            &bound_predicate,
-            record_batch_stream_builder.parquet_schema(),
-            &iceberg_field_ids,
-            &field_id_map,
-        )?;
-        record_batch_stream_builder = record_batch_stream_builder.with_row_filter(row_filter);
+    if let Some(ref combined_predicate) = task.equality_delete_predicate {
+        let schema_ref = task.schema_ref();
+        let bound_predicate = combined_predicate.bind(schema_ref, false)?;
+        record_batch_stream_builder =
+            apply_row_filter(record_batch_stream_builder, &bound_predicate)?;
     }
 
     // Build the batch stream and send all the RecordBatches that it generates
@@ -258,41 +259,20 @@ async fn process_equality_delete_task(
         Arc::clone(crate::metadata_columns::pos_field_arrow()),
     ]));
 
-    // Add _pos virtual column to track row positions
-    let virtual_columns = vec![Arc::clone(row_pos_field())];
-    let arrow_reader_options = ArrowReaderOptions::new().with_virtual_columns(virtual_columns)?;
-
-    // Create parquet reader with virtual columns to get schema and apply equality deletes
+    // Add _pos virtual column to track row positions, then open the Parquet file.
     let mut record_batch_stream_builder = ArrowReader::create_parquet_record_batch_stream_builder(
         &file_path,
         file_io,
         true,
-        Some(arrow_reader_options),
+        Some(pos_arrow_reader_options()?),
         None,
         task.base.file_size_in_bytes,
     )
     .await?;
 
     // The combined_predicate is already negated (selects rows TO DELETE).
-    let schema = task.schema_ref();
-    let bound_predicate = task.combined_predicate.bind(schema, false)?;
-
-    // Get field ID mappings for the predicate
-    let (iceberg_field_ids, field_id_map) = ArrowReader::build_field_id_set_and_map(
-        record_batch_stream_builder.parquet_schema(),
-        &bound_predicate,
-    )?;
-
-    // Create row filter from the bound predicate
-    let row_filter = ArrowReader::get_row_filter(
-        &bound_predicate,
-        record_batch_stream_builder.parquet_schema(),
-        &iceberg_field_ids,
-        &field_id_map,
-    )?;
-
-    // Apply the row filter to get only rows matching equality delete predicates
-    record_batch_stream_builder = record_batch_stream_builder.with_row_filter(row_filter);
+    let bound_predicate = task.combined_predicate.bind(task.schema_ref(), false)?;
+    record_batch_stream_builder = apply_row_filter(record_batch_stream_builder, &bound_predicate)?;
 
     record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
 
