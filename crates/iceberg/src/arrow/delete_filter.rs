@@ -209,7 +209,7 @@ impl DeleteFilter {
     pub(crate) async fn build_combined_equality_delete_predicate(
         &self,
         equality_delete_files: &[FileScanTaskDeleteFile],
-    ) -> Result<Predicate> {
+    ) -> Result<Option<Predicate>> {
         let mut combined_predicate = AlwaysTrue;
 
         for delete in equality_delete_files {
@@ -229,7 +229,11 @@ impl DeleteFilter {
             combined_predicate = combined_predicate.and(predicate);
         }
 
-        Ok(combined_predicate)
+        if combined_predicate == AlwaysTrue {
+            return Ok(None);
+        }
+
+        Ok(Some(combined_predicate))
     }
 
     /// Builds eq delete predicate for the provided task.
@@ -249,9 +253,12 @@ impl DeleteFilter {
             return Ok(None);
         }
 
-        let combined_predicate = self
+        let Some(combined_predicate) = self
             .build_combined_equality_delete_predicate(&equality_deletes)
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
 
         let bound_predicate = combined_predicate
             .bind(file_scan_task.schema.clone(), file_scan_task.case_sensitive)?;

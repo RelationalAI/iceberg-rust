@@ -23,10 +23,12 @@ use arrow_schema::Schema as ArrowSchema;
 use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{Stream, StreamExt, TryStreamExt};
-use parquet::arrow::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
+use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, ParquetRecordBatchStreamBuilder};
 
-use crate::arrow::reader::{ArrowFileReader, process_record_batch_stream};
+use crate::arrow::reader::{
+    ArrowFileReader, add_fallback_field_ids_to_arrow_schema, process_record_batch_stream,
+};
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
@@ -207,7 +209,7 @@ fn process_incremental_delete_task(
 ) -> Result<ArrowRecordBatchStream> {
     let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
 
-    // Create schema with _file column first, then pos (Int64)
+    // Create schema with file_path column first, then pos (Int64)
     let schema = Arc::new(ArrowSchema::new(vec![
         Arc::clone(crate::metadata_columns::file_path_field()),
         Arc::clone(crate::metadata_columns::pos_field_arrow()),
@@ -229,7 +231,7 @@ fn process_incremental_deleted_file_task(
 ) -> Result<ArrowRecordBatchStream> {
     let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
 
-    // Create schema with _file column first, then pos (Int64)
+    // Create schema with file_path column first, then pos (Int64)
     let schema = Arc::new(ArrowSchema::new(vec![
         Arc::clone(crate::metadata_columns::file_path_field()),
         Arc::clone(crate::metadata_columns::pos_field_arrow()),
@@ -250,19 +252,20 @@ async fn process_equality_delete_task(
     batch_size: Option<usize>,
     file_io: crate::io::FileIO,
 ) -> Result<ArrowRecordBatchStream> {
-    let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
     let file_path = task.data_file_path().to_string();
 
-    // Create output schema with _file column first, then pos (Int64)
+    // Create output schema with file_path column first, then pos (Int64)
     let output_schema = Arc::new(ArrowSchema::new(vec![
         Arc::clone(crate::metadata_columns::file_path_field()),
         Arc::clone(crate::metadata_columns::pos_field_arrow()),
     ]));
 
-    // Add _pos virtual column to track row positions, then open the Parquet file.
-    let mut record_batch_stream_builder = ArrowReader::create_parquet_record_batch_stream_builder(
+    // Open the Parquet file with page index loaded (needed for row group filtering).
+    // We always have a predicate for equality deletes, so page index is always useful.
+    // Clone file_io upfront so we can reopen the file if schema resolution requires it.
+    let initial_stream_builder = ArrowReader::create_parquet_record_batch_stream_builder(
         &file_path,
-        file_io,
+        file_io.clone(),
         true,
         Some(pos_arrow_reader_options()?),
         None,
@@ -270,11 +273,73 @@ async fn process_equality_delete_task(
     )
     .await?;
 
-    // The combined_predicate is already negated (selects rows TO DELETE).
-    let bound_predicate = task.combined_predicate.bind(task.schema_ref(), false)?;
-    record_batch_stream_builder = apply_row_filter(record_batch_stream_builder, &bound_predicate)?;
+    // Schema resolution: detect if Parquet file lacks embedded field IDs (migrated tables)
+    // and assign fallback IDs before reading.
+    let missing_field_ids = initial_stream_builder
+        .schema()
+        .fields()
+        .iter()
+        .next()
+        .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
 
-    record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
+    let mut record_batch_stream_builder = if missing_field_ids {
+        let arrow_schema = add_fallback_field_ids_to_arrow_schema(initial_stream_builder.schema());
+        let options = ArrowReaderOptions::new()
+            .with_schema(arrow_schema)
+            .with_virtual_columns(vec![Arc::clone(row_pos_field())])?;
+        ArrowReader::create_parquet_record_batch_stream_builder(
+            &file_path,
+            file_io,
+            true,
+            Some(options),
+            None,
+            task.base.file_size_in_bytes,
+        )
+        .await?
+    } else {
+        initial_stream_builder
+    };
+
+    // The combined_predicate selects rows TO DELETE. Bind it to the task schema.
+    let bound_predicate = task.combined_predicate.bind(task.schema_ref(), false)?;
+
+    // Build field_id → parquet column index map (needed for projection, row filter, row group filtering).
+    let (iceberg_field_ids, field_id_map) = ArrowReader::build_field_id_set_and_map(
+        record_batch_stream_builder.parquet_schema(),
+        &bound_predicate,
+    )?;
+
+    // Column projection: only read the columns referenced by the predicate.
+    // The _pos virtual column is handled separately and does not need projection.
+    let predicate_field_ids: Vec<i32> = iceberg_field_ids.iter().copied().collect();
+    let projection_mask = ArrowReader::get_arrow_projection_mask(
+        &predicate_field_ids,
+        &task.schema_ref(),
+        record_batch_stream_builder.parquet_schema(),
+        record_batch_stream_builder.schema(),
+        missing_field_ids,
+    )?;
+    record_batch_stream_builder = record_batch_stream_builder.with_projection(projection_mask);
+
+    // Row filter: apply the equality delete predicate to select matching rows.
+    let row_filter = ArrowReader::get_row_filter(
+        &bound_predicate,
+        record_batch_stream_builder.parquet_schema(),
+        &iceberg_field_ids,
+        &field_id_map,
+    )?;
+    record_batch_stream_builder = record_batch_stream_builder.with_row_filter(row_filter);
+
+    // Row group filtering is intentionally skipped here. The combined_predicate has the form
+    // NOT(survival_predicate), where the outer Not causes RowGroupMetricsEvaluator::not to
+    // return !inner. Since `inner=true` means "row group might contain surviving rows", the
+    // evaluator incorrectly concludes "row group definitely contains NO rows to delete" and
+    // prunes it. A correct implementation would require knowing that ALL rows in the group
+    // match the inner predicate, which isn't available from min/max statistics alone.
+
+    if let Some(batch_size) = batch_size {
+        record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
+    }
 
     // Build the stream of filtered records
     let record_batch_stream = record_batch_stream_builder.build()?;
@@ -290,30 +355,42 @@ async fn process_equality_delete_task(
             async move {
                 match batch_result {
                     Ok(batch) => {
-                        // Extract _pos column (should be the last column due to virtual_columns)
-                        if let Some(pos_column) = batch
+                        // Extract _pos column (last column due to virtual_columns).
+                        // _pos is always non-null: it is a virtual column representing the
+                        // physical row position, produced by the Parquet reader for every row.
+                        let pos_col = batch
                             .column(batch.num_columns() - 1)
                             .as_any()
                             .downcast_ref::<Int64Array>()
-                        {
-                            // Collect positions from the _pos column
-                            let positions: Vec<u64> = pos_column
-                                .iter()
-                                .filter_map(|v| v.map(|p| p as u64))
-                                .collect();
+                            .ok_or_else(|| {
+                                Error::new(
+                                    ErrorKind::Unexpected,
+                                    "Failed to extract _pos column from equality delete batch",
+                                )
+                            })?;
 
-                            // Create delete batches with the matching positions
-                            if !positions.is_empty() {
-                                create_delete_batch(&schema, &path, positions)
-                            } else {
-                                Ok(RecordBatch::new_empty(Arc::clone(&schema)))
-                            }
-                        } else {
-                            Err(Error::new(
-                                ErrorKind::Unexpected,
-                                "Failed to extract _pos column from equality delete batch",
-                            ))
+                        let num_rows = pos_col.len();
+                        if num_rows == 0 {
+                            return Ok(RecordBatch::new_empty(Arc::clone(&schema)));
                         }
+
+                        // Reuse the Int64Array directly as the pos column — no need to convert
+                        // to Vec<u64> and back. Build a matching file_path StringArray.
+                        let file_array = Arc::new(arrow_array::StringArray::from(vec![
+                            path.as_str(
+                            );
+                            num_rows
+                        ]));
+                        RecordBatch::try_new(Arc::clone(&schema), vec![
+                            file_array,
+                            Arc::clone(batch.column(batch.num_columns() - 1)),
+                        ])
+                        .map_err(|e| {
+                            Error::new(
+                                ErrorKind::Unexpected,
+                                format!("Failed to create equality delete batch: {e}"),
+                            )
+                        })
                     }
                     Err(e) => Err(e.into()),
                 }

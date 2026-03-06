@@ -29,13 +29,16 @@ use crate::arrow::{
 };
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
+use crate::io::object_cache::ObjectCache;
 use crate::metadata_columns::{
     RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, get_metadata_field_id, is_metadata_column_name,
 };
 use crate::scan::DeleteFileContext;
 use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
-use crate::spec::{DataContentType, ManifestEntryRef, ManifestStatus, Snapshot, SnapshotRef};
+use crate::spec::{
+    DataContentType, ManifestEntryRef, ManifestStatus, Snapshot, SnapshotRef, TableMetadataRef,
+};
 use crate::table::Table;
 use crate::util::snapshot::ancestors_between;
 use crate::utils::available_parallelism;
@@ -499,13 +502,15 @@ impl IncrementalTableScan {
         // delete files.
         let all_deletes = delete_file_idx.all_deletes().await;
 
-        // Spawn baseline file collection if there are equality deletes in the scan range
-        // This runs in parallel with the rest of the planning
-        let baseline_file_entry_rx = if all_deletes.iter().any(is_equality_delete) {
-            let baseline_file_task_tx = file_scan_task_tx.clone();
-            Some(self.spawn_baseline_file_collection(
+        // Collect data files that were live at from_snapshot. These are needed to generate
+        // equality delete tasks for files that predate the scan range.
+        // Runs in parallel with the rest of the planning.
+        let from_snapshot_collection = if all_deletes.iter().any(is_equality_delete) {
+            Some(Self::spawn_manifest_entry_collection(
+                self.plan_context.from_snapshot.clone(),
+                self.plan_context.table_metadata.clone(),
+                self.plan_context.object_cache.clone(),
                 concurrency_limit_manifest_files,
-                baseline_file_task_tx,
             ))
         } else {
             None
@@ -658,38 +663,42 @@ impl IncrementalTableScan {
             final_delete_tasks.push(DeleteScanTask::PositionalDeletes(path, delete_vector_inner));
         }
 
-        // Create equality delete tasks for baseline files if there are equality deletes in the scan range.
-        if let Some(baseline_file_entry_rx) = baseline_file_entry_rx {
-            let baseline_data_files =
-                Self::collect_baseline_data_files(baseline_file_entry_rx).await;
+        // Create equality delete tasks for files that were live at from_snapshot and now have
+        // equality deletes applied to them in the scan range.
+        if let Some((from_snapshot_entry_rx, mut from_snapshot_error_rx)) = from_snapshot_collection
+        {
+            let from_snapshot_data_files =
+                Self::collect_live_data_files(from_snapshot_entry_rx).await;
 
-            for baseline_entry in &baseline_data_files {
-                let all_deletes = delete_file_idx
-                    .get_deletes_for_data_file(
-                        baseline_entry.data_file(),
-                        baseline_entry.sequence_number(),
-                    )
+            // Surface any error that occurred during manifest collection.
+            if let Ok(Some(e)) = from_snapshot_error_rx.try_recv() {
+                return Err(e);
+            }
+
+            for entry in &from_snapshot_data_files {
+                let equality_deletes = delete_file_idx
+                    .get_equality_deletes_for_data_file(entry.data_file(), entry.sequence_number())
                     .await;
-
-                let equality_deletes: Vec<_> =
-                    all_deletes.into_iter().filter(is_equality_delete).collect();
 
                 if !equality_deletes.is_empty() {
                     // The predicate from build_combined_equality_delete_predicate is a "survival"
                     // filter (keeps non-deleted rows). Negate it to select rows TO DELETE.
-                    let survival_predicate = delete_filter
+                    let Some(survival_predicate) = delete_filter
                         .build_combined_equality_delete_predicate(&equality_deletes)
-                        .await?;
+                        .await?
+                    else {
+                        continue;
+                    };
                     let combined_predicate = survival_predicate.not();
 
                     let equality_delete_task = EqualityDeleteScanTask {
                         base: BaseIncrementalFileScanTask {
-                            file_size_in_bytes: baseline_entry.file_size_in_bytes(),
+                            file_size_in_bytes: entry.file_size_in_bytes(),
                             start: 0,
-                            length: baseline_entry.file_size_in_bytes(),
-                            record_count: Some(baseline_entry.record_count()),
-                            data_file_path: baseline_entry.file_path().to_string(),
-                            data_file_format: baseline_entry.file_format(),
+                            length: entry.file_size_in_bytes(),
+                            record_count: Some(entry.record_count()),
+                            data_file_path: entry.file_path().to_string(),
+                            data_file_format: entry.file_format(),
                             schema: self.plan_context.to_snapshot_schema.clone(),
                             project_field_ids: self.plan_context.field_ids.as_ref().clone(),
                         },
@@ -739,28 +748,28 @@ impl IncrementalTableScan {
         file_scan_task_stream.stream(arrow_reader)
     }
 
-    /// Spawns a concurrent task to collect all manifest entries from the `from_snapshot`.
-    /// Returns a receiver that will yield the manifest entries as they are collected.
-    /// Errors are sent through `error_tx`.
-    fn spawn_baseline_file_collection(
-        &self,
+    /// Spawns a concurrent task to stream all manifest entries for a given snapshot.
+    /// Returns `(entry_rx, error_rx)`: a channel of manifest entries and a oneshot for any error.
+    fn spawn_manifest_entry_collection(
+        snapshot: SnapshotRef,
+        table_metadata: TableMetadataRef,
+        object_cache: Arc<ObjectCache>,
         concurrency_limit: usize,
-        mut error_tx: Sender<Result<IncrementalFileScanTask>>,
-    ) -> Receiver<ManifestEntryRef> {
-        let (tx, rx) = channel(concurrency_limit);
-        let from_snapshot = self.plan_context.from_snapshot.clone();
-        let object_cache = self.plan_context.object_cache.clone();
-        let table_metadata = self.plan_context.table_metadata.clone();
+    ) -> (
+        Receiver<ManifestEntryRef>,
+        futures::channel::oneshot::Receiver<Error>,
+    ) {
+        let (entry_tx, entry_rx) = channel(concurrency_limit);
+        let (error_tx, error_rx) = futures::channel::oneshot::channel();
         spawn({
             async move {
-                let tx = tx;
                 let manifest_list = match object_cache
-                    .get_manifest_list(&from_snapshot, &table_metadata)
+                    .get_manifest_list(&snapshot, &table_metadata)
                     .await
                 {
                     Ok(list) => list,
                     Err(e) => {
-                        let _ = error_tx.send(Err(e)).await;
+                        let _ = error_tx.send(e);
                         return;
                     }
                 };
@@ -769,7 +778,7 @@ impl IncrementalTableScan {
                     futures::stream::iter(manifest_list.entries().iter().map(Ok))
                         .try_for_each_concurrent(concurrency_limit, |manifest_file| {
                             let cache = object_cache.clone();
-                            let tx = tx.clone();
+                            let tx = entry_tx.clone();
                             async move {
                                 let manifest = cache.get_manifest(manifest_file).await?;
                                 for entry in manifest.entries() {
@@ -781,16 +790,16 @@ impl IncrementalTableScan {
                         .await;
 
                 if let Err(e) = result {
-                    let _ = error_tx.send(Err(e)).await;
+                    let _ = error_tx.send(e);
                 }
             }
         });
-        rx
+        (entry_rx, error_rx)
     }
 
-    /// Collects baseline manifest entries from the receiver and returns only the
+    /// Collects manifest entries from the receiver and returns only the
     /// live data files (i.e., Added or Existing entries that have not been deleted).
-    async fn collect_baseline_data_files(rx: Receiver<ManifestEntryRef>) -> Vec<ManifestEntryRef> {
+    async fn collect_live_data_files(rx: Receiver<ManifestEntryRef>) -> Vec<ManifestEntryRef> {
         let entries: Vec<_> = rx.collect().await;
 
         let deleted_paths: HashSet<String> = entries

@@ -108,6 +108,33 @@ impl DeleteFileIndex {
         }
     }
 
+    /// Get only equality delete files that apply to the given data file.
+    pub(crate) async fn get_equality_deletes_for_data_file(
+        &self,
+        data_file: &DataFile,
+        seq_num: Option<i64>,
+    ) -> Vec<FileScanTaskDeleteFile> {
+        let notifier = {
+            let guard = self.state.read().unwrap();
+            match *guard {
+                DeleteFileIndexState::Populating(ref notifier) => notifier.clone(),
+                DeleteFileIndexState::Populated(ref index) => {
+                    return index.get_equality_deletes_for_data_file(data_file, seq_num);
+                }
+            }
+        };
+
+        notifier.notified().await;
+
+        let guard = self.state.read().unwrap();
+        match guard.deref() {
+            DeleteFileIndexState::Populated(index) => {
+                index.get_equality_deletes_for_data_file(data_file, seq_num)
+            }
+            _ => unreachable!("Cannot be any other state than loaded"),
+        }
+    }
+
     /// Get all delete files (both positional and equality deletes)
     pub(crate) async fn all_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
         let notifier = {
@@ -223,6 +250,38 @@ impl PopulatedDeleteFileIndex {
                 .filter(|&delete| {
                     seq_num
                         .map(|seq_num| delete.manifest_entry.sequence_number() >= Some(seq_num))
+                        .unwrap_or_else(|| true)
+                        && data_file.partition_spec_id == delete.partition_spec_id
+                })
+                .for_each(|delete| results.push(delete.as_ref().into()));
+        }
+
+        results
+    }
+
+    /// Determine only the equality delete files that apply to the provided `DataFile`.
+    fn get_equality_deletes_for_data_file(
+        &self,
+        data_file: &DataFile,
+        seq_num: Option<i64>,
+    ) -> Vec<FileScanTaskDeleteFile> {
+        let mut results = vec![];
+
+        self.global_equality_deletes
+            .iter()
+            .filter(|&delete| {
+                seq_num
+                    .map(|seq_num| delete.manifest_entry.sequence_number() > Some(seq_num))
+                    .unwrap_or_else(|| true)
+            })
+            .for_each(|delete| results.push(delete.as_ref().into()));
+
+        if let Some(deletes) = self.eq_deletes_by_partition.get(data_file.partition()) {
+            deletes
+                .iter()
+                .filter(|&delete| {
+                    seq_num
+                        .map(|seq_num| delete.manifest_entry.sequence_number() > Some(seq_num))
                         .unwrap_or_else(|| true)
                         && data_file.partition_spec_id == delete.partition_spec_id
                 })

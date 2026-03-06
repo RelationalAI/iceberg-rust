@@ -199,11 +199,9 @@ impl IncrementalFileScanTask {
         let equality_delete_predicate = if equality_deletes.is_empty() {
             None
         } else {
-            Some(
-                delete_filter
-                    .build_combined_equality_delete_predicate(&equality_deletes)
-                    .await?,
-            )
+            delete_filter
+                .build_combined_equality_delete_predicate(&equality_deletes)
+                .await?
         };
 
         Ok(IncrementalFileScanTask::Append(AppendedFileScanTask {
