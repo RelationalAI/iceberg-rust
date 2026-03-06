@@ -32,8 +32,7 @@ use uuid::Uuid;
 use crate::TableIdent;
 use crate::io::{FileIO, OutputFile};
 use crate::metadata_columns::{
-    RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_DELETE_FILE_PATH,
-    RESERVED_FIELD_ID_DELETE_FILE_POS,
+    RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, file_path_field, pos_field_arrow,
 };
 use crate::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, ManifestEntry, ManifestListWriter,
@@ -1322,21 +1321,10 @@ impl IncrementalTestFixture {
         data_file_path: &str,
         positions: &[i64],
     ) -> u64 {
-        let schema = {
-            let fields = vec![
-                arrow_schema::Field::new("file_path", arrow_schema::DataType::Utf8, false)
-                    .with_metadata(HashMap::from([(
-                        PARQUET_FIELD_ID_META_KEY.to_string(),
-                        RESERVED_FIELD_ID_DELETE_FILE_PATH.to_string(),
-                    )])),
-                arrow_schema::Field::new("pos", arrow_schema::DataType::Int64, false)
-                    .with_metadata(HashMap::from([(
-                        PARQUET_FIELD_ID_META_KEY.to_string(),
-                        RESERVED_FIELD_ID_DELETE_FILE_POS.to_string(),
-                    )])),
-            ];
-            Arc::new(arrow_schema::Schema::new(fields))
-        };
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::clone(file_path_field()),
+            arrow_schema::Field::clone(pos_field_arrow()),
+        ]));
 
         let file_paths: Vec<&str> = vec![data_file_path; positions.len()];
         let col_file_path = Arc::new(StringArray::from(file_paths)) as ArrayRef;
