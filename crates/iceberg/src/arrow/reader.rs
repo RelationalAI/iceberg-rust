@@ -325,7 +325,7 @@ impl ArrowReader {
         )
         .await?;
 
-        // Filter out metadata fields for Parquet projection (they don't exist in files)
+        // Filter out metadata fields — they don't exist as Parquet columns.
         let project_field_ids_without_metadata: Vec<i32> = task
             .project_field_ids
             .iter()
@@ -333,20 +333,12 @@ impl ArrowReader {
             .copied()
             .collect();
 
-        // Create projection mask based on field IDs
-        // - If file has embedded IDs: field-ID-based projection (missing_field_ids=false)
-        // - If name mapping applied: field-ID-based projection (missing_field_ids=true but IDs now match)
-        // - If fallback IDs: position-based projection (missing_field_ids=true)
-        let projection_mask = Self::get_arrow_projection_mask(
+        record_batch_stream_builder = Self::apply_projection(
+            record_batch_stream_builder,
             &project_field_ids_without_metadata,
             &task.schema,
-            record_batch_stream_builder.parquet_schema(),
-            record_batch_stream_builder.schema(),
-            missing_field_ids, // Whether to use position-based (true) or field-ID-based (false) projection
+            missing_field_ids,
         )?;
-
-        record_batch_stream_builder =
-            record_batch_stream_builder.with_projection(projection_mask.clone());
 
         // RecordBatchTransformer performs any transformations required on the RecordBatches
         // that come back from the file, such as type promotion, default column insertion,
@@ -674,7 +666,7 @@ impl ArrowReader {
         Ok(results.into())
     }
 
-    pub(crate) fn build_field_id_set_and_map(
+    fn build_field_id_set_and_map(
         parquet_schema: &SchemaDescriptor,
         predicate: &BoundPredicate,
     ) -> Result<(HashSet<i32>, HashMap<i32, usize>)> {
@@ -984,20 +976,48 @@ impl ArrowReader {
         Ok((resolved_builder, true))
     }
 
+    /// Applies a projection mask derived from `field_ids` to a builder.
+    ///
+    /// Wraps `get_arrow_projection_mask` + `with_projection` into a single call.
+    pub(crate) fn apply_projection(
+        mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        field_ids: &[i32],
+        schema: &Schema,
+        missing_field_ids: bool,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        let mask = Self::get_arrow_projection_mask(
+            field_ids,
+            schema,
+            builder.parquet_schema(),
+            builder.schema(),
+            missing_field_ids,
+        )?;
+        Ok(builder.with_projection(mask))
+    }
+
     /// Applies a bound predicate as a row filter (and optionally row group filter) to a builder.
     ///
     /// Steps:
     /// 1. Build field-id → parquet-column-index map from the predicate.
-    /// 2. Build and attach a `RowFilter`.
-    /// 3. If `row_group_filtering_enabled`, prune row groups via statistics.
+    /// 2. If `missing_field_ids` is `Some`, also apply a column projection restricted to
+    ///    the predicate's field IDs (avoids a redundant `build_field_id_set_and_map` call
+    ///    at the call site when the predicate drives both projection and filtering).
+    /// 3. Build and attach a `RowFilter`.
+    /// 4. If `row_group_filtering_enabled`, prune row groups via statistics.
     pub(crate) fn configure_predicate_filtering(
         mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
         bound_predicate: &BoundPredicate,
         schema: &Schema,
         row_group_filtering_enabled: bool,
+        missing_field_ids: Option<bool>,
     ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
         let (iceberg_field_ids, field_id_map) =
             Self::build_field_id_set_and_map(builder.parquet_schema(), bound_predicate)?;
+
+        if let Some(use_fallback) = missing_field_ids {
+            let predicate_field_ids: Vec<i32> = iceberg_field_ids.iter().copied().collect();
+            builder = Self::apply_projection(builder, &predicate_field_ids, schema, use_fallback)?;
+        }
 
         let row_filter = Self::get_row_filter(
             bound_predicate,

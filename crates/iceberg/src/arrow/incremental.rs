@@ -104,16 +104,12 @@ async fn process_incremental_append_task(
     )
     .await?;
 
-    // Create a projection mask for the batch stream to select which columns in the
-    // Parquet file that we want in the response
-    let projection_mask = ArrowReader::get_arrow_projection_mask(
+    record_batch_stream_builder = ArrowReader::apply_projection(
+        record_batch_stream_builder,
         &task.base.project_field_ids,
         &task.schema_ref(),
-        record_batch_stream_builder.parquet_schema(),
-        record_batch_stream_builder.schema(),
         missing_field_ids,
     )?;
-    record_batch_stream_builder = record_batch_stream_builder.with_projection(projection_mask);
 
     // RecordBatchTransformer performs any transformations required on the RecordBatches
     // that come back from the file, such as type promotion, default column insertion,
@@ -161,6 +157,7 @@ async fn process_incremental_append_task(
             &bound_predicate,
             &task.schema_ref(),
             false, // no row-group pruning for append predicate
+            None,  // projection already applied above
         )?;
     }
 
@@ -291,30 +288,17 @@ async fn process_equality_delete_task(
     // The combined_predicate selects rows TO DELETE. Bind it to the task schema.
     let bound_predicate = task.combined_predicate.bind(task.schema_ref(), false)?;
 
-    // Column projection: only read the columns referenced by the predicate.
-    // The _pos virtual column is handled separately and does not need projection.
-    let (iceberg_field_ids, _) = ArrowReader::build_field_id_set_and_map(
-        record_batch_stream_builder.parquet_schema(),
-        &bound_predicate,
-    )?;
-    let predicate_field_ids: Vec<i32> = iceberg_field_ids.iter().copied().collect();
-    let projection_mask = ArrowReader::get_arrow_projection_mask(
-        &predicate_field_ids,
-        &task.schema_ref(),
-        record_batch_stream_builder.parquet_schema(),
-        record_batch_stream_builder.schema(),
-        missing_field_ids,
-    )?;
-    record_batch_stream_builder = record_batch_stream_builder.with_projection(projection_mask);
-
-    // Row filter + row group filtering: apply the equality delete predicate.
-    // Row group pruning is safe here because combined_predicate has been rewritten
-    // via rewrite_not() so RowGroupMetricsEvaluator can evaluate it correctly.
+    // Column projection (predicate columns only) + row filter + row group filtering.
+    // Projection and filtering share the same field-ID map, so configure_predicate_filtering
+    // handles both in one pass when Some(missing_field_ids) is passed.
+    // Row group pruning is safe because combined_predicate has been rewritten via
+    // rewrite_not() so RowGroupMetricsEvaluator can evaluate it correctly.
     record_batch_stream_builder = ArrowReader::configure_predicate_filtering(
         record_batch_stream_builder,
         &bound_predicate,
         &task.base.schema,
-        true, // row group filtering enabled
+        true,                    // row group filtering enabled
+        Some(missing_field_ids), // also apply projection using predicate field IDs
     )?;
 
     if let Some(batch_size) = batch_size {
