@@ -24,7 +24,7 @@ use crate::arrow::delete_filter::{DeleteFilter, is_equality_delete};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Predicate;
 use crate::scan::context::ManifestEntryContext;
-use crate::spec::{DataFileFormat, Schema, SchemaRef};
+use crate::spec::{DataFileFormat, PartitionSpec, Schema, SchemaRef, Struct, TableMetadataRef};
 
 /// Base file scan task containing common attributes for incremental scan tasks.
 #[derive(Debug, Clone)]
@@ -45,6 +45,12 @@ pub struct BaseIncrementalFileScanTask {
     pub schema: SchemaRef,
     /// The field ids to project.
     pub project_field_ids: Vec<i32>,
+    /// Partition data from the manifest entry, used to supply constant values for
+    /// identity-transformed partition columns without reading them from the file.
+    pub partition: Option<Struct>,
+    /// The partition spec for this file, used to distinguish identity transforms
+    /// (which use partition metadata constants) from non-identity transforms.
+    pub partition_spec: Option<Arc<PartitionSpec>>,
 }
 
 impl BaseIncrementalFileScanTask {
@@ -181,6 +187,7 @@ impl IncrementalFileScanTask {
     pub(crate) async fn append_from_manifest_entry(
         manifest_entry_context: &ManifestEntryContext,
         delete_filter: &DeleteFilter,
+        table_metadata: &TableMetadataRef,
     ) -> Result<Self> {
         let data_file_path = manifest_entry_context.manifest_entry.file_path();
 
@@ -204,6 +211,18 @@ impl IncrementalFileScanTask {
                 .await?
         };
 
+        let partition_spec_id = manifest_entry_context.partition_spec_id;
+        let partition_spec = table_metadata
+            .partition_spec_by_id(partition_spec_id)
+            .cloned();
+        let partition = Some(
+            manifest_entry_context
+                .manifest_entry
+                .data_file()
+                .partition()
+                .clone(),
+        );
+
         Ok(IncrementalFileScanTask::Append(AppendedFileScanTask {
             base: BaseIncrementalFileScanTask {
                 file_size_in_bytes: manifest_entry_context.manifest_entry.file_size_in_bytes(),
@@ -214,6 +233,8 @@ impl IncrementalFileScanTask {
                 data_file_format: manifest_entry_context.manifest_entry.file_format(),
                 schema: manifest_entry_context.snapshot_schema.clone(),
                 project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
+                partition,
+                partition_spec,
             },
             positional_deletes: delete_filter.get_delete_vector_for_path(data_file_path),
             equality_delete_predicate,

@@ -535,6 +535,7 @@ impl IncrementalTableScan {
 
         // Process the data file [`ManifestEntry`] stream in parallel
         let filter = delete_filter.clone();
+        let table_metadata = self.plan_context.table_metadata.clone();
         spawn(async move {
             let result = manifest_entry_data_ctx_rx
                 .map(|me_ctx| Ok((me_ctx, file_scan_task_tx.clone())))
@@ -542,6 +543,7 @@ impl IncrementalTableScan {
                     concurrency_limit_manifest_entries,
                     |(manifest_entry_context, tx)| {
                         let filter = filter.clone();
+                        let table_metadata = table_metadata.clone();
                         async move {
                             if manifest_entry_context.manifest_entry.status()
                                 == ManifestStatus::Added
@@ -551,6 +553,7 @@ impl IncrementalTableScan {
                                         tx,
                                         manifest_entry_context,
                                         &filter,
+                                        &table_metadata,
                                     )
                                     .await
                                 })
@@ -705,6 +708,8 @@ impl IncrementalTableScan {
                             data_file_format: entry.file_format(),
                             schema: self.plan_context.to_snapshot_schema.clone(),
                             project_field_ids: self.plan_context.field_ids.as_ref().clone(),
+                            partition: None,
+                            partition_spec: None,
                         },
                         combined_predicate,
                     };
@@ -858,6 +863,7 @@ impl IncrementalTableScan {
         mut file_scan_task_tx: Sender<Result<IncrementalFileScanTask>>,
         manifest_entry_context: ManifestEntryContext,
         delete_filter: &DeleteFilter,
+        table_metadata: &TableMetadataRef,
     ) -> Result<()> {
         // Skip processing this manifest entry if it has been marked as deleted.
         if !manifest_entry_context.manifest_entry.is_alive() {
@@ -875,6 +881,7 @@ impl IncrementalTableScan {
         let file_scan_task = IncrementalFileScanTask::append_from_manifest_entry(
             &manifest_entry_context,
             delete_filter,
+            table_metadata,
         )
         .await?;
 
@@ -905,6 +912,8 @@ impl IncrementalTableScan {
                 data_file_format: manifest_entry_context.manifest_entry.file_format(),
                 schema: manifest_entry_context.snapshot_schema.clone(),
                 project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
+                partition: None,
+                partition_spec: None,
             },
         });
 

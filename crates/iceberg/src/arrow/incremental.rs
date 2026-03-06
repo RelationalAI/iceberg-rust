@@ -26,7 +26,6 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
 
 use crate::arrow::reader::process_record_batch_stream;
-use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Bind;
@@ -37,7 +36,6 @@ use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
     AppendedFileScanTask, DeleteScanTask, EqualityDeleteScanTask, IncrementalFileScanTaskStreams,
 };
-use crate::spec::{Datum, PrimitiveType};
 use crate::{Error, ErrorKind, Result};
 
 /// Default batch size for incremental delete operations.
@@ -113,21 +111,14 @@ async fn process_incremental_append_task(
 
     // RecordBatchTransformer performs any transformations required on the RecordBatches
     // that come back from the file, such as type promotion, default column insertion,
-    // column re-ordering, and virtual field addition (like _file)
-    let datum = Datum::new(
-        PrimitiveType::String,
-        crate::spec::PrimitiveLiteral::String(task.base.data_file_path.clone()),
-    );
-    let mut record_batch_transformer_builder =
-        RecordBatchTransformerBuilder::new(task.schema_ref(), &task.base.project_field_ids)
-            .with_constant(crate::metadata_columns::RESERVED_FIELD_ID_FILE, datum);
-
-    if has_pos_column {
-        record_batch_transformer_builder =
-            record_batch_transformer_builder.with_virtual_field(Arc::clone(row_pos_field()))?;
-    }
-
-    let mut record_batch_transformer = record_batch_transformer_builder.build();
+    // column re-ordering, partition constants, and virtual field addition (like _file)
+    let mut record_batch_transformer = ArrowReader::build_record_batch_transformer(
+        task.schema_ref(),
+        &task.base.project_field_ids,
+        &task.base.data_file_path,
+        task.base.partition_spec.clone(),
+        task.base.partition.clone(),
+    )?;
 
     if let Some(batch_size) = batch_size {
         record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);

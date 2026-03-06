@@ -46,7 +46,9 @@ use parquet::file::metadata::{
 use parquet::schema::types::{SchemaDescriptor, Type as ParquetType};
 
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
-use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
+use crate::arrow::record_batch_transformer::{
+    RecordBatchTransformer, RecordBatchTransformerBuilder,
+};
 use crate::arrow::{arrow_schema_to_schema, get_arrow_datum};
 use crate::delete_vector::DeleteVector;
 use crate::error::Result;
@@ -60,7 +62,9 @@ use crate::metadata_columns::{
 };
 use crate::runtime::spawn;
 use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
-use crate::spec::{Datum, NameMapping, NestedField, PrimitiveType, Schema, Type};
+use crate::spec::{
+    Datum, NameMapping, NestedField, PartitionSpec, PrimitiveType, Schema, SchemaRef, Struct, Type,
+};
 use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind};
 
@@ -325,17 +329,9 @@ impl ArrowReader {
         )
         .await?;
 
-        // Filter out metadata fields — they don't exist as Parquet columns.
-        let project_field_ids_without_metadata: Vec<i32> = task
-            .project_field_ids
-            .iter()
-            .filter(|&&id| !is_metadata_field(id))
-            .copied()
-            .collect();
-
         record_batch_stream_builder = Self::apply_projection(
             record_batch_stream_builder,
-            &project_field_ids_without_metadata,
+            task.project_field_ids(),
             &task.schema,
             missing_field_ids,
         )?;
@@ -343,30 +339,13 @@ impl ArrowReader {
         // RecordBatchTransformer performs any transformations required on the RecordBatches
         // that come back from the file, such as type promotion, default column insertion,
         // column re-ordering, partition constants, and virtual field addition (like _file)
-        let mut record_batch_transformer_builder =
-            RecordBatchTransformerBuilder::new(task.schema_ref(), task.project_field_ids());
-
-        // Add the _file metadata column if it's in the projected fields
-        if task.project_field_ids().contains(&RESERVED_FIELD_ID_FILE) {
-            let file_datum = Datum::string(task.data_file_path.clone());
-            record_batch_transformer_builder =
-                record_batch_transformer_builder.with_constant(RESERVED_FIELD_ID_FILE, file_datum);
-        }
-
-        // Add the _pos virtual column if it's requested and produced by Parquet reader
-        if has_pos_column {
-            record_batch_transformer_builder =
-                record_batch_transformer_builder.with_virtual_field(Arc::clone(row_pos_field()))?;
-        }
-
-        if let (Some(partition_spec), Some(partition_data)) =
-            (task.partition_spec.clone(), task.partition.clone())
-        {
-            record_batch_transformer_builder =
-                record_batch_transformer_builder.with_partition(partition_spec, partition_data)?;
-        }
-
-        let mut record_batch_transformer = record_batch_transformer_builder.build();
+        let mut record_batch_transformer = Self::build_record_batch_transformer(
+            task.schema_ref(),
+            task.project_field_ids(),
+            &task.data_file_path,
+            task.partition_spec.clone(),
+            task.partition.clone(),
+        )?;
 
         if let Some(batch_size) = batch_size {
             record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
@@ -981,14 +960,53 @@ impl ArrowReader {
         schema: &Schema,
         missing_field_ids: bool,
     ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        // Metadata fields (e.g. _file, _pos) are virtual — they don't exist as Parquet columns.
+        // Filter them out so get_arrow_projection_mask only sees real schema field IDs.
+        let real_field_ids: Vec<i32> = field_ids
+            .iter()
+            .filter(|&&id| !is_metadata_field(id))
+            .copied()
+            .collect();
         let mask = Self::get_arrow_projection_mask(
-            field_ids,
+            &real_field_ids,
             schema,
             builder.parquet_schema(),
             builder.schema(),
             missing_field_ids,
         )?;
         Ok(builder.with_projection(mask))
+    }
+
+    /// Builds a [`RecordBatchTransformer`] for a data file scan task.
+    ///
+    /// Handles the three optional transformations that are common to both the full
+    /// scan (`process_file_scan_task`) and the incremental append scan
+    /// (`process_incremental_append_task`):
+    /// - `_file` constant column (only when `RESERVED_FIELD_ID_FILE` is projected)
+    /// - `_pos` virtual column (only when `RESERVED_FIELD_ID_POS` is projected)
+    /// - identity-transform partition columns (only when partition metadata is present)
+    pub(crate) fn build_record_batch_transformer(
+        schema: SchemaRef,
+        project_field_ids: &[i32],
+        data_file_path: &str,
+        partition_spec: Option<Arc<PartitionSpec>>,
+        partition: Option<Struct>,
+    ) -> Result<RecordBatchTransformer> {
+        let mut builder = RecordBatchTransformerBuilder::new(schema, project_field_ids);
+
+        if project_field_ids.contains(&RESERVED_FIELD_ID_FILE) {
+            builder = builder.with_constant(RESERVED_FIELD_ID_FILE, Datum::string(data_file_path));
+        }
+
+        if project_field_ids.contains(&RESERVED_FIELD_ID_POS) {
+            builder = builder.with_virtual_field(Arc::clone(row_pos_field()))?;
+        }
+
+        if let (Some(spec), Some(data)) = (partition_spec, partition) {
+            builder = builder.with_partition(spec, data)?;
+        }
+
+        Ok(builder.build())
     }
 
     /// Applies a bound predicate as a row filter (and optionally row group filter) to a builder.
