@@ -3614,14 +3614,14 @@ async fn test_equality_delete_removes_all_rows_from_appended_file() {
     // Since file is added in the scan range (from=1), it's treated as appended.
     // Expected appends: empty (all rows are deleted via equality delete predicate)
     // Expected deletes: empty (appended files use row filtering, not delete stream)
-    // fixture
-    //     .verify_incremental_scan(
-    //         1,
-    //         3,
-    //         vec![], // no appended rows (all deleted by equality predicate)
-    //         vec![], // no delete stream (appended files use row filtering, not delete stream)
-    //     )
-    //     .await;
+    fixture
+        .verify_incremental_scan(
+            1,
+            3,
+            vec![], // no appended rows (all deleted by equality predicate)
+            vec![], // no delete stream (appended files use row filtering, not delete stream)
+        )
+        .await;
 
     // Also verify scan from 2 to 3
     // File is added in snapshot 2 (the from_snapshot), deletes applied in snapshot 3
