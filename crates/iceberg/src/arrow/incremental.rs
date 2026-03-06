@@ -25,7 +25,7 @@ use futures::stream::select;
 use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
 
-use crate::arrow::reader::{ArrowFileReader, process_record_batch_stream};
+use crate::arrow::reader::process_record_batch_stream;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;

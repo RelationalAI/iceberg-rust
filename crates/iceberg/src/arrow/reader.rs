@@ -939,6 +939,7 @@ impl ArrowReader {
     /// - Branch 1: file has embedded field IDs → return as-is
     /// - Branch 2: name_mapping present → apply name mapping, reopen
     /// - Branch 3: no name mapping → assign fallback position-based IDs, reopen
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn resolve_parquet_schema(
         initial_builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
         file_path: &str,
