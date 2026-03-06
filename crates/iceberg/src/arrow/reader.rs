@@ -877,7 +877,7 @@ impl ArrowReader {
         }
     }
 
-    pub(crate) fn get_row_filter(
+    fn get_row_filter(
         predicates: &BoundPredicate,
         parquet_schema: &SchemaDescriptor,
         iceberg_field_ids: &HashSet<i32>,
@@ -906,7 +906,7 @@ impl ArrowReader {
         Ok(RowFilter::new(vec![Box::new(arrow_predicate)]))
     }
 
-    pub(crate) fn get_selected_row_group_indices(
+    fn get_selected_row_group_indices(
         predicate: &BoundPredicate,
         parquet_metadata: &Arc<ParquetMetaData>,
         field_id_map: &HashMap<i32, usize>,
