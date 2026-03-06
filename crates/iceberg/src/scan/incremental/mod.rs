@@ -689,6 +689,10 @@ impl IncrementalTableScan {
                     else {
                         continue;
                     };
+                    // build_combined_equality_delete_predicate returns a survival predicate
+                    // (e.g. `id != 1`). Negate it to get the delete condition (`id == 1`),
+                    // then rewrite_not() pushes the NOT inward via De Morgan so row group
+                    // stats can prune correctly.
                     let combined_predicate = survival_predicate.not().rewrite_not();
 
                     let equality_delete_task = EqualityDeleteScanTask {

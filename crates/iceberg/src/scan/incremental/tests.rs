@@ -3119,7 +3119,7 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
     assert_eq!(total_append_rows, 298, "Should have 298 appended rows");
 }
 
-/// Test Case 1: Equality delete on appended file
+/// Test Case: Equality delete on appended file
 ///
 /// Scenario: In a single snapshot, we both append new data and apply an equality delete
 /// that matches some of the appended rows.
@@ -3127,8 +3127,6 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
 /// Expected behavior:
 /// - Append stream: Only the rows that were NOT deleted by the equality delete
 /// - Delete stream: Empty (the deleted rows are filtered from the append)
-///
-/// This test will FAIL until equality delete support is implemented in incremental scans.
 #[tokio::test]
 async fn test_equality_delete_on_appended_file() {
     let fixture = IncrementalTestFixture::new(vec![
@@ -3155,7 +3153,7 @@ async fn test_equality_delete_on_appended_file() {
         .await;
 }
 
-/// Test Case 2: Equality delete on existing file
+/// Test Case: Equality delete on existing file
 ///
 /// Scenario: A file exists at the start of the scan range. In a later snapshot within
 /// the range, an equality delete is applied that matches rows in that existing file.
@@ -3163,8 +3161,6 @@ async fn test_equality_delete_on_appended_file() {
 /// Expected behavior:
 /// - Append stream: Empty (no new data files added)
 /// - Delete stream: The rows from the existing file that matched the equality delete predicate
-///
-/// This test will FAIL until equality delete support is implemented in incremental scans.
 #[tokio::test]
 async fn test_equality_delete_on_existing_file() {
     let fixture = IncrementalTestFixture::new(vec![
@@ -3194,7 +3190,7 @@ async fn test_equality_delete_on_existing_file() {
         .await;
 }
 
-/// Test Case 3: Chained equality deletes
+/// Test Case: Chained equality deletes
 ///
 /// Scenario: An existing file has multiple equality deletes applied in different snapshots.
 /// Both deletes match rows from the original file.
@@ -3203,8 +3199,6 @@ async fn test_equality_delete_on_existing_file() {
 /// - Incremental scan across both delete snapshots should report all affected rows
 /// - Only the rows matching the predicates should appear in delete stream
 /// - Cumulative effect: file is left with rows that matched neither predicate
-///
-/// This test will FAIL until equality delete support is implemented in incremental scans.
 #[tokio::test]
 async fn test_chained_equality_deletes() {
     let fixture = IncrementalTestFixture::new(vec![
@@ -3515,60 +3509,6 @@ async fn test_equality_delete_does_not_apply_to_later_appends() {
         .await;
 }
 
-/// Test Case: Equality delete removes entire file
-///
-/// Scenario: A file is added with N rows, then an equality delete is applied that matches
-/// ALL rows in the file. The result is that the file becomes effectively empty.
-///
-/// Expected behavior:
-/// - Append stream: Empty (all rows are deleted)
-/// - Delete stream: All rows from the file (as deleted records)
-///
-/// This tests that the system correctly handles the edge case where a delete predicate
-/// matches all rows in a file.
-#[tokio::test]
-async fn test_equality_delete_removes_entire_appended_file() {
-    let fixture = IncrementalTestFixture::new(vec![
-        Operation::Add(vec![], "empty.parquet".to_string()), // Snapshot 1: Empty base
-        Operation::Add(
-            vec![
-                (1, "a".to_string()),
-                (2, "b".to_string()),
-                (3, "c".to_string()),
-                (4, "d".to_string()),
-                (5, "e".to_string()),
-            ],
-            "data-1.parquet".to_string(),
-        ), // Snapshot 2: Add 5 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec![
-            "1".to_string(),
-            "2".to_string(),
-            "3".to_string(),
-            "4".to_string(),
-            "5".to_string(),
-        ]), // Snapshot 3: Delete all rows (n in {1,2,3,4,5})
-    ])
-    .await;
-
-    // Verify incremental scan from 1 to 3
-    // File is added in snapshot 2 (within scan range), so it's an appended file.
-    // Equality deletes on appended files are applied via row filtering, not delete stream.
-    // Expected appends: empty (all rows filtered out)
-    // Expected deletes: empty (appended files use row filtering, not delete stream)
-    fixture
-        .verify_incremental_scan(
-            1,
-            3,
-            vec![], // no appended rows (all filtered out)
-            vec![], // no delete stream (filtering during append)
-        )
-        .await;
-}
-
-/// Test Case: Equality delete removes most rows from appended file
-///
-/// Scenario: A file is added in the scan range with N rows, then an equality delete is applied
-/// that matches most rows. The result is that only a few rows remain.
 /// Test Case: Equality delete removes all rows from appended file
 ///
 /// Scenario: A file is added in the scan range with N rows, then an equality delete is applied
@@ -3628,5 +3568,60 @@ async fn test_equality_delete_removes_all_rows_from_appended_file() {
                 (4, &data_file_path),
             ], // all rows should appear in delete stream
         )
+        .await;
+}
+
+/// Test Case: Equality delete on multiple existing files
+///
+/// Scenario: Two files exist before the scan range. A single equality delete applied within
+/// the scan range matches one row in each file.
+///
+/// Expected behavior when scanning from snapshot 1 to 3 (data-1 is baseline, data-2 is appended):
+/// - Append stream: Rows from data-2 NOT matched by the equality delete
+/// - Delete stream: Matched row from data-1 (baseline file, reported via delete stream)
+///
+/// Expected behavior when scanning from snapshot 2 to 3 (both files are baseline):
+/// - Append stream: Empty
+/// - Delete stream: Matched rows from both files
+#[tokio::test]
+async fn test_equality_delete_on_multiple_files() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: data-1 with 3 rows
+        Operation::Add(
+            vec![
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+                (6, "f".to_string()),
+            ],
+            "data-2.parquet".to_string(),
+        ), // Snapshot 2: data-2 with 3 rows
+        Operation::EqualityDelete(DeleteColumn::N, vec!["2".to_string(), "5".to_string()]), // Snapshot 3: delete n=2 (in data-1) and n=5 (in data-2)
+    ])
+    .await;
+
+    let data_file_1_path = format!("{}/data/data-1.parquet", fixture.table_location);
+    let data_file_2_path = format!("{}/data/data-2.parquet", fixture.table_location);
+
+    // Scan from 1 to 3: data-1 is baseline (added before range), data-2 is appended (added in range).
+    // Equality delete n=2 applies to baseline data-1 via delete stream (position 1).
+    // Equality delete n=5 applies to appended data-2 via row filter (filtered out).
+    fixture
+        .verify_incremental_scan(1, 3, vec![(4, "d"), (6, "f")], vec![(1, &data_file_1_path)])
+        .await;
+
+    // Scan from 2 to 3: both files are baseline (both live at from_snapshot=2).
+    // Both n=2 (position 1 in data-1) and n=5 (position 1 in data-2) appear in delete stream.
+    fixture
+        .verify_incremental_scan(2, 3, vec![], vec![
+            (1, &data_file_1_path),
+            (1, &data_file_2_path),
+        ])
         .await;
 }

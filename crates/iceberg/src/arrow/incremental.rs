@@ -378,8 +378,8 @@ async fn process_equality_delete_task(
                             return Ok(RecordBatch::new_empty(Arc::clone(&schema)));
                         }
 
-                        // Reuse the Int64Array directly as the pos column — no need to convert
-                        // to Vec<u64> and back. Build a matching file_path StringArray.
+                        // Reuse the Int64Array directly as the pos column.
+                        // Build a matching file_path StringArray.
                         let file_array = Arc::new(arrow_array::StringArray::from(vec![
                             path.as_str(
                             );
