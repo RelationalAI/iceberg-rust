@@ -980,7 +980,7 @@ impl ArrowReader {
     ///
     /// Wraps `get_arrow_projection_mask` + `with_projection` into a single call.
     pub(crate) fn apply_projection(
-        mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
         field_ids: &[i32],
         schema: &Schema,
         missing_field_ids: bool,
