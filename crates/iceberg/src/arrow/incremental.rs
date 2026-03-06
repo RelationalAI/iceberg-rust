@@ -330,12 +330,16 @@ async fn process_equality_delete_task(
     )?;
     record_batch_stream_builder = record_batch_stream_builder.with_row_filter(row_filter);
 
-    // Row group filtering is intentionally skipped here. The combined_predicate has the form
-    // NOT(survival_predicate), where the outer Not causes RowGroupMetricsEvaluator::not to
-    // return !inner. Since `inner=true` means "row group might contain surviving rows", the
-    // evaluator incorrectly concludes "row group definitely contains NO rows to delete" and
-    // prunes it. A correct implementation would require knowing that ALL rows in the group
-    // match the inner predicate, which isn't available from min/max statistics alone.
+    // Row group filtering: prune row groups that cannot contain rows matching the predicate.
+    // combined_predicate has been rewritten via rewrite_not() so there is no outer NOT —
+    // RowGroupMetricsEvaluator can evaluate it correctly using min/max statistics.
+    let row_group_indices = ArrowReader::get_selected_row_group_indices(
+        &bound_predicate,
+        record_batch_stream_builder.metadata(),
+        &field_id_map,
+        &task.base.schema,
+    )?;
+    record_batch_stream_builder = record_batch_stream_builder.with_row_groups(row_group_indices);
 
     if let Some(batch_size) = batch_size {
         record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);

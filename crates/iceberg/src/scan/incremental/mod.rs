@@ -689,7 +689,7 @@ impl IncrementalTableScan {
                     else {
                         continue;
                     };
-                    let combined_predicate = survival_predicate.not();
+                    let combined_predicate = survival_predicate.not().rewrite_not();
 
                     let equality_delete_task = EqualityDeleteScanTask {
                         base: BaseIncrementalFileScanTask {
