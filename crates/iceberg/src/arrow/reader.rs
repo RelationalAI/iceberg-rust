@@ -297,8 +297,12 @@ impl ArrowReader {
             virtual_columns.push(Arc::clone(row_pos_field()));
         }
 
-        // Migrated tables lack field IDs, requiring us to inspect the schema to choose
-        // between field-ID-based or position-based projection
+        // Open the file initially (with virtual columns) then resolve the schema,
+        // handling migrated tables that lack embedded Parquet field IDs.
+        // Three-branch strategy matching Java's ReadConf constructor:
+        //   Branch 1: file has embedded field IDs → use as-is
+        //   Branch 2: name_mapping present → apply name mapping, reopen
+        //   Branch 3: fallback → assign position-based IDs, reopen
         let initial_stream_builder = Self::create_parquet_record_batch_stream_builder(
             &task.data_file_path,
             file_io.clone(),
@@ -309,65 +313,17 @@ impl ArrowReader {
         )
         .await?;
 
-        // Check if Parquet file has embedded field IDs
-        // Corresponds to Java's ParquetSchemaUtil.hasIds()
-        // Reference: parquet/src/main/java/org/apache/iceberg/parquet/ParquetSchemaUtil.java:118
-        let missing_field_ids = initial_stream_builder
-            .schema()
-            .fields()
-            .iter()
-            .next()
-            .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
-
-        // Three-branch schema resolution strategy matching Java's ReadConf constructor
-        //
-        // Per Iceberg spec Column Projection rules:
-        // "Columns in Iceberg data files are selected by field id. The table schema's column
-        //  names and order may change after a data file is written, and projection must be done
-        //  using field ids."
-        // https://iceberg.apache.org/spec/#column-projection
-        //
-        // When Parquet files lack field IDs (e.g., Hive/Spark migrations via add_files),
-        // we must assign field IDs BEFORE reading data to enable correct projection.
-        //
-        // Java's ReadConf determines field ID strategy:
-        // - Branch 1: hasIds(fileSchema) → trust embedded field IDs, use pruneColumns()
-        // - Branch 2: nameMapping present → applyNameMapping(), then pruneColumns()
-        // - Branch 3: fallback → addFallbackIds(), then pruneColumnsFallback()
-        let mut record_batch_stream_builder = if missing_field_ids {
-            // Parquet file lacks field IDs - must assign them before reading
-            let arrow_schema = if let Some(name_mapping) = &task.name_mapping {
-                // Branch 2: Apply name mapping to assign correct Iceberg field IDs
-                // Per spec rule #2: "Use schema.name-mapping.default metadata to map field id
-                // to columns without field id"
-                // Corresponds to Java's ParquetSchemaUtil.applyNameMapping()
-                apply_name_mapping_to_arrow_schema(
-                    Arc::clone(initial_stream_builder.schema()),
-                    name_mapping,
-                )?
-            } else {
-                // Branch 3: No name mapping - use position-based fallback IDs
-                // Corresponds to Java's ParquetSchemaUtil.addFallbackIds()
-                add_fallback_field_ids_to_arrow_schema(initial_stream_builder.schema())
-            };
-
-            let options = ArrowReaderOptions::new()
-                .with_schema(arrow_schema)
-                .with_virtual_columns(virtual_columns.clone())?;
-
-            Self::create_parquet_record_batch_stream_builder(
-                &task.data_file_path,
-                file_io.clone(),
-                should_load_page_index,
-                Some(options),
-                metadata_size_hint,
-                task.file_size_in_bytes,
-            )
-            .await?
-        } else {
-            // Branch 1: File has embedded field IDs - trust them
-            initial_stream_builder
-        };
+        let (mut record_batch_stream_builder, missing_field_ids) = Self::resolve_parquet_schema(
+            initial_stream_builder,
+            &task.data_file_path,
+            file_io.clone(),
+            should_load_page_index,
+            virtual_columns.clone(),
+            metadata_size_hint,
+            task.file_size_in_bytes,
+            task.name_mapping.as_deref(),
+        )
+        .await?;
 
         // Filter out metadata fields for Parquet projection (they don't exist in files)
         let project_field_ids_without_metadata: Vec<i32> = task
@@ -971,6 +927,96 @@ impl ArrowReader {
         }
 
         Ok(results)
+    }
+
+    /// Resolves the Parquet schema for a file, handling the three-branch strategy for
+    /// migrated tables that lack embedded field IDs.
+    ///
+    /// Returns `(resolved_builder, missing_field_ids)` where `missing_field_ids` is `true`
+    /// when the file lacked embedded field IDs and fallback/name-mapping IDs were assigned.
+    ///
+    /// This matches Java's `ReadConf` constructor logic:
+    /// - Branch 1: file has embedded field IDs → return as-is
+    /// - Branch 2: name_mapping present → apply name mapping, reopen
+    /// - Branch 3: no name mapping → assign fallback position-based IDs, reopen
+    pub(crate) async fn resolve_parquet_schema(
+        initial_builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        file_path: &str,
+        file_io: FileIO,
+        should_load_page_index: bool,
+        virtual_columns: Vec<Arc<arrow_schema::Field>>,
+        metadata_size_hint: Option<usize>,
+        file_size_in_bytes: u64,
+        name_mapping: Option<&NameMapping>,
+    ) -> Result<(ParquetRecordBatchStreamBuilder<ArrowFileReader>, bool)> {
+        let missing_field_ids = initial_builder
+            .schema()
+            .fields()
+            .iter()
+            .next()
+            .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
+
+        if !missing_field_ids {
+            return Ok((initial_builder, false));
+        }
+
+        let arrow_schema = if let Some(nm) = name_mapping {
+            apply_name_mapping_to_arrow_schema(Arc::clone(initial_builder.schema()), nm)?
+        } else {
+            add_fallback_field_ids_to_arrow_schema(initial_builder.schema())
+        };
+
+        let options = ArrowReaderOptions::new()
+            .with_schema(arrow_schema)
+            .with_virtual_columns(virtual_columns)?;
+
+        let resolved_builder = Self::create_parquet_record_batch_stream_builder(
+            file_path,
+            file_io,
+            should_load_page_index,
+            Some(options),
+            metadata_size_hint,
+            file_size_in_bytes,
+        )
+        .await?;
+
+        Ok((resolved_builder, true))
+    }
+
+    /// Applies a bound predicate as a row filter (and optionally row group filter) to a builder.
+    ///
+    /// Steps:
+    /// 1. Build field-id → parquet-column-index map from the predicate.
+    /// 2. Build and attach a `RowFilter`.
+    /// 3. If `row_group_filtering_enabled`, prune row groups via statistics.
+    pub(crate) fn configure_predicate_filtering(
+        mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        bound_predicate: &BoundPredicate,
+        schema: &Schema,
+        row_group_filtering_enabled: bool,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        let (iceberg_field_ids, field_id_map) =
+            Self::build_field_id_set_and_map(builder.parquet_schema(), bound_predicate)?;
+
+        let row_filter = Self::get_row_filter(
+            bound_predicate,
+            builder.parquet_schema(),
+            &iceberg_field_ids,
+            &field_id_map,
+        )?;
+        builder = builder.with_row_filter(row_filter);
+
+        if row_group_filtering_enabled {
+            let row_group_indices = Self::get_selected_row_group_indices(
+                bound_predicate,
+                builder.metadata(),
+                &field_id_map,
+                schema,
+            )?;
+            builder = builder.with_row_groups(row_group_indices);
+        }
+
+        Ok(builder)
     }
 
     fn get_row_selection_for_filter_predicate(
