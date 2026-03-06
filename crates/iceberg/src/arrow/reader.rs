@@ -1179,7 +1179,7 @@ fn build_fallback_field_id_map(parquet_schema: &SchemaDescriptor) -> HashMap<i32
 ///
 /// # Returns
 /// Arrow schema with field IDs assigned based on name mapping
-pub(crate) fn apply_name_mapping_to_arrow_schema(
+fn apply_name_mapping_to_arrow_schema(
     arrow_schema: ArrowSchemaRef,
     name_mapping: &NameMapping,
 ) -> Result<Arc<ArrowSchema>> {
@@ -1237,7 +1237,7 @@ pub(crate) fn apply_name_mapping_to_arrow_schema(
 /// Why at schema level (not per-batch): Efficiency - avoids repeated schema modification.
 /// Why only top-level: Nested projection uses leaf column indices, not parent struct IDs.
 /// Why 1-indexed: Compatibility with iceberg-java's ParquetSchemaUtil.addFallbackIds().
-pub(crate) fn add_fallback_field_ids_to_arrow_schema(
+fn add_fallback_field_ids_to_arrow_schema(
     arrow_schema: &ArrowSchemaRef,
 ) -> Arc<ArrowSchema> {
     debug_assert!(
