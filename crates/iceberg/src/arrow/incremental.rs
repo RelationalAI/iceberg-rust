@@ -75,11 +75,15 @@ async fn process_incremental_append_task(
         virtual_columns.push(Arc::clone(row_pos_field()));
     }
 
+    // Page index is needed when an equality delete predicate is present for page-level
+    // row selection (get_row_selection_for_filter_predicate requires column/offset index).
+    let should_load_page_index = task.equality_delete_predicate.is_some();
+
     // Open the file, then resolve the schema for migrated tables lacking embedded field IDs.
     let initial_builder = ArrowReader::create_parquet_record_batch_stream_builder(
         &task.base.data_file_path,
         file_io.clone(),
-        false,
+        should_load_page_index,
         Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?),
         metadata_size_hint,
         task.base.file_size_in_bytes,
@@ -90,7 +94,7 @@ async fn process_incremental_append_task(
         initial_builder,
         &task.base.data_file_path,
         file_io,
-        false,
+        should_load_page_index,
         virtual_columns,
         metadata_size_hint,
         task.base.file_size_in_bytes,
@@ -120,26 +124,57 @@ async fn process_incremental_append_task(
         record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
     }
 
-    // Byte-range row group filtering + positional delete row selection.
-    record_batch_stream_builder = ArrowReader::apply_byte_range_and_positional_deletes(
-        record_batch_stream_builder,
-        task.base.start,
-        task.base.length,
-        task.positional_deletes.as_deref(),
-    )?;
+    // Bind equality delete survival predicate with rewrite_not() so the
+    // RowGroupMetricsEvaluator and PageIndexEvaluator can prune effectively
+    // (e.g. NOT(id=1) → id!=1).
+    let schema_ref = task.schema_ref();
+    let equality_delete_bound = task
+        .equality_delete_predicate
+        .map(|p| p.rewrite_not().bind(schema_ref.clone(), false))
+        .transpose()?;
 
-    // Apply equality deletes as a row filter predicate.
-    if let Some(ref combined_predicate) = task.equality_delete_predicate {
-        let schema_ref = task.schema_ref();
-        let bound_predicate = combined_predicate.bind(schema_ref, false)?;
-        record_batch_stream_builder = ArrowReader::configure_predicate_filtering(
+    // ── Row group / row selection pipeline ───────────────────────────────────
+    // All three sources are computed and merged before a single
+    // apply_row_groups_and_selection call so no source overrides another.
+    let mut selected_row_group_indices = None;
+    let mut row_selection = None;
+
+    // Byte-range row group filtering (file splitting).
+    if task.base.start != 0 || task.base.length != 0 {
+        selected_row_group_indices = Some(ArrowReader::filter_row_groups_by_byte_range(
+            record_batch_stream_builder.metadata(),
+            task.base.start,
+            task.base.length,
+        )?);
+    }
+
+    // Equality delete predicate: row filter, row group pruning, page-level row selection.
+    if let Some(ref bound_predicate) = equality_delete_bound {
+        record_batch_stream_builder = ArrowReader::apply_predicate_row_filtering(
             record_batch_stream_builder,
-            &bound_predicate,
-            &task.schema_ref(),
-            false, // no row-group pruning for append predicate
-            None,  // projection already applied above
+            bound_predicate,
+            &schema_ref,
+            &mut selected_row_group_indices,
+            &mut row_selection,
+            true, // row_group_filtering_enabled
+            true, // row_selection_enabled
+            None,
         )?;
     }
+
+    // Positional delete row selection.
+    ArrowReader::apply_positional_delete_row_selection(
+        record_batch_stream_builder.metadata().row_groups(),
+        &selected_row_group_indices,
+        task.positional_deletes.as_deref(),
+        &mut row_selection,
+    )?;
+
+    record_batch_stream_builder = ArrowReader::apply_row_groups_and_selection(
+        record_batch_stream_builder,
+        selected_row_group_indices,
+        row_selection,
+    );
 
     // Build the batch stream and send all the RecordBatches that it generates
     // to the requester.
@@ -269,17 +304,36 @@ async fn process_equality_delete_task(
     let bound_predicate = task.combined_predicate.bind(task.schema_ref(), false)?;
 
     // Column projection (predicate columns only) + row filter + row group filtering.
-    // Projection and filtering share the same field-ID map, so configure_predicate_filtering
-    // handles both in one pass when Some(missing_field_ids) is passed.
+    // Projection and filtering share the same field-ID map, computed once inside
+    // apply_predicate_row_filtering when Some(missing_field_ids) is passed.
     // Row group pruning is safe because combined_predicate has been rewritten via
     // rewrite_not() so RowGroupMetricsEvaluator can evaluate it correctly.
-    record_batch_stream_builder = ArrowReader::configure_predicate_filtering(
+    let mut selected_row_group_indices = None;
+    let mut row_selection = None;
+
+    if task.base.start != 0 || task.base.length != 0 {
+        selected_row_group_indices = Some(ArrowReader::filter_row_groups_by_byte_range(
+            record_batch_stream_builder.metadata(),
+            task.base.start,
+            task.base.length,
+        )?);
+    }
+
+    record_batch_stream_builder = ArrowReader::apply_predicate_row_filtering(
         record_batch_stream_builder,
         &bound_predicate,
         &task.base.schema,
-        true,                    // row group filtering enabled
+        &mut selected_row_group_indices,
+        &mut row_selection,
+        true,                    // row_group_filtering_enabled
+        false,                   // row_selection_enabled (no page-level selection needed)
         Some(missing_field_ids), // also apply projection using predicate field IDs
     )?;
+    record_batch_stream_builder = ArrowReader::apply_row_groups_and_selection(
+        record_batch_stream_builder,
+        selected_row_group_indices,
+        None,
+    );
 
     if let Some(batch_size) = batch_size {
         record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);

@@ -397,75 +397,25 @@ impl ArrowReader {
         }
 
         if let Some(predicate) = final_predicate {
-            let (iceberg_field_ids, field_id_map) = Self::build_field_id_set_and_map(
-                record_batch_stream_builder.parquet_schema(),
+            record_batch_stream_builder = Self::apply_predicate_row_filtering(
+                record_batch_stream_builder,
                 &predicate,
+                &task.schema,
+                &mut selected_row_group_indices,
+                &mut row_selection,
+                row_group_filtering_enabled,
+                row_selection_enabled,
+                None,
             )?;
-
-            let row_filter = Self::get_row_filter(
-                &predicate,
-                record_batch_stream_builder.parquet_schema(),
-                &iceberg_field_ids,
-                &field_id_map,
-            )?;
-            record_batch_stream_builder = record_batch_stream_builder.with_row_filter(row_filter);
-
-            if row_group_filtering_enabled {
-                let predicate_filtered_row_groups = Self::get_selected_row_group_indices(
-                    &predicate,
-                    record_batch_stream_builder.metadata(),
-                    &field_id_map,
-                    &task.schema,
-                )?;
-
-                // Merge predicate-based filtering with byte range filtering (if present)
-                // by taking the intersection of both filters
-                selected_row_group_indices = match selected_row_group_indices {
-                    Some(byte_range_filtered) => {
-                        // Keep only row groups that are in both filters
-                        let intersection: Vec<usize> = byte_range_filtered
-                            .into_iter()
-                            .filter(|idx| predicate_filtered_row_groups.contains(idx))
-                            .collect();
-                        Some(intersection)
-                    }
-                    None => Some(predicate_filtered_row_groups),
-                };
-            }
-
-            if row_selection_enabled {
-                row_selection = Some(Self::get_row_selection_for_filter_predicate(
-                    &predicate,
-                    record_batch_stream_builder.metadata(),
-                    &selected_row_group_indices,
-                    &field_id_map,
-                    &task.schema,
-                )?);
-            }
         }
 
         let positional_delete_indexes = delete_filter.get_delete_vector(&task);
-
-        if let Some(positional_delete_indexes) = positional_delete_indexes {
-            let delete_row_selection = {
-                let positional_delete_indexes = positional_delete_indexes.lock().unwrap();
-
-                Self::build_deletes_row_selection(
-                    record_batch_stream_builder.metadata().row_groups(),
-                    &selected_row_group_indices,
-                    &positional_delete_indexes,
-                )
-            }?;
-
-            // merge the row selection from the delete files with the row selection
-            // from the filter predicate, if there is one from the filter predicate
-            row_selection = match row_selection {
-                None => Some(delete_row_selection),
-                Some(filter_row_selection) => {
-                    Some(filter_row_selection.intersection(&delete_row_selection))
-                }
-            };
-        }
+        Self::apply_positional_delete_row_selection(
+            record_batch_stream_builder.metadata().row_groups(),
+            &selected_row_group_indices,
+            positional_delete_indexes.as_deref(),
+            &mut row_selection,
+        )?;
 
         record_batch_stream_builder = Self::apply_row_groups_and_selection(
             record_batch_stream_builder,
@@ -1009,51 +959,6 @@ impl ArrowReader {
         Ok(builder.build())
     }
 
-    /// Applies a bound predicate as a row filter (and optionally row group filter) to a builder.
-    ///
-    /// Steps:
-    /// 1. Build field-id → parquet-column-index map from the predicate.
-    /// 2. If `missing_field_ids` is `Some`, also apply a column projection restricted to
-    ///    the predicate's field IDs (avoids a redundant `build_field_id_set_and_map` call
-    ///    at the call site when the predicate drives both projection and filtering).
-    /// 3. Build and attach a `RowFilter`.
-    /// 4. If `row_group_filtering_enabled`, prune row groups via statistics.
-    pub(crate) fn configure_predicate_filtering(
-        mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
-        bound_predicate: &BoundPredicate,
-        schema: &Schema,
-        row_group_filtering_enabled: bool,
-        missing_field_ids: Option<bool>,
-    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
-        let (iceberg_field_ids, field_id_map) =
-            Self::build_field_id_set_and_map(builder.parquet_schema(), bound_predicate)?;
-
-        if let Some(use_fallback) = missing_field_ids {
-            let predicate_field_ids: Vec<i32> = iceberg_field_ids.iter().copied().collect();
-            builder = Self::apply_projection(builder, &predicate_field_ids, schema, use_fallback)?;
-        }
-
-        let row_filter = Self::get_row_filter(
-            bound_predicate,
-            builder.parquet_schema(),
-            &iceberg_field_ids,
-            &field_id_map,
-        )?;
-        builder = builder.with_row_filter(row_filter);
-
-        if row_group_filtering_enabled {
-            let row_group_indices = Self::get_selected_row_group_indices(
-                bound_predicate,
-                builder.metadata(),
-                &field_id_map,
-                schema,
-            )?;
-            builder = builder.with_row_groups(row_group_indices);
-        }
-
-        Ok(builder)
-    }
-
     fn get_row_selection_for_filter_predicate(
         predicate: &BoundPredicate,
         parquet_metadata: &Arc<ParquetMetaData>,
@@ -1127,7 +1032,7 @@ impl ArrowReader {
     /// Applies an optional row group list and optional `RowSelection` to a builder.
     ///
     /// Centralises the final "commit" step shared by all Parquet reading paths.
-    fn apply_row_groups_and_selection(
+    pub(crate) fn apply_row_groups_and_selection(
         mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
         row_groups: Option<Vec<usize>>,
         row_selection: Option<RowSelection>,
@@ -1141,47 +1046,116 @@ impl ArrowReader {
         builder
     }
 
-    /// Applies byte-range row group filtering and positional-delete row selection to a builder.
-    ///
-    /// Encapsulates the complete "no predicate row groups" pattern used by incremental append:
-    /// 1. If `start`/`length` are non-zero, restrict to overlapping row groups.
-    /// 2. If `positional_deletes` is present, build a `RowSelection` that skips deleted rows,
-    ///    taking the row group filter into account.
-    /// 3. Apply both to the builder.
-    pub(crate) fn apply_byte_range_and_positional_deletes(
-        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
-        start: u64,
-        length: u64,
-        positional_deletes: Option<&std::sync::Mutex<DeleteVector>>,
-    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
-        let selected_row_groups = if start != 0 || length != 0 {
-            Some(Self::filter_row_groups_by_byte_range(
-                builder.metadata(),
-                start,
-                length,
-            )?)
-        } else {
-            None
-        };
-
-        let row_selection = if let Some(pd) = positional_deletes {
-            Some(Self::build_deletes_row_selection(
-                builder.metadata().row_groups(),
-                &selected_row_groups,
-                &pd.lock().unwrap(),
-            )?)
-        } else {
-            None
-        };
-
-        Ok(Self::apply_row_groups_and_selection(
-            builder,
-            selected_row_groups,
-            row_selection,
-        ))
+    /// Intersects an existing row group list with a new one.
+    /// If `existing` is `None`, returns `Some(new)` (i.e., treats the new list as the first
+    /// constraint). The result is always `Some` so callers can unconditionally update their
+    /// `selected_row_group_indices`.
+    fn intersect_row_group_indices(
+        existing: Option<Vec<usize>>,
+        new: Vec<usize>,
+    ) -> Option<Vec<usize>> {
+        Some(match existing {
+            Some(existing) => existing
+                .into_iter()
+                .filter(|idx| new.contains(idx))
+                .collect(),
+            None => new,
+        })
     }
 
-    fn filter_row_groups_by_byte_range(
+    /// Applies a bound predicate as a row filter and, optionally, as row-group and page-level
+    /// row-selection filters to `builder`.
+    ///
+    /// * `row_group_filtering_enabled` — when `true`, prune row groups via statistics.
+    /// * `row_selection_enabled`       — when `true`, build page-level row selection.
+    /// * `projection`                  — when `Some(missing_field_ids)`, apply a column
+    ///   projection restricted to the predicate's field IDs (avoids a redundant
+    ///   `build_field_id_set_and_map` call at the call site when the predicate drives
+    ///   both projection and filtering, as in the equality-delete task).
+    ///
+    /// Both `selected_row_group_indices` and `row_selection` are updated in-place so that
+    /// the caller can later merge in additional row selections without extra copies.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_predicate_row_filtering(
+        mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        bound_predicate: &BoundPredicate,
+        schema: &Schema,
+        selected_row_group_indices: &mut Option<Vec<usize>>,
+        row_selection: &mut Option<RowSelection>,
+        row_group_filtering_enabled: bool,
+        row_selection_enabled: bool,
+        projection: Option<bool>,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        let (iceberg_field_ids, field_id_map) =
+            Self::build_field_id_set_and_map(builder.parquet_schema(), bound_predicate)?;
+
+        if let Some(use_fallback) = projection {
+            let predicate_field_ids: Vec<i32> = iceberg_field_ids.iter().copied().collect();
+            builder = Self::apply_projection(builder, &predicate_field_ids, schema, use_fallback)?;
+        }
+
+        let row_filter = Self::get_row_filter(
+            bound_predicate,
+            builder.parquet_schema(),
+            &iceberg_field_ids,
+            &field_id_map,
+        )?;
+        builder = builder.with_row_filter(row_filter);
+
+        if row_group_filtering_enabled {
+            let predicate_filtered_row_groups = Self::get_selected_row_group_indices(
+                bound_predicate,
+                builder.metadata(),
+                &field_id_map,
+                schema,
+            )?;
+            *selected_row_group_indices = Self::intersect_row_group_indices(
+                selected_row_group_indices.take(),
+                predicate_filtered_row_groups,
+            );
+        }
+
+        if row_selection_enabled {
+            *row_selection = Some(Self::get_row_selection_for_filter_predicate(
+                bound_predicate,
+                builder.metadata(),
+                selected_row_group_indices,
+                &field_id_map,
+                schema,
+            )?);
+        }
+
+        Ok(builder)
+    }
+
+    /// Merges a positional-delete `RowSelection` into `row_selection`.
+    ///
+    /// Reads the delete vector behind `positional_deletes` (if present), builds a
+    /// `RowSelection` from it, then intersects that with any existing row selection.
+    pub(crate) fn apply_positional_delete_row_selection(
+        row_group_metadata: &[RowGroupMetaData],
+        selected_row_group_indices: &Option<Vec<usize>>,
+        positional_deletes: Option<&std::sync::Mutex<DeleteVector>>,
+        row_selection: &mut Option<RowSelection>,
+    ) -> Result<()> {
+        if let Some(positional_delete_indexes) = positional_deletes {
+            let delete_row_selection = {
+                let positional_delete_indexes = positional_delete_indexes.lock().unwrap();
+                Self::build_deletes_row_selection(
+                    row_group_metadata,
+                    selected_row_group_indices,
+                    &positional_delete_indexes,
+                )
+            }?;
+            *row_selection = match row_selection.take() {
+                None => Some(delete_row_selection),
+                Some(prev) => Some(prev.intersection(&delete_row_selection)),
+            };
+        }
+        Ok(())
+    }
+
+    pub(crate) fn filter_row_groups_by_byte_range(
         parquet_metadata: &Arc<ParquetMetaData>,
         start: u64,
         length: u64,
