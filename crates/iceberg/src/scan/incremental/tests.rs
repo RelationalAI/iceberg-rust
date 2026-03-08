@@ -41,7 +41,7 @@ use crate::spec::{
 use crate::table::Table;
 
 /// Specifies which column to match on for equality deletes
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum DeleteColumn {
     /// Match on the 'n' integer column (column ID 1)
@@ -106,20 +106,22 @@ pub enum Operation {
     /// (constrained by partition and sequence number ordering).
     ///
     /// Parameters:
-    /// 1. Column to match: Which column to use for matching (DeleteColumn::N or DeleteColumn::Data)
-    /// 2. Values to match: Vec of string values to match and delete (converted appropriately)
+    /// 1. Columns to match: `Vec<DeleteColumn>` specifying which columns form the equality key.
+    /// 2. Rows: `Vec<Vec<String>>` — each inner `Vec` is one row in the equality delete file.
+    ///    Values are listed in the same order as the columns.  Rows use OR semantics (a data row
+    ///    is deleted if it matches any equality-delete row); columns within a row use AND semantics.
     ///
     /// Examples:
-    /// - `EqualityDelete(DeleteColumn::N, vec!["2", "4"])`
-    ///   Deletes all rows where n=2 or n=4 (from any data file in the partition)
+    /// - `EqualityDelete(vec![DeleteColumn::N], vec![vec!["2"], vec!["4"]])`
+    ///   Deletes all rows where n=2 or n=4.
     ///
-    /// - `EqualityDelete(DeleteColumn::Data, vec!["temp"])`
-    ///   Deletes all rows where data="temp" (from any data file in the partition)
+    /// - `EqualityDelete(vec![DeleteColumn::N, DeleteColumn::Data], vec![vec!["1", "a"], vec!["3", "c"]])`
+    ///   Deletes rows where (n=1 AND data="a") OR (n=3 AND data="c").
     ///
     /// Equality deletes affect both newly appended files and existing files based on sequence number ordering.
     /// When deleted in the same snapshot as added, rows may go to the DELETE stream. When deleted in later
     /// snapshots, existing rows appear in the DELETE stream for the affected range.
-    EqualityDelete(DeleteColumn, Vec<String>),
+    EqualityDelete(Vec<DeleteColumn>, Vec<Vec<String>>),
 }
 
 /// Tracks the state of data files across snapshots
@@ -938,11 +940,11 @@ impl IncrementalTestFixture {
                     .unwrap();
                 }
 
-                Operation::EqualityDelete(column, values) => {
+                Operation::EqualityDelete(columns, rows) => {
                     // Equality delete operation: remove rows matching a predicate
                     self.handle_equality_delete_operation(
-                        *column,
-                        values,
+                        columns,
+                        rows,
                         current_schema.clone(),
                         &partition_spec,
                         snapshot_id,
@@ -1152,8 +1154,8 @@ impl IncrementalTestFixture {
     #[allow(clippy::too_many_arguments)]
     async fn handle_equality_delete_operation(
         &mut self,
-        column: DeleteColumn,
-        values: &[String],
+        columns: &[DeleteColumn],
+        rows: &[Vec<String>],
         current_schema: SchemaRef,
         partition_spec: &Arc<PartitionSpec>,
         snapshot_id: i64,
@@ -1224,15 +1226,17 @@ impl IncrementalTestFixture {
         );
 
         let delete_file_size = self
-            .write_equality_delete_file(&delete_file_path, column, values)
+            .write_equality_delete_file(&delete_file_path, columns, rows)
             .await;
 
-        // Add the equality delete file entry
-        // Set equality_ids based on which column is being deleted on
-        let equality_ids = match column {
-            DeleteColumn::N => vec![1],    // field_id for "n" column
-            DeleteColumn::Data => vec![2], // field_id for "data" column
-        };
+        // Set equality_ids from the specified columns
+        let equality_ids: Vec<i32> = columns
+            .iter()
+            .map(|col| match col {
+                DeleteColumn::N => 1,    // field_id for "n" column
+                DeleteColumn::Data => 2, // field_id for "data" column
+            })
+            .collect();
 
         delete_writer
             .add_entry(
@@ -1245,7 +1249,7 @@ impl IncrementalTestFixture {
                             .file_path(delete_file_path)
                             .file_format(DataFileFormat::Parquet)
                             .file_size_in_bytes(delete_file_size)
-                            .record_count(values.len() as u64)
+                            .record_count(rows.len() as u64)
                             .partition(empty_partition.clone())
                             .key_metadata(None)
                             .equality_ids(Some(equality_ids))
@@ -1345,63 +1349,61 @@ impl IncrementalTestFixture {
         fs::metadata(path).unwrap().len()
     }
 
-    /// Write an equality delete file with the specified column and values.
+    /// Write an equality delete file with the specified columns and rows.
     ///
     /// Creates a Parquet file containing only the predicate columns with values to delete.
-    /// Equality delete files do NOT reference specific data files - they apply predicates
+    /// Equality delete files do NOT reference specific data files — they apply predicates
     /// across all data files in the table (constrained by partition and sequence number).
     ///
-    /// For column N: only n (schema col ID 1)
-    /// For column Data: only data (schema col ID 2)
-    ///
     /// Each row in the equality delete file represents a set of column values that should
-    /// be deleted from any data file that contains matching rows.
+    /// be deleted from any data file that contains a matching row (AND within a row, OR across rows).
     async fn write_equality_delete_file(
         &self,
         path: &str,
-        column: DeleteColumn,
-        values: &[String],
+        columns: &[DeleteColumn],
+        rows: &[Vec<String>],
     ) -> u64 {
-        use arrow_array::Int32Array;
-
-        // Equality delete files contain only the predicate column(s)
-        let (schema, value_col): (Arc<arrow_schema::Schema>, ArrayRef) = match column {
-            DeleteColumn::N => {
-                // Schema with only n (integer) column
-                let fields = vec![
+        // Build schema from specified columns
+        let fields: Vec<arrow_schema::Field> = columns
+            .iter()
+            .map(|col| match col {
+                DeleteColumn::N => {
                     arrow_schema::Field::new("n", arrow_schema::DataType::Int32, false)
                         .with_metadata(HashMap::from([(
                             PARQUET_FIELD_ID_META_KEY.to_string(),
-                            "1".to_string(), // Column ID 1 from schema
-                        )])),
-                ];
-                let schema = Arc::new(arrow_schema::Schema::new(fields));
-
-                // Convert string values to i32
-                let int_values: Vec<i32> =
-                    values.iter().map(|v| v.parse::<i32>().unwrap()).collect();
-                let col_n = Arc::new(Int32Array::from(int_values)) as ArrayRef;
-
-                (schema, col_n)
-            }
-            DeleteColumn::Data => {
-                // Schema with only data (string) column
-                let fields = vec![
+                            "1".to_string(),
+                        )]))
+                }
+                DeleteColumn::Data => {
                     arrow_schema::Field::new("data", arrow_schema::DataType::Utf8, false)
                         .with_metadata(HashMap::from([(
                             PARQUET_FIELD_ID_META_KEY.to_string(),
-                            "2".to_string(), // Column ID 2 from schema
-                        )])),
-                ];
-                let schema = Arc::new(arrow_schema::Schema::new(fields));
+                            "2".to_string(),
+                        )]))
+                }
+            })
+            .collect();
+        let schema = Arc::new(arrow_schema::Schema::new(fields));
 
-                let col_data = Arc::new(StringArray::from(values.to_vec())) as ArrayRef;
+        // Build one array per column from the rows
+        let arrays: Vec<ArrayRef> = columns
+            .iter()
+            .enumerate()
+            .map(|(col_idx, col)| {
+                let col_values: Vec<&str> = rows.iter().map(|row| row[col_idx].as_str()).collect();
+                match col {
+                    DeleteColumn::N => Arc::new(Int32Array::from(
+                        col_values
+                            .iter()
+                            .map(|v| v.parse::<i32>().unwrap())
+                            .collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                    DeleteColumn::Data => Arc::new(StringArray::from(col_values)) as ArrayRef,
+                }
+            })
+            .collect();
 
-                (schema, col_data)
-            }
-        };
-
-        let batch = RecordBatch::try_new(schema.clone(), vec![value_col]).unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
@@ -1412,7 +1414,6 @@ impl IncrementalTestFixture {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
 
-        // Return the actual file size
         fs::metadata(path).unwrap().len()
     }
 
@@ -3141,7 +3142,9 @@ async fn test_equality_delete_on_appended_file() {
             ],
             "data-2.parquet".to_string(),
         ), // Snapshot 2: Add 5 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec!["2".to_string(), "4".to_string()]), // Snapshot 3: Delete rows where n=2 or n=4
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
+            "4".to_string(),
+        ]]), // Snapshot 3: Delete rows where n=2 or n=4
     ])
     .await;
 
@@ -3174,7 +3177,9 @@ async fn test_equality_delete_on_existing_file() {
             ],
             "data-1.parquet".to_string(),
         ), // Snapshot 1: Add 5 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec!["2".to_string(), "4".to_string()]), // Snapshot 2: Delete rows where n=2 or n=4
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
+            "4".to_string(),
+        ]]), // Snapshot 2: Delete rows where n=2 or n=4
     ])
     .await;
 
@@ -3212,8 +3217,10 @@ async fn test_chained_equality_deletes() {
             ],
             "data-1.parquet".to_string(),
         ), // Snapshot 1: Add 5 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec!["1".to_string(), "2".to_string()]), // Snapshot 2: Delete rows where n in (1, 2)
-        Operation::EqualityDelete(DeleteColumn::Data, vec!["d".to_string()]), // Snapshot 3: Delete rows where data='d'
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["1".to_string()], vec![
+            "2".to_string(),
+        ]]), // Snapshot 2: Delete rows where n in (1, 2)
+        Operation::EqualityDelete(vec![DeleteColumn::Data], vec![vec!["d".to_string()]]), // Snapshot 3: Delete rows where data='d'
     ])
     .await;
 
@@ -3251,7 +3258,9 @@ async fn test_equality_delete_with_no_matches() {
             ],
             "data-1.parquet".to_string(),
         ), // Snapshot 1: Add 3 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec!["10".to_string(), "20".to_string()]), // Snapshot 2: Delete rows where n=10 or n=20 (no matches)
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["10".to_string()], vec![
+            "20".to_string(),
+        ]]), // Snapshot 2: Delete rows where n=10 or n=20 (no matches)
     ])
     .await;
 
@@ -3281,10 +3290,10 @@ async fn test_equality_delete_matching_all_rows() {
             ],
             "data-1.parquet".to_string(),
         ), // Snapshot 1: Add 3 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec![
-            "1".to_string(),
-            "2".to_string(),
-            "3".to_string(),
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()],
         ]), // Snapshot 2: Delete rows where n in (1, 2, 3) - all rows
     ])
     .await;
@@ -3325,8 +3334,8 @@ async fn test_multiple_equality_deletes_on_same_file() {
             ],
             "data-1.parquet".to_string(),
         ), // Snapshot 1: Add 5 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec!["2".to_string()]), // Snapshot 2: Delete rows where n=2
-        Operation::EqualityDelete(DeleteColumn::N, vec!["4".to_string()]), // Snapshot 3: Delete rows where n=4
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()]]), // Snapshot 2: Delete rows where n=2
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["4".to_string()]]), // Snapshot 3: Delete rows where n=4
     ])
     .await;
 
@@ -3367,7 +3376,7 @@ async fn test_equality_delete_combined_with_positional_delete() {
             "data-1.parquet".to_string(),
         ), // Snapshot 1: Add 5 rows
         Operation::Delete(vec![(3, "data-1.parquet".to_string())]), // Snapshot 2: Positional delete at position 3 (n=4)
-        Operation::EqualityDelete(DeleteColumn::N, vec!["2".to_string()]), // Snapshot 3: Equality delete where n=2
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()]]), // Snapshot 3: Equality delete where n=2
     ])
     .await;
 
@@ -3408,7 +3417,7 @@ async fn test_equality_delete_with_subsequent_appends() {
             ],
             "data-1.parquet".to_string(),
         ), // Snapshot 2: Add 3 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec!["2".to_string()]), // Snapshot 3: Delete rows where n=2
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()]]), // Snapshot 3: Delete rows where n=2
         Operation::Add(
             vec![(4, "d".to_string()), (5, "e".to_string())],
             "data-2.parquet".to_string(),
@@ -3470,7 +3479,9 @@ async fn test_equality_delete_does_not_apply_to_later_appends() {
             ],
             "data-1.parquet".to_string(),
         ), // Snapshot 2: Add 3 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec!["2".to_string(), "4".to_string()]), // Snapshot 3: Delete rows where n=2 or n=4
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
+            "4".to_string(),
+        ]]), // Snapshot 3: Delete rows where n=2 or n=4
         Operation::Add(
             vec![(2, "b2".to_string()), (4, "d".to_string())],
             "data-2.parquet".to_string(),
@@ -3527,12 +3538,12 @@ async fn test_equality_delete_removes_all_rows_from_appended_file() {
             ],
             "data-1.parquet".to_string(),
         ), // Snapshot 2: Add 5 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec![
-            "1".to_string(),
-            "2".to_string(),
-            "3".to_string(),
-            "4".to_string(),
-            "5".to_string(),
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()],
+            vec!["4".to_string()],
+            vec!["5".to_string()],
         ]), // Snapshot 3: Delete all rows
     ])
     .await;
@@ -3602,7 +3613,9 @@ async fn test_equality_delete_on_multiple_files() {
             ],
             "data-2.parquet".to_string(),
         ), // Snapshot 2: data-2 with 3 rows
-        Operation::EqualityDelete(DeleteColumn::N, vec!["2".to_string(), "5".to_string()]), // Snapshot 3: delete n=2 (in data-1) and n=5 (in data-2)
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
+            "5".to_string(),
+        ]]), // Snapshot 3: delete n=2 (in data-1) and n=5 (in data-2)
     ])
     .await;
 
@@ -3622,6 +3635,59 @@ async fn test_equality_delete_on_multiple_files() {
         .verify_incremental_scan(2, 3, vec![], vec![
             (1, &data_file_1_path),
             (1, &data_file_2_path),
+        ])
+        .await;
+}
+
+/// Test Case: Multi-column equality delete (AND semantics within a row)
+///
+/// Scenario: A file exists before the scan range. An equality delete is applied using
+/// two columns (n AND data). Only rows matching BOTH column values are deleted; rows
+/// that match only one column are NOT deleted.
+///
+/// Data file rows (positions 0-4):
+///   pos 0: (1, "a")
+///   pos 1: (1, "b")  ← n=1 matches but data≠"a", so NOT deleted
+///   pos 2: (2, "a")  ← data="a" matches but n≠1, so NOT deleted
+///   pos 3: (3, "c")
+///   pos 4: (4, "d")
+///
+/// Equality delete rows (AND within row, OR across rows):
+///   row 0: (n=1, data="a")  → deletes pos 0
+///   row 1: (n=4, data="d")  → deletes pos 4
+///
+/// Expected behavior (scan from 1 to 2, baseline file):
+/// - Append stream: Empty
+/// - Delete stream: positions 0 and 4 (only exact (n,data) matches)
+#[tokio::test]
+async fn test_equality_delete_multi_column() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (1, "b".to_string()),
+                (2, "a".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: Add 5 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N, DeleteColumn::Data], vec![
+            vec!["1".to_string(), "a".to_string()], // delete (n=1, data="a") → pos 0
+            vec!["4".to_string(), "d".to_string()], // delete (n=4, data="d") → pos 4
+        ]), // Snapshot 2: Multi-column equality delete
+    ])
+    .await;
+
+    let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
+
+    // Scan from 1 to 2: data-1.parquet is baseline.
+    // Only rows matching BOTH columns are deleted.
+    // pos 1 (1,"b") and pos 2 (2,"a") are partial matches and must NOT appear.
+    fixture
+        .verify_incremental_scan(1, 2, vec![], vec![
+            (0, &data_file_path), // (1, "a") deleted
+            (4, &data_file_path), // (4, "d") deleted
         ])
         .await;
 }
