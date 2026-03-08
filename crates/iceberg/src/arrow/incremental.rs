@@ -264,6 +264,7 @@ async fn process_equality_delete_task(
     task: EqualityDeleteScanTask,
     batch_size: Option<usize>,
     file_io: crate::io::FileIO,
+    metadata_size_hint: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
     let file_path = task.data_file_path().to_string();
 
@@ -281,7 +282,7 @@ async fn process_equality_delete_task(
         file_io.clone(),
         true,
         Some(pos_arrow_reader_options()?),
-        None,
+        metadata_size_hint,
         task.base.file_size_in_bytes,
     )
     .await?;
@@ -294,7 +295,7 @@ async fn process_equality_delete_task(
         file_io,
         true,
         virtual_columns,
-        None,
+        metadata_size_hint,
         task.base.file_size_in_bytes,
         None, // equality delete tasks do not carry name_mapping
     )
@@ -332,7 +333,7 @@ async fn process_equality_delete_task(
     record_batch_stream_builder = ArrowReader::apply_row_groups_and_selection(
         record_batch_stream_builder,
         selected_row_group_indices,
-        None,
+        row_selection,
     );
 
     if let Some(batch_size) = batch_size {
@@ -512,6 +513,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         equality_delete_task,
                                         batch_size,
                                         file_io.clone(),
+                                        metadata_size_hint,
                                     )
                                     .await;
 
