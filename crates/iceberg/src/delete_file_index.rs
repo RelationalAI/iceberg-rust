@@ -108,13 +108,18 @@ impl DeleteFileIndex {
         }
     }
 
-    pub(crate) async fn positional_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
+    /// Get only equality delete files that apply to the given data file.
+    pub(crate) async fn get_equality_deletes_for_data_file(
+        &self,
+        data_file: &DataFile,
+        seq_num: Option<i64>,
+    ) -> Vec<FileScanTaskDeleteFile> {
         let notifier = {
             let guard = self.state.read().unwrap();
             match *guard {
                 DeleteFileIndexState::Populating(ref notifier) => notifier.clone(),
                 DeleteFileIndexState::Populated(ref index) => {
-                    return index.positional_deletes();
+                    return index.get_equality_deletes_for_data_file(data_file, seq_num);
                 }
             }
         };
@@ -123,7 +128,30 @@ impl DeleteFileIndex {
 
         let guard = self.state.read().unwrap();
         match guard.deref() {
-            DeleteFileIndexState::Populated(index) => index.positional_deletes(),
+            DeleteFileIndexState::Populated(index) => {
+                index.get_equality_deletes_for_data_file(data_file, seq_num)
+            }
+            _ => unreachable!("Cannot be any other state than loaded"),
+        }
+    }
+
+    /// Get all delete files (both positional and equality deletes)
+    pub(crate) async fn all_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
+        let notifier = {
+            let guard = self.state.read().unwrap();
+            match *guard {
+                DeleteFileIndexState::Populating(ref notifier) => notifier.clone(),
+                DeleteFileIndexState::Populated(ref index) => {
+                    return index.all_deletes();
+                }
+            }
+        };
+
+        notifier.notified().await;
+
+        let guard = self.state.read().unwrap();
+        match guard.deref() {
+            DeleteFileIndexState::Populated(index) => index.all_deletes(),
             _ => unreachable!("Cannot be any other state than loaded"),
         }
     }
@@ -231,12 +259,60 @@ impl PopulatedDeleteFileIndex {
         results
     }
 
-    fn positional_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
+    /// Determine only the equality delete files that apply to the provided `DataFile`.
+    fn get_equality_deletes_for_data_file(
+        &self,
+        data_file: &DataFile,
+        seq_num: Option<i64>,
+    ) -> Vec<FileScanTaskDeleteFile> {
+        let mut results = vec![];
+
+        self.global_equality_deletes
+            .iter()
+            .filter(|&delete| {
+                seq_num
+                    .map(|seq_num| delete.manifest_entry.sequence_number() > Some(seq_num))
+                    .unwrap_or_else(|| true)
+            })
+            .for_each(|delete| results.push(delete.as_ref().into()));
+
+        if let Some(deletes) = self.eq_deletes_by_partition.get(data_file.partition()) {
+            deletes
+                .iter()
+                .filter(|&delete| {
+                    seq_num
+                        .map(|seq_num| delete.manifest_entry.sequence_number() > Some(seq_num))
+                        .unwrap_or_else(|| true)
+                        && data_file.partition_spec_id == delete.partition_spec_id
+                })
+                .for_each(|delete| results.push(delete.as_ref().into()));
+        }
+
+        results
+    }
+
+    /// Get all delete files (both positional and equality deletes)
+    fn all_deletes(&self) -> Vec<FileScanTaskDeleteFile> {
+        let mut result = vec![];
+
+        // Add global equality deletes
+        self.global_equality_deletes
+            .iter()
+            .for_each(|ctx| result.push(ctx.as_ref().into()));
+
+        // Add partition-specific equality deletes
+        self.eq_deletes_by_partition
+            .values()
+            .flatten()
+            .for_each(|ctx| result.push(ctx.as_ref().into()));
+
+        // Add partition-specific positional deletes
         self.pos_deletes_by_partition
             .values()
             .flatten()
-            .map(|ctx| ctx.as_ref().into())
-            .collect()
+            .for_each(|ctx| result.push(ctx.as_ref().into()));
+
+        result
     }
 }
 

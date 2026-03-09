@@ -18,23 +18,27 @@
 //! Incremental table scan implementation.
 
 use std::collections::HashSet;
+use std::ops::Not;
 use std::sync::Arc;
 
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
-use crate::arrow::delete_filter::DeleteFilter;
+use crate::arrow::delete_filter::{DeleteFilter, is_equality_delete};
 use crate::arrow::{
     ArrowReaderBuilder, CombinedIncrementalBatchRecordStream, StreamsInto,
     UnzippedIncrementalBatchRecordStream,
 };
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
+use crate::io::object_cache::ObjectCache;
 use crate::metadata_columns::{
     RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, get_metadata_field_id, is_metadata_column_name,
 };
 use crate::scan::DeleteFileContext;
 use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
-use crate::spec::{DataContentType, ManifestStatus, Snapshot, SnapshotRef};
+use crate::spec::{
+    DataContentType, ManifestEntryRef, ManifestStatus, Snapshot, SnapshotRef, TableMetadataRef,
+};
 use crate::table::Table;
 use crate::util::snapshot::ancestors_between;
 use crate::utils::available_parallelism;
@@ -43,7 +47,7 @@ use crate::{Error, ErrorKind, Result};
 mod context;
 use context::*;
 mod task;
-use futures::channel::mpsc::{Sender, channel};
+use futures::channel::mpsc::{Receiver, Sender, channel};
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use itertools::Itertools;
 pub use task::*;
@@ -496,29 +500,42 @@ impl IncrementalTableScan {
         // TODO: Streaming this into the delete index seems somewhat redundant, as we
         // could directly stream into the CachingDeleteFileLoader and instantly load the
         // delete files.
-        let positional_deletes = delete_file_idx.positional_deletes().await;
+        let all_deletes = delete_file_idx.all_deletes().await;
+
+        // Collect data files that were live at from_snapshot. These are needed to generate
+        // equality delete tasks for files that predate the scan range.
+        // Runs in parallel with the rest of the planning.
+        let from_snapshot_collection = if all_deletes.iter().any(is_equality_delete) {
+            Some(Self::spawn_manifest_entry_collection(
+                self.plan_context.from_snapshot.clone(),
+                self.plan_context.table_metadata.clone(),
+                self.plan_context.object_cache.clone(),
+                concurrency_limit_manifest_files,
+            ))
+        } else {
+            None
+        };
+
         let result = self
             .plan_context
             .caching_delete_file_loader
-            .load_deletes(
-                &positional_deletes,
-                self.plan_context.to_snapshot_schema.clone(),
-            )
+            .load_deletes(&all_deletes, self.plan_context.to_snapshot_schema.clone())
             .await;
 
         // Build the delete filter from the loaded deletes.
         let delete_filter = match result {
-            Ok(loaded_deletes) => loaded_deletes.unwrap(),
+            Ok(loaded_deletes) => loaded_deletes?,
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Unexpected,
-                    format!("Failed to load positional deletes: {e}"),
+                    format!("Failed to load deletes: {e}"),
                 ));
             }
         };
 
         // Process the data file [`ManifestEntry`] stream in parallel
         let filter = delete_filter.clone();
+        let table_metadata = self.plan_context.table_metadata.clone();
         spawn(async move {
             let result = manifest_entry_data_ctx_rx
                 .map(|me_ctx| Ok((me_ctx, file_scan_task_tx.clone())))
@@ -526,6 +543,7 @@ impl IncrementalTableScan {
                     concurrency_limit_manifest_entries,
                     |(manifest_entry_context, tx)| {
                         let filter = filter.clone();
+                        let table_metadata = table_metadata.clone();
                         async move {
                             if manifest_entry_context.manifest_entry.status()
                                 == ManifestStatus::Added
@@ -535,6 +553,7 @@ impl IncrementalTableScan {
                                         tx,
                                         manifest_entry_context,
                                         &filter,
+                                        &table_metadata,
                                     )
                                     .await
                                 })
@@ -647,6 +666,59 @@ impl IncrementalTableScan {
             final_delete_tasks.push(DeleteScanTask::PositionalDeletes(path, delete_vector_inner));
         }
 
+        // Create equality delete tasks for files that were live at from_snapshot and now have
+        // equality deletes applied to them in the scan range.
+        if let Some((from_snapshot_entry_rx, mut from_snapshot_error_rx)) = from_snapshot_collection
+        {
+            let from_snapshot_data_files =
+                Self::collect_live_data_files(from_snapshot_entry_rx).await;
+
+            // Surface any error that occurred during manifest collection.
+            if let Ok(Some(e)) = from_snapshot_error_rx.try_recv() {
+                return Err(e);
+            }
+
+            for entry in &from_snapshot_data_files {
+                let equality_deletes = delete_file_idx
+                    .get_equality_deletes_for_data_file(entry.data_file(), entry.sequence_number())
+                    .await;
+
+                if !equality_deletes.is_empty() {
+                    // The predicate from build_combined_equality_delete_predicate is a "survival"
+                    // filter (keeps non-deleted rows). Negate it to select rows TO DELETE.
+                    let Some(survival_predicate) = delete_filter
+                        .build_combined_equality_delete_predicate(&equality_deletes)
+                        .await?
+                    else {
+                        continue;
+                    };
+                    // build_combined_equality_delete_predicate returns a survival predicate
+                    // (e.g. `id != 1`). Negate it to get the delete condition (`id == 1`),
+                    // then rewrite_not() pushes the NOT inward via De Morgan so row group
+                    // stats can prune correctly.
+                    let combined_predicate = survival_predicate.not().rewrite_not();
+
+                    let equality_delete_task = EqualityDeleteScanTask {
+                        base: BaseIncrementalFileScanTask {
+                            file_size_in_bytes: entry.file_size_in_bytes(),
+                            start: 0,
+                            length: entry.file_size_in_bytes(),
+                            record_count: Some(entry.record_count()),
+                            data_file_path: entry.file_path().to_string(),
+                            data_file_format: entry.file_format(),
+                            schema: self.plan_context.to_snapshot_schema.clone(),
+                            project_field_ids: self.plan_context.field_ids.as_ref().clone(),
+                            partition: None,
+                            partition_spec: None,
+                            case_sensitive: self.plan_context.case_sensitive,
+                        },
+                        combined_predicate,
+                    };
+                    final_delete_tasks.push(DeleteScanTask::EqualityDeletes(equality_delete_task));
+                }
+            }
+        }
+
         let append_stream = futures::stream::iter(final_append_tasks).map(Ok).boxed();
         let delete_stream = futures::stream::iter(final_delete_tasks).map(Ok).boxed();
 
@@ -686,23 +758,85 @@ impl IncrementalTableScan {
         file_scan_task_stream.stream(arrow_reader)
     }
 
+    /// Spawns a concurrent task to stream all manifest entries for a given snapshot.
+    /// Returns `(entry_rx, error_rx)`: a channel of manifest entries and a oneshot for any error.
+    fn spawn_manifest_entry_collection(
+        snapshot: SnapshotRef,
+        table_metadata: TableMetadataRef,
+        object_cache: Arc<ObjectCache>,
+        concurrency_limit: usize,
+    ) -> (
+        Receiver<ManifestEntryRef>,
+        futures::channel::oneshot::Receiver<Error>,
+    ) {
+        let (entry_tx, entry_rx) = channel(concurrency_limit);
+        let (error_tx, error_rx) = futures::channel::oneshot::channel();
+        spawn({
+            async move {
+                let manifest_list = match object_cache
+                    .get_manifest_list(&snapshot, &table_metadata)
+                    .await
+                {
+                    Ok(list) => list,
+                    Err(e) => {
+                        let _ = error_tx.send(e);
+                        return;
+                    }
+                };
+
+                let result: Result<()> =
+                    futures::stream::iter(manifest_list.entries().iter().map(Ok))
+                        .try_for_each_concurrent(concurrency_limit, |manifest_file| {
+                            let cache = object_cache.clone();
+                            let tx = entry_tx.clone();
+                            async move {
+                                let manifest = cache.get_manifest(manifest_file).await?;
+                                for entry in manifest.entries() {
+                                    let _ = tx.clone().send(entry.clone()).await;
+                                }
+                                Ok(())
+                            }
+                        })
+                        .await;
+
+                if let Err(e) = result {
+                    let _ = error_tx.send(e);
+                }
+            }
+        });
+        (entry_rx, error_rx)
+    }
+
+    /// Collects manifest entries from the receiver and returns only the
+    /// live data files (i.e., Added or Existing entries that have not been deleted).
+    async fn collect_live_data_files(rx: Receiver<ManifestEntryRef>) -> Vec<ManifestEntryRef> {
+        let entries: Vec<_> = rx.collect().await;
+
+        let deleted_paths: HashSet<String> = entries
+            .iter()
+            .filter(|e| !e.is_alive())
+            .map(|e| e.file_path().to_string())
+            .collect();
+
+        entries
+            .into_iter()
+            .filter(|entry| {
+                entry.content_type() == DataContentType::Data
+                    && entry.is_alive()
+                    && !deleted_paths.contains(entry.file_path())
+            })
+            .collect()
+    }
+
     async fn process_delete_manifest_entry(
         mut delete_file_ctx_tx: Sender<DeleteFileContext>,
         manifest_entry_context: ManifestEntryContext,
     ) -> Result<()> {
-        // Abort the plan if we encounter a manifest entry for a data file or equality
-        // deletes.
+        // Abort the plan if we encounter a manifest entry for a data file
         if manifest_entry_context.manifest_entry.content_type() == DataContentType::Data {
             return Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 "Encountered an entry for a data file in a delete file manifest",
-            ));
-        } else if manifest_entry_context.manifest_entry.content_type()
-            == DataContentType::EqualityDeletes
-        {
-            return Err(Error::new(
-                ErrorKind::FeatureUnsupported,
-                "Equality deletes are not supported yet in incremental scans",
             ));
         }
 
@@ -730,6 +864,7 @@ impl IncrementalTableScan {
         mut file_scan_task_tx: Sender<Result<IncrementalFileScanTask>>,
         manifest_entry_context: ManifestEntryContext,
         delete_filter: &DeleteFilter,
+        table_metadata: &TableMetadataRef,
     ) -> Result<()> {
         // Skip processing this manifest entry if it has been marked as deleted.
         if !manifest_entry_context.manifest_entry.is_alive() {
@@ -747,7 +882,9 @@ impl IncrementalTableScan {
         let file_scan_task = IncrementalFileScanTask::append_from_manifest_entry(
             &manifest_entry_context,
             delete_filter,
-        );
+            table_metadata,
+        )
+        .await?;
 
         file_scan_task_tx.send(Ok(file_scan_task)).await?;
         Ok(())
@@ -776,6 +913,9 @@ impl IncrementalTableScan {
                 data_file_format: manifest_entry_context.manifest_entry.file_format(),
                 schema: manifest_entry_context.snapshot_schema.clone(),
                 project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
+                partition: None,
+                partition_spec: None,
+                case_sensitive: manifest_entry_context.case_sensitive,
             },
         });
 

@@ -31,12 +31,24 @@ use uuid::Uuid;
 
 use crate::TableIdent;
 use crate::io::{FileIO, OutputFile};
-use crate::metadata_columns::{RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS};
+use crate::metadata_columns::{
+    RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, file_path_field, pos_field_arrow,
+};
 use crate::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, ManifestEntry, ManifestListWriter,
     ManifestStatus, ManifestWriterBuilder, PartitionSpec, SchemaRef, Struct, TableMetadata,
 };
 use crate::table::Table;
+
+/// Specifies which column to match on for equality deletes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub enum DeleteColumn {
+    /// Match on the 'n' integer column (column ID 1)
+    N,
+    /// Match on the 'data' string column (column ID 2)
+    Data,
+}
 
 /// Represents an operation to perform on a snapshot of a table with schema (id: Int32,
 /// data: String).
@@ -87,6 +99,29 @@ pub enum Operation {
     /// For an incremental scan that only contains Replace operations, the result should be
     /// zero additions and zero deletions, because the logical data hasn't changed.
     Replace(Vec<String>, String),
+
+    /// Equality delete operation that removes rows matching a predicate.
+    ///
+    /// Creates an equality delete file that applies a predicate across all data files in the table
+    /// (constrained by partition and sequence number ordering).
+    ///
+    /// Parameters:
+    /// 1. Columns to match: `Vec<DeleteColumn>` specifying which columns form the equality key.
+    /// 2. Rows: `Vec<Vec<String>>` — each inner `Vec` is one row in the equality delete file.
+    ///    Values are listed in the same order as the columns.  Rows use OR semantics (a data row
+    ///    is deleted if it matches any equality-delete row); columns within a row use AND semantics.
+    ///
+    /// Examples:
+    /// - `EqualityDelete(vec![DeleteColumn::N], vec![vec!["2"], vec!["4"]])`
+    ///   Deletes all rows where n=2 or n=4.
+    ///
+    /// - `EqualityDelete(vec![DeleteColumn::N, DeleteColumn::Data], vec![vec!["1", "a"], vec!["3", "c"]])`
+    ///   Deletes rows where (n=1 AND data="a") OR (n=3 AND data="c").
+    ///
+    /// Equality deletes affect both newly appended files and existing files based on sequence number ordering.
+    /// When deleted in the same snapshot as added, rows may go to the DELETE stream. When deleted in later
+    /// snapshots, existing rows appear in the DELETE stream for the affected range.
+    EqualityDelete(Vec<DeleteColumn>, Vec<Vec<String>>),
 }
 
 /// Tracks the state of data files across snapshots
@@ -159,6 +194,7 @@ impl IncrementalTestFixture {
                 Operation::Delete(..) => "delete",
                 Operation::Overwrite(..) => "overwrite",
                 Operation::Replace(..) => "replace",
+                Operation::EqualityDelete(..) => "delete", // Equality deletes are also "delete" operations
             };
 
             let manifest_list_location =
@@ -903,6 +939,21 @@ impl IncrementalTestFixture {
                     .await
                     .unwrap();
                 }
+
+                Operation::EqualityDelete(columns, rows) => {
+                    // Equality delete operation: remove rows matching a predicate
+                    self.handle_equality_delete_operation(
+                        columns,
+                        rows,
+                        current_schema.clone(),
+                        &partition_spec,
+                        snapshot_id,
+                        sequence_number,
+                        parent_snapshot_id,
+                        &data_files,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -1100,6 +1151,136 @@ impl IncrementalTestFixture {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_equality_delete_operation(
+        &mut self,
+        columns: &[DeleteColumn],
+        rows: &[Vec<String>],
+        current_schema: SchemaRef,
+        partition_spec: &Arc<PartitionSpec>,
+        snapshot_id: i64,
+        sequence_number: i64,
+        parent_snapshot_id: Option<i64>,
+        data_files: &[DataFileInfo],
+    ) {
+        let empty_partition = Struct::empty();
+
+        // Create data manifest with existing data files
+        let mut data_writer = ManifestWriterBuilder::new(
+            self.next_manifest_file(),
+            Some(snapshot_id),
+            None,
+            current_schema.clone(),
+            partition_spec.as_ref().clone(),
+        )
+        .build_v2_data();
+
+        // Add existing data files from previous snapshots
+        // Even though no new data is added, existing files remain in the manifest
+        for data_file in data_files {
+            data_writer
+                .add_existing_entry(
+                    ManifestEntry::builder()
+                        .status(ManifestStatus::Existing)
+                        .snapshot_id(data_file.snapshot_id)
+                        .sequence_number(data_file.sequence_number)
+                        .file_sequence_number(data_file.sequence_number)
+                        .data_file(
+                            DataFileBuilder::default()
+                                .partition_spec_id(0)
+                                .content(DataContentType::Data)
+                                .file_path(data_file.path.clone())
+                                .file_format(DataFileFormat::Parquet)
+                                .file_size_in_bytes(data_file.file_size)
+                                .record_count(data_file.n_values.len() as u64)
+                                .partition(empty_partition.clone())
+                                .key_metadata(None)
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        let data_manifest = data_writer.write_manifest_file().await.unwrap();
+
+        // Create delete manifest for the equality delete file
+        let mut delete_writer = ManifestWriterBuilder::new(
+            self.next_manifest_file(),
+            Some(snapshot_id),
+            None,
+            current_schema.clone(),
+            partition_spec.as_ref().clone(),
+        )
+        .build_v2_deletes();
+
+        // Create the equality delete file
+        // Note: Equality delete files don't reference specific data files;
+        // they apply predicates across all data files in the partition
+        let delete_file_path = format!(
+            "{}/data/delete-eq-{}-{}.parquet",
+            &self.table_location,
+            snapshot_id,
+            Uuid::new_v4()
+        );
+
+        let delete_file_size = self
+            .write_equality_delete_file(&delete_file_path, columns, rows)
+            .await;
+
+        // Set equality_ids from the specified columns
+        let equality_ids: Vec<i32> = columns
+            .iter()
+            .map(|col| match col {
+                DeleteColumn::N => 1,    // field_id for "n" column
+                DeleteColumn::Data => 2, // field_id for "data" column
+            })
+            .collect();
+
+        delete_writer
+            .add_entry(
+                ManifestEntry::builder()
+                    .status(ManifestStatus::Added)
+                    .data_file(
+                        DataFileBuilder::default()
+                            .partition_spec_id(0)
+                            .content(DataContentType::EqualityDeletes)
+                            .file_path(delete_file_path)
+                            .file_format(DataFileFormat::Parquet)
+                            .file_size_in_bytes(delete_file_size)
+                            .record_count(rows.len() as u64)
+                            .partition(empty_partition.clone())
+                            .key_metadata(None)
+                            .equality_ids(Some(equality_ids))
+                            .build()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
+            .unwrap();
+
+        let delete_manifest = delete_writer.write_manifest_file().await.unwrap();
+
+        // Write manifest list
+        let mut manifest_list_write = ManifestListWriter::v2(
+            self.table
+                .file_io()
+                .new_output(format!(
+                    "{}/metadata/snap-{}-manifest-list.avro",
+                    self.table_location, snapshot_id
+                ))
+                .unwrap(),
+            snapshot_id,
+            parent_snapshot_id,
+            sequence_number,
+        );
+        manifest_list_write
+            .add_manifests(vec![data_manifest, delete_manifest].into_iter())
+            .unwrap();
+        manifest_list_write.close().await.unwrap();
+    }
+
     async fn write_parquet_file(
         &self,
         path: &str,
@@ -1144,21 +1325,10 @@ impl IncrementalTestFixture {
         data_file_path: &str,
         positions: &[i64],
     ) -> u64 {
-        let schema = {
-            let fields = vec![
-                arrow_schema::Field::new("file_path", arrow_schema::DataType::Utf8, false)
-                    .with_metadata(HashMap::from([(
-                        PARQUET_FIELD_ID_META_KEY.to_string(),
-                        "2147483546".to_string(),
-                    )])),
-                arrow_schema::Field::new("pos", arrow_schema::DataType::Int64, false)
-                    .with_metadata(HashMap::from([(
-                        PARQUET_FIELD_ID_META_KEY.to_string(),
-                        "2147483545".to_string(),
-                    )])),
-            ];
-            Arc::new(arrow_schema::Schema::new(fields))
-        };
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::clone(file_path_field()),
+            arrow_schema::Field::clone(pos_field_arrow()),
+        ]));
 
         let file_paths: Vec<&str> = vec![data_file_path; positions.len()];
         let col_file_path = Arc::new(StringArray::from(file_paths)) as ArrayRef;
@@ -1176,6 +1346,74 @@ impl IncrementalTestFixture {
         writer.close().unwrap();
 
         // Return the actual file size
+        fs::metadata(path).unwrap().len()
+    }
+
+    /// Write an equality delete file with the specified columns and rows.
+    ///
+    /// Creates a Parquet file containing only the predicate columns with values to delete.
+    /// Equality delete files do NOT reference specific data files — they apply predicates
+    /// across all data files in the table (constrained by partition and sequence number).
+    ///
+    /// Each row in the equality delete file represents a set of column values that should
+    /// be deleted from any data file that contains a matching row (AND within a row, OR across rows).
+    async fn write_equality_delete_file(
+        &self,
+        path: &str,
+        columns: &[DeleteColumn],
+        rows: &[Vec<String>],
+    ) -> u64 {
+        // Build schema from specified columns
+        let fields: Vec<arrow_schema::Field> = columns
+            .iter()
+            .map(|col| match col {
+                DeleteColumn::N => {
+                    arrow_schema::Field::new("n", arrow_schema::DataType::Int32, false)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "1".to_string(),
+                        )]))
+                }
+                DeleteColumn::Data => {
+                    arrow_schema::Field::new("data", arrow_schema::DataType::Utf8, false)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "2".to_string(),
+                        )]))
+                }
+            })
+            .collect();
+        let schema = Arc::new(arrow_schema::Schema::new(fields));
+
+        // Build one array per column from the rows
+        let arrays: Vec<ArrayRef> = columns
+            .iter()
+            .enumerate()
+            .map(|(col_idx, col)| {
+                let col_values: Vec<&str> = rows.iter().map(|row| row[col_idx].as_str()).collect();
+                match col {
+                    DeleteColumn::N => Arc::new(Int32Array::from(
+                        col_values
+                            .iter()
+                            .map(|v| v.parse::<i32>().unwrap())
+                            .collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                    DeleteColumn::Data => Arc::new(StringArray::from(col_values)) as ArrayRef,
+                }
+            })
+            .collect();
+
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
         fs::metadata(path).unwrap().len()
     }
 
@@ -2880,4 +3118,595 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
     // We expect 2 deletes and 300 appends
     assert_eq!(total_delete_rows, 0, "Should have 0 deleted rows");
     assert_eq!(total_append_rows, 298, "Should have 298 appended rows");
+}
+
+/// Test Case: Equality delete on appended file
+///
+/// Scenario: In a single snapshot, we both append new data and apply an equality delete
+/// that matches some of the appended rows.
+///
+/// Expected behavior:
+/// - Append stream: Only the rows that were NOT deleted by the equality delete
+/// - Delete stream: Empty (the deleted rows are filtered from the append)
+#[tokio::test]
+async fn test_equality_delete_on_appended_file() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(vec![], "empty.parquet".to_string()), // Snapshot 1: Empty
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+            ],
+            "data-2.parquet".to_string(),
+        ), // Snapshot 2: Add 5 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
+            "4".to_string(),
+        ]]), // Snapshot 3: Delete rows where n=2 or n=4
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 3
+    // Expected appends: (1,a), (3,c), (5,e) - the 3 rows NOT matching the equality delete
+    // Expected deletes: empty - deleted rows don't appear in delete stream for appended files
+    fixture
+        .verify_incremental_scan(1, 3, vec![(1, "a"), (3, "c"), (5, "e")], vec![])
+        .await;
+}
+
+/// Test Case: Equality delete on existing file
+///
+/// Scenario: A file exists at the start of the scan range. In a later snapshot within
+/// the range, an equality delete is applied that matches rows in that existing file.
+///
+/// Expected behavior:
+/// - Append stream: Empty (no new data files added)
+/// - Delete stream: The rows from the existing file that matched the equality delete predicate
+#[tokio::test]
+async fn test_equality_delete_on_existing_file() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: Add 5 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
+            "4".to_string(),
+        ]]), // Snapshot 2: Delete rows where n=2 or n=4
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 2
+    // data-1.parquet exists at snapshot 1 (baseline), equality delete applied in snapshot 2.
+    // Rows where n=2 (position 1) and n=4 (position 3) should appear in delete stream.
+    let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
+    fixture
+        .verify_incremental_scan(1, 2, vec![], vec![
+            (1, &data_file_path),
+            (3, &data_file_path),
+        ])
+        .await;
+}
+
+/// Test Case: Chained equality deletes
+///
+/// Scenario: An existing file has multiple equality deletes applied in different snapshots.
+/// Both deletes match rows from the original file.
+///
+/// Expected behavior:
+/// - Incremental scan across both delete snapshots should report all affected rows
+/// - Only the rows matching the predicates should appear in delete stream
+/// - Cumulative effect: file is left with rows that matched neither predicate
+#[tokio::test]
+async fn test_chained_equality_deletes() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: Add 5 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["1".to_string()], vec![
+            "2".to_string(),
+        ]]), // Snapshot 2: Delete rows where n in (1, 2)
+        Operation::EqualityDelete(vec![DeleteColumn::Data], vec![vec!["d".to_string()]]), // Snapshot 3: Delete rows where data='d'
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 3
+    // data-1.parquet exists at snapshot 1 (baseline).
+    // Equality delete n IN (1,2) in snapshot 2 → positions 0, 1.
+    // Equality delete data='d' in snapshot 3 → position 3.
+    let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
+    fixture
+        .verify_incremental_scan(1, 3, vec![], vec![
+            (0, &data_file_path),
+            (1, &data_file_path),
+            (3, &data_file_path),
+        ])
+        .await;
+}
+
+/// Test Case: Equality delete with no matching rows
+///
+/// Scenario: Predicate matches zero rows in the file
+///
+/// Expected behavior:
+/// - Append stream: All rows from appended file (no filtering)
+/// - Delete stream: Empty (no rows match the predicate)
+///
+/// This tests the optimization where we check for matches before allocating the Vec.
+#[tokio::test]
+async fn test_equality_delete_with_no_matches() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: Add 3 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["10".to_string()], vec![
+            "20".to_string(),
+        ]]), // Snapshot 2: Delete rows where n=10 or n=20 (no matches)
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 2
+    // Expected appends: empty (no new data added in snapshot 2)
+    // Expected deletes: empty (no rows matched the equality delete predicate)
+    fixture.verify_incremental_scan(1, 2, vec![], vec![]).await;
+}
+
+/// Test Case: Equality delete matching all rows
+///
+/// Scenario: Predicate matches every row in the file (full content deletion)
+///
+/// Expected behavior:
+/// - Append stream: All rows from appended file (before filtering)
+/// - Delete stream: All rows from file (all matched the predicate)
+///
+/// This tests the edge case where the equality delete removes an entire file's content.
+#[tokio::test]
+async fn test_equality_delete_matching_all_rows() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: Add 3 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()],
+        ]), // Snapshot 2: Delete rows where n in (1, 2, 3) - all rows
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 2
+    // data-1.parquet exists at snapshot 1 (baseline), equality delete deletes all rows in snapshot 2.
+    // All row positions (0, 1, 2) should appear in the delete stream.
+    let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
+    fixture
+        .verify_incremental_scan(1, 2, vec![], vec![
+            (0, &data_file_path),
+            (1, &data_file_path),
+            (2, &data_file_path),
+        ])
+        .await;
+}
+
+/// Test Case: Multiple equality deletes on the same file
+///
+/// Scenario: An existing file has equality deletes applied in two separate snapshots.
+/// The first delete matches rows where n=2, the second matches rows where n=4.
+///
+/// Expected behavior:
+/// - Append stream: Empty (no new data added)
+/// - Delete stream: Rows (2,b) and (4,d) that matched the equality delete predicates
+///
+/// This tests the cumulative effect of multiple equality delete operations.
+#[tokio::test]
+async fn test_multiple_equality_deletes_on_same_file() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: Add 5 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()]]), // Snapshot 2: Delete rows where n=2
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["4".to_string()]]), // Snapshot 3: Delete rows where n=4
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 3
+    // data-1.parquet exists at snapshot 1 (baseline).
+    // Equality delete n=2 (position 1) in snapshot 2, n=4 (position 3) in snapshot 3.
+    let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
+    fixture
+        .verify_incremental_scan(1, 3, vec![], vec![
+            (1, &data_file_path),
+            (3, &data_file_path),
+        ])
+        .await;
+}
+
+/// Test Case: Equality delete combined with positional delete
+///
+/// Scenario: An existing file has both a positional delete and an equality delete
+/// applied to it in different snapshots. The positional delete removes position 3 (n=4),
+/// and the equality delete removes rows where n=2.
+///
+/// Expected behavior:
+/// - Append stream: Empty (file exists before scan range, no new data added)
+/// - Delete stream: Positional delete (position 3 for row n=4) reported, equality delete on same file
+///
+/// Note: For existing files with positional deletes, they are included in the delete stream.
+#[tokio::test]
+async fn test_equality_delete_combined_with_positional_delete() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: Add 5 rows
+        Operation::Delete(vec![(3, "data-1.parquet".to_string())]), // Snapshot 2: Positional delete at position 3 (n=4)
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()]]), // Snapshot 3: Equality delete where n=2
+    ])
+    .await;
+
+    // Get the actual file path for verification
+    let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
+
+    // Verify incremental scan from 1 to 3
+    // data-1.parquet exists at snapshot 1 (baseline).
+    // Positional delete at position 3 (n=4) in snapshot 2.
+    // Equality delete where n=2 (position 1) in snapshot 3.
+    // Both should appear in the delete stream.
+    fixture
+        .verify_incremental_scan(1, 3, vec![], vec![
+            (1, &data_file_path),
+            (3, &data_file_path),
+        ])
+        .await;
+}
+
+/// Test Case: Equality delete on newly appended file with additional appends
+///
+/// Scenario: File is added in snapshot 2, an equality delete is applied in snapshot 3,
+/// then more rows are added in snapshot 4. The equality delete filters the first file,
+/// and subsequent appends are new rows added later.
+///
+/// Expected behavior:
+/// - Append stream: Rows from first file filtered by equality delete + new rows from later snapshots
+/// - Delete stream: Empty (appended files use filtering, not separate deletes)
+#[tokio::test]
+async fn test_equality_delete_with_subsequent_appends() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(vec![], "empty.parquet".to_string()), // Snapshot 1: Empty base
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 2: Add 3 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()]]), // Snapshot 3: Delete rows where n=2
+        Operation::Add(
+            vec![(4, "d".to_string()), (5, "e".to_string())],
+            "data-2.parquet".to_string(),
+        ), // Snapshot 4: Add 2 more rows
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 4
+    // Expected appends: (1,a), (3,c) from first file (after equality delete filter) + (4,d), (5,e) from second file
+    // Expected deletes: empty (appended files use filtering, not separate deletes)
+    fixture
+        .verify_incremental_scan(1, 4, vec![(1, "a"), (3, "c"), (4, "d"), (5, "e")], vec![])
+        .await;
+
+    let data_file_1_path = format!("{}/data/data-1.parquet", fixture.table_location);
+
+    // Verify incremental scan from 2 to 4
+    // from_snapshot=2 is exclusive: we see snapshots 3 and 4.
+    // data-1.parquet is now baseline (added in snapshot 2, before the range).
+    // The equality delete from snapshot 3 is new in this range and applies to it.
+    // n=2 is at row position 1 in data-1.parquet → (1, data-1.parquet) in deletes.
+    // data-2.parquet is appended in snapshot 4; the equality delete does not apply to it
+    // (its sequence number is higher than the delete's sequence number).
+    fixture
+        .verify_incremental_scan(2, 4, vec![(4, "d"), (5, "e")], vec![(1, &data_file_1_path)])
+        .await;
+
+    // Verify incremental scan from 3 to 4
+    // from_snapshot=3 is exclusive: we only see snapshot 4.
+    // The equality delete was already present at snapshot 3 (the from_snapshot), so it is
+    // not new in this range — no delete stream entries.
+    // data-2.parquet is appended in snapshot 4.
+    fixture
+        .verify_incremental_scan(3, 4, vec![(4, "d"), (5, "e")], vec![])
+        .await;
+}
+
+/// Test Case: Equality delete does NOT apply to data added after the delete
+///
+/// Scenario: File is added in snapshot 2, an equality delete is applied in snapshot 3
+/// that would match rows in a file added in snapshot 4. The equality delete should NOT
+/// apply to the file added in snapshot 4 because it was added after the delete.
+///
+/// Expected behavior:
+/// - Append stream: All rows from both files (no filtering for data-2.parquet)
+/// - Delete stream: Empty (files added after the delete are not affected by it)
+///
+/// This tests that equality deletes respect sequence ordering and don't retroactively
+/// apply to data added after the delete was created.
+#[tokio::test]
+async fn test_equality_delete_does_not_apply_to_later_appends() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(vec![], "empty.parquet".to_string()), // Snapshot 1: Empty base
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 2: Add 3 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
+            "4".to_string(),
+        ]]), // Snapshot 3: Delete rows where n=2 or n=4
+        Operation::Add(
+            vec![(2, "b2".to_string()), (4, "d".to_string())],
+            "data-2.parquet".to_string(),
+        ), // Snapshot 4: Add rows that match the delete predicate
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 4
+    // Expected appends: (1,a), (3,c) from data-1 (filtered by delete) + (2,b2), (4,d) from data-2 (NOT filtered, added after delete)
+    // The rows are sorted within each file, so we get: (1,a), (2,b2), (3,c), (4,d)
+    // Expected deletes: empty
+    fixture
+        .verify_incremental_scan(1, 4, vec![(1, "a"), (2, "b2"), (3, "c"), (4, "d")], vec![])
+        .await;
+
+    let data_file_1_path = format!("{}/data/data-1.parquet", fixture.table_location);
+
+    // Verify incremental scan from 2 to 4
+    // from_snapshot=2 is exclusive: we see snapshots 3 and 4.
+    // data-1.parquet is baseline (added in snapshot 2). The equality delete n=2 or n=4 is new
+    // in this range. n=2 is at row position 1; n=4 has no match in data-1.parquet.
+    // data-2.parquet is appended in snapshot 4; seq# > delete seq# → NOT filtered.
+    fixture
+        .verify_incremental_scan(2, 4, vec![(2, "b2"), (4, "d")], vec![(
+            1,
+            &data_file_1_path,
+        )])
+        .await;
+
+    // Verify incremental scan from 3 to 4
+    // from_snapshot=3 is exclusive: we only see snapshot 4.
+    // The equality delete was already present at snapshot 3 → not new, no delete stream entries.
+    // data-2.parquet is appended in snapshot 4.
+    fixture
+        .verify_incremental_scan(3, 4, vec![(2, "b2"), (4, "d")], vec![])
+        .await;
+}
+
+/// Test Case: Equality delete removes all rows from appended file
+///
+/// Scenario: A file is added in the scan range with N rows, then an equality delete is applied
+/// that matches ALL rows. The result is that no rows are returned (all filtered via row filtering).
+#[tokio::test]
+async fn test_equality_delete_removes_all_rows_from_appended_file() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(vec![], "empty.parquet".to_string()), // Snapshot 1: Empty base
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 2: Add 5 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()],
+            vec!["4".to_string()],
+            vec!["5".to_string()],
+        ]), // Snapshot 3: Delete all rows
+    ])
+    .await;
+
+    // Verify incremental scan from 1 to 3
+    // File is added in snapshot 2 and all rows are deleted via equality delete in snapshot 3
+    // Since file is added in the scan range (from=1), it's treated as appended.
+    // Expected appends: empty (all rows are deleted via equality delete predicate)
+    // Expected deletes: empty (appended files use row filtering, not delete stream)
+    fixture
+        .verify_incremental_scan(
+            1,
+            3,
+            vec![], // no appended rows (all deleted by equality predicate)
+            vec![], // no delete stream (appended files use row filtering, not delete stream)
+        )
+        .await;
+
+    // Also verify scan from 2 to 3
+    // File is added in snapshot 2 (the from_snapshot), deletes applied in snapshot 3
+    // When scanning from 2 onwards, deletes from snapshot 3 should appear in delete stream
+    let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
+    fixture
+        .verify_incremental_scan(
+            2,
+            3,
+            vec![], // no appended rows (all deleted)
+            vec![
+                (0, &data_file_path),
+                (1, &data_file_path),
+                (2, &data_file_path),
+                (3, &data_file_path),
+                (4, &data_file_path),
+            ], // all rows should appear in delete stream
+        )
+        .await;
+}
+
+/// Test Case: Equality delete on multiple existing files using both columns
+///
+/// Snapshot 1: data-1 with rows [(1,"a"), (2,"b"), (3,"c")]
+/// Snapshot 2: data-2 with rows [(4,"d"), (5,"e"), (6,"f")]
+/// Snapshot 3: equality delete on N column — delete n=2 (data-1 pos 1) and n=5 (data-2 pos 1)
+/// Snapshot 4: equality delete on Data column — delete data="c" (data-1 pos 2) and data="f" (data-2 pos 2)
+#[tokio::test]
+async fn test_equality_delete_on_multiple_files() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: data-1 with 3 rows
+        Operation::Add(
+            vec![
+                (4, "d".to_string()),
+                (5, "e".to_string()),
+                (6, "f".to_string()),
+            ],
+            "data-2.parquet".to_string(),
+        ), // Snapshot 2: data-2 with 3 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
+            "5".to_string(),
+        ]]), // Snapshot 3: delete n=2 (data-1 pos 1) and n=5 (data-2 pos 1)
+        Operation::EqualityDelete(vec![DeleteColumn::Data], vec![vec!["c".to_string()], vec![
+            "f".to_string(),
+        ]]), // Snapshot 4: delete data="c" (data-1 pos 2) and data="f" (data-2 pos 2)
+    ])
+    .await;
+
+    let data_file_1_path = format!("{}/data/data-1.parquet", fixture.table_location);
+    let data_file_2_path = format!("{}/data/data-2.parquet", fixture.table_location);
+
+    // Scan from 1 to 3: data-1 is baseline, data-2 is appended.
+    // N-delete n=2 → data-1 pos 1 in delete stream; n=5 → data-2 filtered in append stream.
+    fixture
+        .verify_incremental_scan(1, 3, vec![(4, "d"), (6, "f")], vec![(1, &data_file_1_path)])
+        .await;
+
+    // Scan from 2 to 3: both files are baseline.
+    // n=2 (data-1 pos 1) and n=5 (data-2 pos 1) both appear in delete stream.
+    fixture
+        .verify_incremental_scan(2, 3, vec![], vec![
+            (1, &data_file_1_path),
+            (1, &data_file_2_path),
+        ])
+        .await;
+
+    // Scan from 1 to 4: data-1 is baseline, data-2 is appended.
+    // N-delete (snap 3): data-1 pos 1 → delete stream; data-2 n=5 filtered.
+    // Data-delete (snap 4): data-1 pos 2 → delete stream; data-2 data="f" filtered.
+    // Append stream: data-2 rows not matched by either delete → only (4,"d") survives.
+    fixture
+        .verify_incremental_scan(1, 4, vec![(4, "d")], vec![
+            (1, &data_file_1_path), // n=2 deleted
+            (2, &data_file_1_path), // data="c" deleted
+        ])
+        .await;
+
+    // Scan from 2 to 4: both files are baseline.
+    // N-delete (snap 3): pos 1 in each file.
+    // Data-delete (snap 4): pos 2 in each file.
+    fixture
+        .verify_incremental_scan(2, 4, vec![], vec![
+            (1, &data_file_1_path),
+            (1, &data_file_2_path),
+            (2, &data_file_1_path),
+            (2, &data_file_2_path),
+        ])
+        .await;
+}
+
+/// Test Case: Multi-column equality delete (AND semantics within a row)
+///
+/// Scenario: A file exists before the scan range. An equality delete is applied using
+/// two columns (n AND data). Only rows matching BOTH column values are deleted; rows
+/// that match only one column are NOT deleted.
+///
+/// Data file rows (positions 0-4):
+///   pos 0: (1, "a")
+///   pos 1: (1, "b")  ← n=1 matches but data≠"a", so NOT deleted
+///   pos 2: (2, "a")  ← data="a" matches but n≠1, so NOT deleted
+///   pos 3: (3, "c")
+///   pos 4: (4, "d")
+///
+/// Equality delete rows (AND within row, OR across rows):
+///   row 0: (n=1, data="a")  → deletes pos 0
+///   row 1: (n=4, data="d")  → deletes pos 4
+///
+/// Expected behavior (scan from 1 to 2, baseline file):
+/// - Append stream: Empty
+/// - Delete stream: positions 0 and 4 (only exact (n,data) matches)
+#[tokio::test]
+async fn test_equality_delete_multi_column() {
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![
+                (1, "a".to_string()),
+                (1, "b".to_string()),
+                (2, "a".to_string()),
+                (3, "c".to_string()),
+                (4, "d".to_string()),
+            ],
+            "data-1.parquet".to_string(),
+        ), // Snapshot 1: Add 5 rows
+        Operation::EqualityDelete(vec![DeleteColumn::N, DeleteColumn::Data], vec![
+            vec!["1".to_string(), "a".to_string()], // delete (n=1, data="a") → pos 0
+            vec!["4".to_string(), "d".to_string()], // delete (n=4, data="d") → pos 4
+        ]), // Snapshot 2: Multi-column equality delete
+    ])
+    .await;
+
+    let data_file_path = format!("{}/data/data-1.parquet", fixture.table_location);
+
+    // Scan from 1 to 2: data-1.parquet is baseline.
+    // Only rows matching BOTH columns are deleted.
+    // pos 1 (1,"b") and pos 2 (2,"a") are partial matches and must NOT appear.
+    fixture
+        .verify_incremental_scan(1, 2, vec![], vec![
+            (0, &data_file_path), // (1, "a") deleted
+            (4, &data_file_path), // (4, "d") deleted
+        ])
+        .await;
 }
