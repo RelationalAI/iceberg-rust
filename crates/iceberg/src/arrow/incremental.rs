@@ -62,21 +62,23 @@ async fn process_incremental_append_task(
     file_io: FileIO,
     metadata_size_hint: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
-    let should_load_page_index =
-        task.equality_delete_predicate.is_some() || task.positional_deletes.is_some();
-    let schema = task.base.schema.clone();
-    let case_sensitive = task.base.case_sensitive;
-    let equality_delete_bound = task
-        .equality_delete_predicate
-        .map(|p| p.bind(schema, case_sensitive))
+    let AppendedFileScanTask {
+        base,
+        positional_deletes,
+        equality_delete_predicate,
+    } = task;
+
+    let should_load_page_index = equality_delete_predicate.is_some() || positional_deletes.is_some();
+    let equality_delete_bound = equality_delete_predicate
+        .map(|p| p.bind(base.schema.clone(), base.case_sensitive))
         .transpose()?;
 
     let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
-        &task.base.data_file_path,
-        task.base.file_size_in_bytes,
+        &base.data_file_path,
+        base.file_size_in_bytes,
         file_io,
         should_load_page_index,
-        ArrowReader::build_virtual_columns(&task.base.project_field_ids),
+        ArrowReader::build_virtual_columns(&base.project_field_ids),
         metadata_size_hint,
         batch_size,
         None, // name_mapping not yet supported in incremental scan
@@ -85,11 +87,11 @@ async fn process_incremental_append_task(
 
     let builder = ArrowReader::apply_parquet_filters(
         builder,
-        task.base.start,
-        task.base.length,
-        &task.base.schema,
+        base.start,
+        base.length,
+        &base.schema,
         equality_delete_bound.as_ref(),
-        task.positional_deletes.as_deref(),
+        positional_deletes.as_deref(),
         true,  // row_group_filtering_enabled
         true,  // row_selection_enabled
         false, // use_predicate_projection: projection applied separately via build_projected_record_batch_stream
@@ -98,12 +100,12 @@ async fn process_incremental_append_task(
 
     ArrowReader::build_projected_record_batch_stream(
         builder,
-        &task.base.project_field_ids,
-        task.schema_ref(),
+        &base.project_field_ids,
+        base.schema,
         has_missing_field_ids,
-        &task.base.data_file_path,
-        task.base.partition_spec.clone(),
-        task.base.partition.clone(),
+        &base.data_file_path,
+        base.partition_spec,
+        base.partition,
     )
 }
 
