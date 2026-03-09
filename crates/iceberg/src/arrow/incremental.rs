@@ -57,7 +57,7 @@ pub type CombinedIncrementalBatchRecordStream =
 pub type UnzippedIncrementalBatchRecordStream = (ArrowRecordBatchStream, ArrowRecordBatchStream);
 
 async fn process_incremental_append_task(
-    mut task: AppendedFileScanTask,
+    task: AppendedFileScanTask,
     batch_size: Option<usize>,
     file_io: FileIO,
     metadata_size_hint: Option<usize>,
@@ -68,7 +68,6 @@ async fn process_incremental_append_task(
     let case_sensitive = task.base.case_sensitive;
     let equality_delete_bound = task
         .equality_delete_predicate
-        .take()
         .map(|p| p.bind(schema, case_sensitive))
         .transpose()?;
 
