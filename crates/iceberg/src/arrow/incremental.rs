@@ -124,13 +124,10 @@ async fn process_incremental_append_task(
         record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
     }
 
-    // Bind equality delete survival predicate with rewrite_not() so the
-    // RowGroupMetricsEvaluator and PageIndexEvaluator can prune effectively
-    // (e.g. NOT(id=1) → id!=1).
     let schema_ref = task.schema_ref();
     let equality_delete_bound = task
         .equality_delete_predicate
-        .map(|p| p.rewrite_not().bind(schema_ref.clone(), false))
+        .map(|p| p.bind(schema_ref.clone(), false))
         .transpose()?;
 
     // ── Row group / row selection pipeline ───────────────────────────────────
@@ -307,8 +304,6 @@ async fn process_equality_delete_task(
     // Column projection (predicate columns only) + row filter + row group filtering.
     // Projection and filtering share the same field-ID map, computed once inside
     // apply_predicate_row_filtering when Some(missing_field_ids) is passed.
-    // Row group pruning is safe because combined_predicate has been rewritten via
-    // rewrite_not() so RowGroupMetricsEvaluator can evaluate it correctly.
     let mut selected_row_group_indices = None;
     let mut row_selection = None;
 
