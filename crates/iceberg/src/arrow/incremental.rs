@@ -127,7 +127,7 @@ async fn process_incremental_append_task(
     let schema_ref = task.schema_ref();
     let equality_delete_bound = task
         .equality_delete_predicate
-        .map(|p| p.bind(schema_ref.clone(), false))
+        .map(|p| p.bind(schema_ref.clone(), task.base.case_sensitive))
         .transpose()?;
 
     // ── Row group / row selection pipeline ───────────────────────────────────
@@ -299,7 +299,9 @@ async fn process_equality_delete_task(
     .await?;
 
     // The combined_predicate selects rows TO DELETE. Bind it to the task schema.
-    let bound_predicate = task.combined_predicate.bind(task.schema_ref(), false)?;
+    let bound_predicate = task
+        .combined_predicate
+        .bind(task.schema_ref(), task.base.case_sensitive)?;
 
     // Column projection (predicate columns only) + row filter + row group filtering.
     // Projection and filtering share the same field-ID map, computed once inside

@@ -51,6 +51,8 @@ pub struct BaseIncrementalFileScanTask {
     /// The partition spec for this file, used to distinguish identity transforms
     /// (which use partition metadata constants) from non-identity transforms.
     pub partition_spec: Option<Arc<PartitionSpec>>,
+    /// Whether to match column names case-sensitively when binding predicates.
+    pub case_sensitive: bool,
 }
 
 impl BaseIncrementalFileScanTask {
@@ -235,6 +237,7 @@ impl IncrementalFileScanTask {
                 project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
                 partition,
                 partition_spec,
+                case_sensitive: manifest_entry_context.case_sensitive,
             },
             positional_deletes: delete_filter.get_delete_vector_for_path(data_file_path),
             equality_delete_predicate,

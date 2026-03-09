@@ -710,6 +710,7 @@ impl IncrementalTableScan {
                             project_field_ids: self.plan_context.field_ids.as_ref().clone(),
                             partition: None,
                             partition_spec: None,
+                            case_sensitive: self.plan_context.case_sensitive,
                         },
                         combined_predicate,
                     };
@@ -914,6 +915,7 @@ impl IncrementalTableScan {
                 project_field_ids: manifest_entry_context.field_ids.as_ref().clone(),
                 partition: None,
                 partition_spec: None,
+                case_sensitive: manifest_entry_context.case_sensitive,
             },
         });
 
