@@ -294,23 +294,22 @@ impl ArrowReader {
 
         let virtual_columns = Self::build_virtual_columns(task.project_field_ids());
 
-        // Open the file initially (with virtual columns) then resolve the schema,
-        // handling migrated tables that lack embedded Parquet field IDs.
-        // Three-branch strategy matching Java's ReadConf constructor:
-        //   Branch 1: file has embedded field IDs → use as-is
-        //   Branch 2: name_mapping present → apply name mapping, reopen
-        //   Branch 3: fallback → assign position-based IDs, reopen
+        let arrow_reader_options = if virtual_columns.is_empty() {
+            None
+        } else {
+            Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?)
+        };
         let initial_stream_builder = Self::create_parquet_record_batch_stream_builder(
             &task.data_file_path,
             file_io.clone(),
             should_load_page_index,
-            Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?),
+            arrow_reader_options,
             metadata_size_hint,
             task.file_size_in_bytes,
         )
         .await?;
 
-        let (mut record_batch_stream_builder, missing_field_ids) = Self::resolve_parquet_schema(
+        let (mut record_batch_stream_builder, has_missing_field_ids) = Self::resolve_parquet_schema(
             initial_stream_builder,
             &task.data_file_path,
             file_io.clone(),
@@ -326,7 +325,7 @@ impl ArrowReader {
             record_batch_stream_builder,
             task.project_field_ids(),
             &task.schema,
-            missing_field_ids,
+            has_missing_field_ids,
         )?;
 
         // RecordBatchTransformer performs any transformations required on the RecordBatches
@@ -842,7 +841,7 @@ impl ArrowReader {
     /// Resolves the Parquet schema for a file, handling the three-branch strategy for
     /// migrated tables that lack embedded field IDs.
     ///
-    /// Returns `(resolved_builder, missing_field_ids)` where `missing_field_ids` is `true`
+    /// Returns `(resolved_builder, has_missing_field_ids)` where `has_missing_field_ids` is `true`
     /// when the file lacked embedded field IDs and fallback/name-mapping IDs were assigned.
     ///
     /// This matches Java's `ReadConf` constructor logic:
@@ -860,14 +859,14 @@ impl ArrowReader {
         file_size_in_bytes: u64,
         name_mapping: Option<&NameMapping>,
     ) -> Result<(ParquetRecordBatchStreamBuilder<ArrowFileReader>, bool)> {
-        let missing_field_ids = initial_builder
+        let has_missing_field_ids = initial_builder
             .schema()
             .fields()
             .iter()
             .next()
             .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
 
-        if !missing_field_ids {
+        if !has_missing_field_ids {
             return Ok((initial_builder, false));
         }
 
@@ -901,21 +900,21 @@ impl ArrowReader {
         builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
         field_ids: &[i32],
         schema: &Schema,
-        missing_field_ids: bool,
+        has_missing_field_ids: bool,
     ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
         // Metadata fields (e.g. _file, _pos) are virtual — they don't exist as Parquet columns.
         // Filter them out so get_arrow_projection_mask only sees real schema field IDs.
-        let real_field_ids: Vec<i32> = field_ids
+        let project_field_ids_without_metadata: Vec<i32> = field_ids
             .iter()
             .filter(|&&id| !is_metadata_field(id))
             .copied()
             .collect();
         let mask = Self::get_arrow_projection_mask(
-            &real_field_ids,
+            &project_field_ids_without_metadata,
             schema,
             builder.parquet_schema(),
             builder.schema(),
-            missing_field_ids,
+            has_missing_field_ids,
         )?;
         Ok(builder.with_projection(mask))
     }
@@ -1056,25 +1055,12 @@ impl ArrowReader {
     /// If `existing` is `None`, returns `Some(new)` (i.e., treats the new list as the first
     /// constraint). The result is always `Some` so callers can unconditionally update their
     /// `selected_row_group_indices`.
-    fn intersect_row_group_indices(
-        existing: Option<Vec<usize>>,
-        new: Vec<usize>,
-    ) -> Option<Vec<usize>> {
-        Some(match existing {
-            Some(existing) => existing
-                .into_iter()
-                .filter(|idx| new.contains(idx))
-                .collect(),
-            None => new,
-        })
-    }
-
     /// Applies a bound predicate as a row filter and, optionally, as row-group and page-level
     /// row-selection filters to `builder`.
     ///
     /// * `row_group_filtering_enabled` — when `true`, prune row groups via statistics.
     /// * `row_selection_enabled`       — when `true`, build page-level row selection.
-    /// * `projection`                  — when `Some(missing_field_ids)`, apply a column
+    /// * `projection`                  — when `Some(has_missing_field_ids)`, apply a column
     ///   projection restricted to the predicate's field IDs (avoids a redundant
     ///   `build_field_id_set_and_map` call at the call site when the predicate drives
     ///   both projection and filtering, as in the equality-delete task).
@@ -1109,16 +1095,19 @@ impl ArrowReader {
         builder = builder.with_row_filter(row_filter);
 
         if row_group_filtering_enabled {
-            let predicate_filtered_row_groups = Self::get_selected_row_group_indices(
+            let predicate_filtered = Self::get_selected_row_group_indices(
                 bound_predicate,
                 builder.metadata(),
                 &field_id_map,
                 schema,
             )?;
-            *selected_row_group_indices = Self::intersect_row_group_indices(
-                selected_row_group_indices.take(),
-                predicate_filtered_row_groups,
-            );
+            *selected_row_group_indices = Some(match selected_row_group_indices.take() {
+                Some(existing) => existing
+                    .into_iter()
+                    .filter(|idx| predicate_filtered.contains(idx))
+                    .collect(),
+                None => predicate_filtered,
+            });
         }
 
         if row_selection_enabled {

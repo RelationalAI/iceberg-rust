@@ -76,17 +76,22 @@ async fn process_incremental_append_task(
         task.equality_delete_predicate.is_some() || task.positional_deletes.is_some();
 
     // Open the file, then resolve the schema for migrated tables lacking embedded field IDs.
+    let arrow_reader_options = if virtual_columns.is_empty() {
+        None
+    } else {
+        Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?)
+    };
     let initial_builder = ArrowReader::create_parquet_record_batch_stream_builder(
         &task.base.data_file_path,
         file_io.clone(),
         should_load_page_index,
-        Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?),
+        arrow_reader_options,
         metadata_size_hint,
         task.base.file_size_in_bytes,
     )
     .await?;
 
-    let (mut record_batch_stream_builder, missing_field_ids) = ArrowReader::resolve_parquet_schema(
+    let (mut record_batch_stream_builder, has_missing_field_ids) = ArrowReader::resolve_parquet_schema(
         initial_builder,
         &task.base.data_file_path,
         file_io,
@@ -102,7 +107,7 @@ async fn process_incremental_append_task(
         record_batch_stream_builder,
         &task.base.project_field_ids,
         &task.schema_ref(),
-        missing_field_ids,
+        has_missing_field_ids,
     )?;
 
     // RecordBatchTransformer performs any transformations required on the RecordBatches
@@ -282,7 +287,7 @@ async fn process_equality_delete_task(
 
     // Schema resolution: detect if Parquet file lacks embedded field IDs (migrated tables)
     // and assign fallback IDs before reading.
-    let (mut record_batch_stream_builder, missing_field_ids) = ArrowReader::resolve_parquet_schema(
+    let (mut record_batch_stream_builder, has_missing_field_ids) = ArrowReader::resolve_parquet_schema(
         initial_stream_builder,
         &file_path,
         file_io,
@@ -301,7 +306,7 @@ async fn process_equality_delete_task(
 
     // Column projection (predicate columns only) + row filter + row group filtering.
     // Projection and filtering share the same field-ID map, computed once inside
-    // apply_predicate_row_filtering when Some(missing_field_ids) is passed.
+    // apply_predicate_row_filtering when Some(has_missing_field_ids) is passed.
     let mut selected_row_group_indices = None;
     let mut row_selection = None;
 
@@ -321,7 +326,7 @@ async fn process_equality_delete_task(
         &mut row_selection,
         true,                    // row_group_filtering_enabled
         false,                   // row_selection_enabled (no page-level selection needed)
-        Some(missing_field_ids), // also apply projection using predicate field IDs
+        Some(has_missing_field_ids), // also apply projection using predicate field IDs
     )?;
     record_batch_stream_builder = ArrowReader::apply_row_groups_and_selection(
         record_batch_stream_builder,
