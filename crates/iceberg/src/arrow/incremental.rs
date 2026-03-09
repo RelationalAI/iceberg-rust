@@ -68,7 +68,8 @@ async fn process_incremental_append_task(
         equality_delete_predicate,
     } = task;
 
-    let should_load_page_index = equality_delete_predicate.is_some() || positional_deletes.is_some();
+    let should_load_page_index =
+        equality_delete_predicate.is_some() || positional_deletes.is_some();
     let equality_delete_bound = equality_delete_predicate
         .map(|p| p.bind(base.schema.clone(), base.case_sensitive))
         .transpose()?;
