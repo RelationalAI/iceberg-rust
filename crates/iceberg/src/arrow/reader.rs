@@ -452,6 +452,21 @@ impl ArrowReader {
         use_predicate_projection: bool,
         has_missing_field_ids: bool,
     ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        // There are three possible sources for potential lists of selected RowGroup indices,
+        // and two for `RowSelection`s.
+        // Selected RowGroup index lists can come from three sources:
+        //   * When task.start and task.length specify a byte range (file splitting);
+        //   * When there are equality delete files that are applicable;
+        //   * When there is a scan predicate and row_group_filtering_enabled = true.
+        // `RowSelection`s can be created in either or both of the following cases:
+        //   * When there are positional delete files that are applicable;
+        //   * When there is a scan predicate and row_selection_enabled = true
+        // Note that row group filtering from predicates only happens when
+        // there is a scan predicate AND row_group_filtering_enabled = true,
+        // but we perform row selection filtering if there are applicable
+        // equality delete files OR (there is a scan predicate AND row_selection_enabled),
+        // since the only implemented method of applying positional deletes is
+        // by using a `RowSelection`.
         let mut selected_row_group_indices = None;
         let mut row_selection = None;
 
