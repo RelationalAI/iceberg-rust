@@ -926,7 +926,9 @@ impl ArrowReader {
     /// Returns the list of virtual columns to request from the Parquet reader for the
     /// given projection. Currently, only `_pos` is a virtual column (produced by the
     /// Parquet reader itself rather than read from file data).
-    pub(crate) fn build_virtual_columns(project_field_ids: &[i32]) -> Vec<Arc<arrow_schema::Field>> {
+    pub(crate) fn build_virtual_columns(
+        project_field_ids: &[i32],
+    ) -> Vec<Arc<arrow_schema::Field>> {
         let mut virtual_columns = Vec::new();
         if project_field_ids.contains(&RESERVED_FIELD_ID_POS) {
             virtual_columns.push(Arc::clone(row_pos_field()));
