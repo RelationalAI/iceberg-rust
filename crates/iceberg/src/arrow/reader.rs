@@ -309,17 +309,18 @@ impl ArrowReader {
         )
         .await?;
 
-        let (mut record_batch_stream_builder, has_missing_field_ids) = Self::resolve_parquet_schema(
-            initial_stream_builder,
-            &task.data_file_path,
-            file_io.clone(),
-            should_load_page_index,
-            virtual_columns.clone(),
-            metadata_size_hint,
-            task.file_size_in_bytes,
-            task.name_mapping.as_deref(),
-        )
-        .await?;
+        let (mut record_batch_stream_builder, has_missing_field_ids) =
+            Self::resolve_parquet_schema(
+                initial_stream_builder,
+                &task.data_file_path,
+                file_io.clone(),
+                should_load_page_index,
+                virtual_columns.clone(),
+                metadata_size_hint,
+                task.file_size_in_bytes,
+                task.name_mapping.as_deref(),
+            )
+            .await?;
 
         record_batch_stream_builder = Self::apply_projection(
             record_batch_stream_builder,
