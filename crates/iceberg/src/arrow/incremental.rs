@@ -77,7 +77,8 @@ async fn process_incremental_append_task(
 
     // Page index is needed when an equality delete predicate is present for page-level
     // row selection (get_row_selection_for_filter_predicate requires column/offset index).
-    let should_load_page_index = task.equality_delete_predicate.is_some();
+    let should_load_page_index =
+        task.equality_delete_predicate.is_some() || task.positional_deletes.is_some();
 
     // Open the file, then resolve the schema for migrated tables lacking embedded field IDs.
     let initial_builder = ArrowReader::create_parquet_record_batch_stream_builder(
