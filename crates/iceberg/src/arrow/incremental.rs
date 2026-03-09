@@ -30,7 +30,7 @@ use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Bind;
 use crate::io::FileIO;
-use crate::metadata_columns::{RESERVED_FIELD_ID_POS, row_pos_field};
+use crate::metadata_columns::row_pos_field;
 use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
