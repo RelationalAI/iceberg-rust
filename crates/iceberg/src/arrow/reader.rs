@@ -714,7 +714,7 @@ impl ArrowReader {
         }
     }
 
-    pub(crate) fn get_arrow_projection_mask(
+    fn get_arrow_projection_mask(
         field_ids: &[i32],
         iceberg_schema_of_task: &Schema,
         parquet_schema: &SchemaDescriptor,
@@ -937,7 +937,7 @@ impl ArrowReader {
     /// - Branch 2: name_mapping present → apply name mapping, reopen
     /// - Branch 3: no name mapping → assign fallback position-based IDs, reopen
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn resolve_parquet_schema(
+    async fn resolve_parquet_schema(
         initial_builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
         file_path: &str,
         file_io: FileIO,
@@ -984,7 +984,7 @@ impl ArrowReader {
     /// Applies a projection mask derived from `field_ids` to a builder.
     ///
     /// Wraps `get_arrow_projection_mask` + `with_projection` into a single call.
-    pub(crate) fn apply_projection(
+    fn apply_projection(
         builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
         field_ids: &[i32],
         schema: &Schema,
@@ -1028,7 +1028,7 @@ impl ArrowReader {
     /// - `_file` constant column (only when `RESERVED_FIELD_ID_FILE` is projected)
     /// - `_pos` virtual column (only when `RESERVED_FIELD_ID_POS` is projected)
     /// - identity-transform partition columns (only when partition metadata is present)
-    pub(crate) fn build_record_batch_transformer(
+    fn build_record_batch_transformer(
         schema: SchemaRef,
         project_field_ids: &[i32],
         data_file_path: &str,
