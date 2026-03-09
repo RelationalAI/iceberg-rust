@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow_arith::boolean::{and, and_kleene, is_not_null, is_null, not, or, or_kleene};
 use arrow_array::{Array, ArrayRef, BooleanArray, Datum as ArrowDatum, RecordBatch, Scalar};
@@ -289,62 +289,26 @@ impl ArrowReader {
         let should_load_page_index =
             (row_selection_enabled && task.predicate.is_some()) || !task.deletes.is_empty();
 
+        // Open the Parquet file and load delete files concurrently.
         let delete_filter_rx =
             delete_file_loader.load_deletes(&task.deletes, Arc::clone(&task.schema));
 
-        let virtual_columns = Self::build_virtual_columns(task.project_field_ids());
-
-        let arrow_reader_options = if virtual_columns.is_empty() {
-            None
-        } else {
-            Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?)
-        };
-        let initial_stream_builder = Self::create_parquet_record_batch_stream_builder(
-            &task.data_file_path,
-            file_io.clone(),
-            should_load_page_index,
-            arrow_reader_options,
-            metadata_size_hint,
-            task.file_size_in_bytes,
-        )
-        .await?;
-
-        let (mut record_batch_stream_builder, has_missing_field_ids) =
-            Self::resolve_parquet_schema(
-                initial_stream_builder,
+        let (parquet_result, delete_filter) = futures::join!(
+            Self::open_parquet_stream_builder(
                 &task.data_file_path,
-                file_io.clone(),
-                should_load_page_index,
-                virtual_columns.clone(),
-                metadata_size_hint,
                 task.file_size_in_bytes,
+                file_io,
+                should_load_page_index,
+                Self::build_virtual_columns(task.project_field_ids()),
+                metadata_size_hint,
+                batch_size,
                 task.name_mapping.as_deref(),
-            )
-            .await?;
+            ),
+            async { delete_filter_rx.await.unwrap() },
+        );
+        let (builder, has_missing_field_ids) = parquet_result?;
+        let delete_filter = delete_filter?;
 
-        record_batch_stream_builder = Self::apply_projection(
-            record_batch_stream_builder,
-            task.project_field_ids(),
-            &task.schema,
-            has_missing_field_ids,
-        )?;
-
-        // RecordBatchTransformer performs any transformations required on the RecordBatches
-        // that come back from the file, such as type promotion, default column insertion,
-        // column re-ordering, partition constants, and virtual field addition (like _file)
-        let mut record_batch_transformer = Self::build_record_batch_transformer(
-            task.schema_ref(),
-            task.project_field_ids(),
-            &task.data_file_path,
-            task.partition_spec.clone(),
-            task.partition.clone(),
-        )?;
-
-        if let Some(batch_size) = batch_size {
-            record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
-        }
-
-        let delete_filter = delete_filter_rx.await.unwrap()?;
         let delete_predicate = delete_filter.build_equality_delete_predicate(&task).await?;
 
         // In addition to the optional predicate supplied in the `FileScanTask`,
@@ -360,76 +324,30 @@ impl ArrowReader {
             }
         };
 
-        // There are three possible sources for potential lists of selected RowGroup indices,
-        // and two for `RowSelection`s.
-        // Selected RowGroup index lists can come from three sources:
-        //   * When task.start and task.length specify a byte range (file splitting);
-        //   * When there are equality delete files that are applicable;
-        //   * When there is a scan predicate and row_group_filtering_enabled = true.
-        // `RowSelection`s can be created in either or both of the following cases:
-        //   * When there are positional delete files that are applicable;
-        //   * When there is a scan predicate and row_selection_enabled = true
-        // Note that row group filtering from predicates only happens when
-        // there is a scan predicate AND row_group_filtering_enabled = true,
-        // but we perform row selection filtering if there are applicable
-        // equality delete files OR (there is a scan predicate AND row_selection_enabled),
-        // since the only implemented method of applying positional deletes is
-        // by using a `RowSelection`.
-        let mut selected_row_group_indices = None;
-        let mut row_selection = None;
-
-        // Filter row groups based on byte range from task.start and task.length.
-        // If both start and length are 0, read the entire file (backwards compatibility).
-        if task.start != 0 || task.length != 0 {
-            let byte_range_filtered_row_groups = Self::filter_row_groups_by_byte_range(
-                record_batch_stream_builder.metadata(),
-                task.start,
-                task.length,
-            )?;
-            selected_row_group_indices = Some(byte_range_filtered_row_groups);
-        }
-
-        if let Some(predicate) = final_predicate {
-            record_batch_stream_builder = Self::apply_predicate_row_filtering(
-                record_batch_stream_builder,
-                &predicate,
-                &task.schema,
-                &mut selected_row_group_indices,
-                &mut row_selection,
-                row_group_filtering_enabled,
-                row_selection_enabled,
-                None,
-            )?;
-        }
-
         let positional_delete_indexes = delete_filter.get_delete_vector(&task);
-        Self::apply_positional_delete_row_selection(
-            record_batch_stream_builder.metadata().row_groups(),
-            &selected_row_group_indices,
+
+        let builder = Self::apply_parquet_filters(
+            builder,
+            task.start,
+            task.length,
+            &task.schema,
+            final_predicate.as_ref(),
             positional_delete_indexes.as_deref(),
-            &mut row_selection,
+            row_group_filtering_enabled,
+            row_selection_enabled,
+            false, // use_predicate_projection: projection is handled by build_projected_record_batch_stream
+            has_missing_field_ids,
         )?;
 
-        record_batch_stream_builder = Self::apply_row_groups_and_selection(
-            record_batch_stream_builder,
-            selected_row_group_indices,
-            row_selection,
-        );
-
-        // Build the batch stream and send all the RecordBatches that it generates
-        // to the requester.
-        let record_batch_stream =
-            record_batch_stream_builder
-                .build()?
-                .map(move |batch| match batch {
-                    Ok(batch) => {
-                        // Process the record batch (type promotion, column reordering, virtual fields, etc.)
-                        record_batch_transformer.process_record_batch(batch)
-                    }
-                    Err(err) => Err(err.into()),
-                });
-
-        Ok(Box::pin(record_batch_stream) as ArrowRecordBatchStream)
+        Self::build_projected_record_batch_stream(
+            builder,
+            task.project_field_ids(),
+            task.schema_ref(),
+            has_missing_field_ids,
+            &task.data_file_path,
+            task.partition_spec.clone(),
+            task.partition.clone(),
+        )
     }
 
     pub(crate) async fn create_parquet_record_batch_stream_builder(
@@ -463,6 +381,116 @@ impl ArrowReader {
         let record_batch_stream_builder =
             ParquetRecordBatchStreamBuilder::new_with_options(parquet_file_reader, options).await?;
         Ok(record_batch_stream_builder)
+    }
+
+    /// Opens a Parquet file, resolves its schema (name-mapping / field-ID fallback), and
+    /// applies the batch size. Returns `(builder, has_missing_field_ids)`.
+    ///
+    /// This is the async phase shared by every reading path. Callers that have background
+    /// work to overlap (e.g. delete-file loading) can run this concurrently with that work
+    /// using [`futures::join!`], then pass the result to [`Self::apply_parquet_filters`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn open_parquet_stream_builder(
+        data_file_path: &str,
+        file_size_in_bytes: u64,
+        file_io: FileIO,
+        should_load_page_index: bool,
+        virtual_columns: Vec<Arc<arrow_schema::Field>>,
+        metadata_size_hint: Option<usize>,
+        batch_size: Option<usize>,
+        name_mapping: Option<&NameMapping>,
+    ) -> Result<(ParquetRecordBatchStreamBuilder<ArrowFileReader>, bool)> {
+        let arrow_reader_options = if virtual_columns.is_empty() {
+            None
+        } else {
+            Some(ArrowReaderOptions::new().with_virtual_columns(virtual_columns.clone())?)
+        };
+        let initial_builder = Self::create_parquet_record_batch_stream_builder(
+            data_file_path,
+            file_io.clone(),
+            should_load_page_index,
+            arrow_reader_options,
+            metadata_size_hint,
+            file_size_in_bytes,
+        )
+        .await?;
+
+        let (mut builder, has_missing_field_ids) = Self::resolve_parquet_schema(
+            initial_builder,
+            data_file_path,
+            file_io,
+            should_load_page_index,
+            virtual_columns,
+            metadata_size_hint,
+            file_size_in_bytes,
+            name_mapping,
+        )
+        .await?;
+
+        if let Some(batch_size) = batch_size {
+            builder = builder.with_batch_size(batch_size);
+        }
+
+        Ok((builder, has_missing_field_ids))
+    }
+
+    /// Applies all row-level and row-group-level filters to a builder returned by
+    /// [`Self::open_parquet_stream_builder`].
+    ///
+    /// Handles byte-range row group pruning, predicate row filtering (with optional
+    /// projection), positional-delete row selection, and the final
+    /// [`Self::apply_row_groups_and_selection`] commit step.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_parquet_filters(
+        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        start: u64,
+        length: u64,
+        schema: &Schema,
+        bound_predicate: Option<&BoundPredicate>,
+        positional_deletes: Option<&Mutex<DeleteVector>>,
+        row_group_filtering_enabled: bool,
+        row_selection_enabled: bool,
+        use_predicate_projection: bool,
+        has_missing_field_ids: bool,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        let mut builder = builder;
+        let mut selected_row_group_indices = None;
+        let mut row_selection = None;
+
+        if start != 0 || length != 0 {
+            selected_row_group_indices = Some(Self::filter_row_groups_by_byte_range(
+                builder.metadata(),
+                start,
+                length,
+            )?);
+        }
+
+        if let Some(predicate) = bound_predicate {
+            let predicate_projection = use_predicate_projection.then_some(has_missing_field_ids);
+            builder = Self::apply_predicate_row_filtering(
+                builder,
+                predicate,
+                schema,
+                &mut selected_row_group_indices,
+                &mut row_selection,
+                row_group_filtering_enabled,
+                row_selection_enabled,
+                predicate_projection,
+            )?;
+        }
+
+        Self::apply_positional_delete_row_selection(
+            builder.metadata().row_groups(),
+            &selected_row_group_indices,
+            positional_deletes,
+            &mut row_selection,
+        )?;
+
+        Ok(Self::apply_row_groups_and_selection(
+            builder,
+            selected_row_group_indices,
+            row_selection,
+        ))
     }
 
     /// computes a `RowSelection` from positional delete indices.
@@ -1050,6 +1078,38 @@ impl ArrowReader {
             builder = builder.with_row_groups(groups);
         }
         builder
+    }
+
+    /// Applies projection to `builder`, constructs a `RecordBatchTransformer`, builds the
+    /// Parquet stream, and wraps it so every batch is passed through the transformer.
+    ///
+    /// This is the shared finalization step used by every data-file reading path.
+    pub(crate) fn build_projected_record_batch_stream(
+        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        project_field_ids: &[i32],
+        schema: SchemaRef,
+        has_missing_field_ids: bool,
+        data_file_path: &str,
+        partition_spec: Option<Arc<PartitionSpec>>,
+        partition: Option<Struct>,
+    ) -> Result<ArrowRecordBatchStream> {
+        let builder =
+            Self::apply_projection(builder, project_field_ids, &schema, has_missing_field_ids)?;
+
+        let mut record_batch_transformer = Self::build_record_batch_transformer(
+            schema,
+            project_field_ids,
+            data_file_path,
+            partition_spec,
+            partition,
+        )?;
+
+        let record_batch_stream = builder.build()?.map(move |batch| match batch {
+            Ok(batch) => record_batch_transformer.process_record_batch(batch),
+            Err(err) => Err(err.into()),
+        });
+
+        Ok(Box::pin(record_batch_stream) as ArrowRecordBatchStream)
     }
 
     /// Intersects an existing row group list with a new one.
