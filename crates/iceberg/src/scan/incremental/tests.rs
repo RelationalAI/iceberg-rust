@@ -3582,18 +3582,12 @@ async fn test_equality_delete_removes_all_rows_from_appended_file() {
         .await;
 }
 
-/// Test Case: Equality delete on multiple existing files
+/// Test Case: Equality delete on multiple existing files using both columns
 ///
-/// Scenario: Two files exist before the scan range. A single equality delete applied within
-/// the scan range matches one row in each file.
-///
-/// Expected behavior when scanning from snapshot 1 to 3 (data-1 is baseline, data-2 is appended):
-/// - Append stream: Rows from data-2 NOT matched by the equality delete
-/// - Delete stream: Matched row from data-1 (baseline file, reported via delete stream)
-///
-/// Expected behavior when scanning from snapshot 2 to 3 (both files are baseline):
-/// - Append stream: Empty
-/// - Delete stream: Matched rows from both files
+/// Snapshot 1: data-1 with rows [(1,"a"), (2,"b"), (3,"c")]
+/// Snapshot 2: data-2 with rows [(4,"d"), (5,"e"), (6,"f")]
+/// Snapshot 3: equality delete on N column — delete n=2 (data-1 pos 1) and n=5 (data-2 pos 1)
+/// Snapshot 4: equality delete on Data column — delete data="c" (data-1 pos 2) and data="f" (data-2 pos 2)
 #[tokio::test]
 async fn test_equality_delete_on_multiple_files() {
     let fixture = IncrementalTestFixture::new(vec![
@@ -3615,26 +3609,51 @@ async fn test_equality_delete_on_multiple_files() {
         ), // Snapshot 2: data-2 with 3 rows
         Operation::EqualityDelete(vec![DeleteColumn::N], vec![vec!["2".to_string()], vec![
             "5".to_string(),
-        ]]), // Snapshot 3: delete n=2 (in data-1) and n=5 (in data-2)
+        ]]), // Snapshot 3: delete n=2 (data-1 pos 1) and n=5 (data-2 pos 1)
+        Operation::EqualityDelete(vec![DeleteColumn::Data], vec![vec!["c".to_string()], vec![
+            "f".to_string(),
+        ]]), // Snapshot 4: delete data="c" (data-1 pos 2) and data="f" (data-2 pos 2)
     ])
     .await;
 
     let data_file_1_path = format!("{}/data/data-1.parquet", fixture.table_location);
     let data_file_2_path = format!("{}/data/data-2.parquet", fixture.table_location);
 
-    // Scan from 1 to 3: data-1 is baseline (added before range), data-2 is appended (added in range).
-    // Equality delete n=2 applies to baseline data-1 via delete stream (position 1).
-    // Equality delete n=5 applies to appended data-2 via row filter (filtered out).
+    // Scan from 1 to 3: data-1 is baseline, data-2 is appended.
+    // N-delete n=2 → data-1 pos 1 in delete stream; n=5 → data-2 filtered in append stream.
     fixture
         .verify_incremental_scan(1, 3, vec![(4, "d"), (6, "f")], vec![(1, &data_file_1_path)])
         .await;
 
-    // Scan from 2 to 3: both files are baseline (both live at from_snapshot=2).
-    // Both n=2 (position 1 in data-1) and n=5 (position 1 in data-2) appear in delete stream.
+    // Scan from 2 to 3: both files are baseline.
+    // n=2 (data-1 pos 1) and n=5 (data-2 pos 1) both appear in delete stream.
     fixture
         .verify_incremental_scan(2, 3, vec![], vec![
             (1, &data_file_1_path),
             (1, &data_file_2_path),
+        ])
+        .await;
+
+    // Scan from 1 to 4: data-1 is baseline, data-2 is appended.
+    // N-delete (snap 3): data-1 pos 1 → delete stream; data-2 n=5 filtered.
+    // Data-delete (snap 4): data-1 pos 2 → delete stream; data-2 data="f" filtered.
+    // Append stream: data-2 rows not matched by either delete → only (4,"d") survives.
+    fixture
+        .verify_incremental_scan(1, 4, vec![(4, "d")], vec![
+            (1, &data_file_1_path), // n=2 deleted
+            (2, &data_file_1_path), // data="c" deleted
+        ])
+        .await;
+
+    // Scan from 2 to 4: both files are baseline.
+    // N-delete (snap 3): pos 1 in each file.
+    // Data-delete (snap 4): pos 2 in each file.
+    fixture
+        .verify_incremental_scan(2, 4, vec![], vec![
+            (1, &data_file_1_path),
+            (1, &data_file_2_path),
+            (2, &data_file_1_path),
+            (2, &data_file_2_path),
         ])
         .await;
 }
