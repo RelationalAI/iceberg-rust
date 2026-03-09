@@ -292,14 +292,7 @@ impl ArrowReader {
         let delete_filter_rx =
             delete_file_loader.load_deletes(&task.deletes, Arc::clone(&task.schema));
 
-        let mut virtual_columns = Vec::new();
-
-        // Check if _pos column is requested and prepare virtual columns
-        let has_pos_column = task.project_field_ids.contains(&RESERVED_FIELD_ID_POS);
-        if has_pos_column {
-            // Add _pos as a virtual column to be produced by the Parquet reader
-            virtual_columns.push(Arc::clone(row_pos_field()));
-        }
+        let virtual_columns = Self::build_virtual_columns(task.project_field_ids());
 
         // Open the file initially (with virtual columns) then resolve the schema,
         // handling migrated tables that lack embedded Parquet field IDs.
@@ -930,6 +923,17 @@ impl ArrowReader {
     /// Builds a [`RecordBatchTransformer`] for a data file scan task.
     ///
     /// Handles the three optional transformations that are common to both the full
+    /// Returns the list of virtual columns to request from the Parquet reader for the
+    /// given projection. Currently, only `_pos` is a virtual column (produced by the
+    /// Parquet reader itself rather than read from file data).
+    pub(crate) fn build_virtual_columns(project_field_ids: &[i32]) -> Vec<Arc<arrow_schema::Field>> {
+        let mut virtual_columns = Vec::new();
+        if project_field_ids.contains(&RESERVED_FIELD_ID_POS) {
+            virtual_columns.push(Arc::clone(row_pos_field()));
+        }
+        virtual_columns
+    }
+
     /// scan (`process_file_scan_task`) and the incremental append scan
     /// (`process_incremental_append_task`):
     /// - `_file` constant column (only when `RESERVED_FIELD_ID_FILE` is projected)

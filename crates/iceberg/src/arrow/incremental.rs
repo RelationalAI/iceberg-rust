@@ -68,12 +68,7 @@ async fn process_incremental_append_task(
     file_io: FileIO,
     metadata_size_hint: Option<usize>,
 ) -> Result<ArrowRecordBatchStream> {
-    // Check if _pos column is requested and prepare virtual columns
-    let has_pos_column = task.base.project_field_ids.contains(&RESERVED_FIELD_ID_POS);
-    let mut virtual_columns = Vec::new();
-    if has_pos_column {
-        virtual_columns.push(Arc::clone(row_pos_field()));
-    }
+    let virtual_columns = ArrowReader::build_virtual_columns(&task.base.project_field_ids);
 
     // Page index is needed when an equality delete predicate is present for page-level
     // row selection (get_row_selection_for_filter_predicate requires column/offset index).
