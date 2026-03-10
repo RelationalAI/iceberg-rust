@@ -60,7 +60,7 @@ async fn process_incremental_append_task(
     task: AppendedFileScanTask,
     batch_size: Option<usize>,
     file_io: FileIO,
-    metadata_size_hint: Option<usize>,
+    parquet_read_options: ParquetReadOptions,
 ) -> Result<ArrowRecordBatchStream> {
     let AppendedFileScanTask {
         base,
@@ -74,10 +74,8 @@ async fn process_incremental_append_task(
         .map(|p| p.bind(base.schema.clone(), base.case_sensitive))
         .transpose()?;
 
-    let parquet_read_options = ParquetReadOptions::builder()
-        .with_metadata_size_hint(metadata_size_hint)
-        .with_preload_page_index(should_load_page_index)
-        .build();
+    let mut parquet_read_options = parquet_read_options;
+    parquet_read_options.preload_page_index = should_load_page_index;
 
     let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
         &base.data_file_path,
@@ -190,7 +188,7 @@ async fn process_equality_delete_task(
     task: EqualityDeleteScanTask,
     batch_size: Option<usize>,
     file_io: FileIO,
-    metadata_size_hint: Option<usize>,
+    parquet_read_options: ParquetReadOptions,
 ) -> Result<ArrowRecordBatchStream> {
     let file_path = task.data_file_path().to_string();
 
@@ -204,10 +202,8 @@ async fn process_equality_delete_task(
         .combined_predicate
         .bind(task.schema_ref(), task.base.case_sensitive)?;
 
-    let parquet_read_options = ParquetReadOptions::builder()
-        .with_metadata_size_hint(metadata_size_hint)
-        .with_preload_page_index(true) // always load page index: we always have a predicate
-        .build();
+    let mut parquet_read_options = parquet_read_options;
+    parquet_read_options.preload_page_index = true; // always load page index: we always have a predicate
 
     let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
         &task.base.data_file_path,
@@ -321,7 +317,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
             channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
 
         let batch_size = reader.batch_size;
-        let metadata_size_hint = reader.parquet_read_options.metadata_size_hint();
+        let parquet_read_options = reader.parquet_read_options;
 
         let (append_stream, delete_stream) = self;
 
@@ -338,7 +334,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                 append_task,
                                 batch_size,
                                 file_io,
-                                metadata_size_hint,
+                                parquet_read_options,
                             )
                             .await;
 
@@ -406,7 +402,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         equality_delete_task,
                                         batch_size,
                                         file_io.clone(),
-                                        metadata_size_hint,
+                                        parquet_read_options,
                                     )
                                     .await;
 
