@@ -3190,6 +3190,7 @@ mod tests {
                 .warehouse("warehouse".to_string())
                 .props(props)
                 .build(),
+            None,
         );
 
         let table_ident = TableIdent::new(
@@ -3349,6 +3350,7 @@ mod tests {
                 .uri(server.url())
                 .storage_credentials_loader(Some(loader))
                 .build(),
+            None,
         );
 
         let table = catalog
