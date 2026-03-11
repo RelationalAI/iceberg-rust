@@ -3248,14 +3248,19 @@ mod tests {
 
         // Verify that the FileIO was constructed with the correct runtime context so that
         // RefreshableStorageFactory::build() will receive it when first invoked for I/O.
-        let file_io_config = table.file_io().config();
-        assert_eq!(file_io_config.table_ident(), Some(&expected_ident));
+        let props = table.file_io().config().props();
+        let expected_location = "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json";
         assert_eq!(
-            file_io_config.location(),
-            Some(
-                "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json"
-            )
+            props
+                .get("iceberg.internal.metadata-location")
+                .map(String::as_str),
+            Some(expected_location),
         );
+        let ident_json = props
+            .get("iceberg.internal.table-ident")
+            .expect("table-ident prop should be set");
+        let parsed_ident: TableIdent = serde_json::from_str(ident_json).unwrap();
+        assert_eq!(parsed_ident, expected_ident);
 
         config_mock.assert_async().await;
         load_table_mock.assert_async().await;

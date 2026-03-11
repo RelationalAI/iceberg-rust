@@ -43,7 +43,13 @@ pub use oss::*;
 pub use s3::*;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::TableIdent;
+/// Prop key under which the JSON-serialized `TableIdent` is stored in `StorageConfig::props`.
+/// Consumed and stripped by `RefreshableStorageFactory::build()`; ignored by all other factories.
+pub(crate) const PROP_TABLE_IDENT: &str = "iceberg.internal.table-ident";
+
+/// Prop key under which the metadata location string is stored in `StorageConfig::props`.
+/// Consumed and stripped by `RefreshableStorageFactory::build()`; ignored by all other factories.
+pub(crate) const PROP_METADATA_LOCATION: &str = "iceberg.internal.metadata-location";
 
 /// Configuration properties for storage backends.
 ///
@@ -55,17 +61,6 @@ use crate::catalog::TableIdent;
 pub struct StorageConfig {
     /// Configuration properties for the storage backend
     props: HashMap<String, String>,
-
-    /// Runtime context: the table being accessed. Not serialized; set by the
-    /// catalog at table-load time so that `StorageFactory::build()` implementations
-    /// (e.g. `RefreshableStorageFactory`) can pass it to the credential loader.
-    #[serde(skip)]
-    pub(crate) table_ident: Option<TableIdent>,
-
-    /// Runtime context: the metadata location of the table being accessed.
-    /// Not serialized; set by the catalog at table-load time.
-    #[serde(skip)]
-    pub(crate) location: Option<String>,
 }
 
 impl StorageConfig {
@@ -73,8 +68,6 @@ impl StorageConfig {
     pub fn new() -> Self {
         Self {
             props: HashMap::new(),
-            table_ident: None,
-            location: None,
         }
     }
 
@@ -84,33 +77,7 @@ impl StorageConfig {
     ///
     /// * `props` - Configuration properties for the storage backend
     pub fn from_props(props: HashMap<String, String>) -> Self {
-        Self {
-            props,
-            table_ident: None,
-            location: None,
-        }
-    }
-
-    /// Set the runtime table identity context.
-    pub fn with_table_ident(mut self, table_ident: TableIdent) -> Self {
-        self.table_ident = Some(table_ident);
-        self
-    }
-
-    /// Set the runtime metadata location context.
-    pub fn with_location(mut self, location: impl Into<String>) -> Self {
-        self.location = Some(location.into());
-        self
-    }
-
-    /// Get the runtime table identity context, if set.
-    pub fn table_ident(&self) -> Option<&TableIdent> {
-        self.table_ident.as_ref()
-    }
-
-    /// Get the runtime metadata location context, if set.
-    pub fn location(&self) -> Option<&str> {
-        self.location.as_deref()
+        Self { props }
     }
 
     /// Get all configuration properties.

@@ -20,6 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 
+use super::storage::config::{PROP_METADATA_LOCATION, PROP_TABLE_IDENT};
 use super::storage::{
     LocalFsStorageFactory, MemoryStorageFactory, Storage, StorageConfig, StorageFactory,
 };
@@ -206,15 +207,27 @@ impl FileIOBuilder {
         self
     }
 
-    /// Set the runtime table identity context (passed to `StorageFactory::build`).
+    /// Set the runtime table identity context.
+    ///
+    /// Serializes the `TableIdent` as JSON into a well-known prop key so that
+    /// `RefreshableStorageFactory::build()` can recover it and pass it to the
+    /// credential loader on refresh. Other storage factories ignore this prop.
     pub fn with_table_ident(mut self, table_ident: crate::catalog::TableIdent) -> Self {
-        self.config = self.config.with_table_ident(table_ident);
+        let json =
+            serde_json::to_string(&table_ident).expect("TableIdent serialization is infallible");
+        self.config = self.config.with_prop(PROP_TABLE_IDENT, json);
         self
     }
 
-    /// Set the runtime metadata location context (passed to `StorageFactory::build`).
+    /// Set the runtime metadata location context.
+    ///
+    /// Stores the location under a well-known prop key so that
+    /// `RefreshableStorageFactory::build()` can pass it to the credential loader on refresh.
+    /// Other storage factories ignore this prop.
     pub fn with_location(mut self, location: impl Into<String>) -> Self {
-        self.config = self.config.with_location(location);
+        self.config = self
+            .config
+            .with_prop(PROP_METADATA_LOCATION, location.into());
         self
     }
 

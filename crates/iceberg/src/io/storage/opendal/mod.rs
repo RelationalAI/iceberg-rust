@@ -42,6 +42,7 @@ use url::Url;
 
 use crate::catalog::{NamespaceIdent, TableIdent};
 use crate::io::refreshable_storage::RefreshableOpenDalStorageBuilder;
+use crate::io::storage::config::{PROP_METADATA_LOCATION, PROP_TABLE_IDENT};
 use crate::io::{
     FileMetadata, FileRead, FileWrite, InputFile, OutputFile, Storage, StorageConfig,
     StorageCredentialsLoader, StorageFactory,
@@ -544,8 +545,11 @@ mod tests {
         let factory = RefreshableStorageFactory::new(loader);
         let table_ident = TableIdent::from_strs(["ns", "tbl"]).unwrap();
         let config = StorageConfig::new()
-            .with_location("s3://test-bucket/")
-            .with_table_ident(table_ident);
+            .with_prop(PROP_METADATA_LOCATION, "s3://test-bucket/")
+            .with_prop(
+                PROP_TABLE_IDENT,
+                serde_json::to_string(&table_ident).unwrap(),
+            );
         assert!(
             factory.build(&config).is_ok(),
             "RefreshableStorageFactory should build a Refreshable storage successfully"
@@ -560,8 +564,11 @@ mod tests {
         let table_ident = TableIdent::from_strs(["ns", "tbl"]).unwrap();
         // Initial credentials are merged into props before build() is called
         let config = StorageConfig::new()
-            .with_location("s3://test-bucket/")
-            .with_table_ident(table_ident);
+            .with_prop(PROP_METADATA_LOCATION, "s3://test-bucket/")
+            .with_prop(
+                PROP_TABLE_IDENT,
+                serde_json::to_string(&table_ident).unwrap(),
+            );
         assert!(
             factory.build(&config).is_ok(),
             "RefreshableStorageFactory should build successfully"
@@ -614,20 +621,26 @@ impl StorageFactory for RefreshableStorageFactory {
             )
         })?;
 
-        let location = config.location().unwrap_or("").to_string();
+        // Extract runtime context from props, stripping the internal keys so they
+        // don't leak into the underlying OpenDAL operator configuration.
+        let mut props = config.props().clone();
+        let location = props.remove(PROP_METADATA_LOCATION).unwrap_or_default();
         let scheme = Url::parse(&location)
             .map(|u| u.scheme().to_string())
             .unwrap_or_default();
-        let table_ident = config.table_ident().cloned().unwrap_or_else(|| {
-            TableIdent::new(
-                NamespaceIdent::new("unknown".to_string()),
-                "unknown".to_string(),
-            )
-        });
+        let table_ident = props
+            .remove(PROP_TABLE_IDENT)
+            .and_then(|s| serde_json::from_str::<TableIdent>(&s).ok())
+            .unwrap_or_else(|| {
+                TableIdent::new(
+                    NamespaceIdent::new("unknown".to_string()),
+                    "unknown".to_string(),
+                )
+            });
 
         let backend = RefreshableOpenDalStorageBuilder::new()
             .scheme(scheme)
-            .base_props(config.props().clone())
+            .base_props(props)
             .credentials_loader(Arc::clone(loader))
             .location(location)
             .table_ident(table_ident)
