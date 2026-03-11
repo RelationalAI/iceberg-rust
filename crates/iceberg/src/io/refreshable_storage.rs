@@ -77,24 +77,18 @@ impl RefreshableOpenDalStorage {
     ///
     /// # Arguments
     /// * `scheme` - Storage scheme (e.g., "s3", "azdls")
-    /// * `base_props` - Base configuration properties (without credentials)
+    /// * `base_props` - Base configuration properties (including any initial credentials)
     /// * `credentials_loader` - Loader for refreshing credentials
-    /// * `initial_credentials` - Initial credentials (if any), used to build initial inner_storage
     /// * `location` - Metadata location passed to `load_credentials`
+    /// * `table_ident` - Table identifier passed to `load_credentials`
     pub fn new(
         scheme: String,
         base_props: HashMap<String, String>,
         credentials_loader: Arc<dyn StorageCredentialsLoader>,
-        initial_credentials: Option<StorageCredential>,
         location: String,
         table_ident: TableIdent,
     ) -> Result<Self> {
-        // Build initial inner_storage from base_props + initial_credentials
-        let mut props = base_props.clone();
-        if let Some(ref creds) = initial_credentials {
-            props.extend(creds.config.clone());
-        }
-        let inner_storage = OpenDalStorage::build_from_props(&scheme, props)?;
+        let inner_storage = OpenDalStorage::build_from_props(&scheme, base_props.clone())?;
 
         Ok(Self {
             scheme,
@@ -216,7 +210,6 @@ pub struct RefreshableOpenDalStorageBuilder {
     scheme: Option<String>,
     base_props: HashMap<String, String>,
     credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
-    initial_credentials: Option<StorageCredential>,
     location: String,
     table_ident: Option<TableIdent>,
 }
@@ -245,12 +238,6 @@ impl RefreshableOpenDalStorageBuilder {
         self
     }
 
-    /// Set the initial credentials (if any)
-    pub fn initial_credentials(mut self, creds: Option<StorageCredential>) -> Self {
-        self.initial_credentials = creds;
-        self
-    }
-
     /// Set the metadata location passed to `load_credentials`
     pub fn location(mut self, location: String) -> Self {
         self.location = location;
@@ -272,7 +259,6 @@ impl RefreshableOpenDalStorageBuilder {
             self.credentials_loader.ok_or_else(|| {
                 Error::new(ErrorKind::DataInvalid, "credentials_loader is required")
             })?,
-            self.initial_credentials,
             self.location,
             self.table_ident
                 .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "table_ident is required"))?,

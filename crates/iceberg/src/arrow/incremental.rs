@@ -68,14 +68,9 @@ async fn process_incremental_append_task(
         equality_delete_predicate,
     } = task;
 
-    let should_load_page_index =
-        equality_delete_predicate.is_some() || positional_deletes.is_some();
     let equality_delete_bound = equality_delete_predicate
         .map(|p| p.bind(base.schema.clone(), base.case_sensitive))
         .transpose()?;
-
-    let mut parquet_read_options = parquet_read_options;
-    parquet_read_options.preload_page_index = should_load_page_index;
 
     let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
         &base.data_file_path,
@@ -202,9 +197,6 @@ async fn process_equality_delete_task(
         .combined_predicate
         .bind(task.schema_ref(), task.base.case_sensitive)?;
 
-    let mut parquet_read_options = parquet_read_options;
-    parquet_read_options.preload_page_index = true; // always load page index: we always have a predicate
-
     let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
         &task.base.data_file_path,
         task.base.file_size_in_bytes,
@@ -330,11 +322,16 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                     let appends_tx = appends_tx.clone();
                     async move {
                         spawn(async move {
+                            let should_load_page_index =
+                                append_task.equality_delete_predicate.is_some()
+                                    || append_task.positional_deletes.is_some();
+                            let mut append_read_options = parquet_read_options;
+                            append_read_options.preload_page_index = should_load_page_index;
                             let record_batch_stream = process_incremental_append_task(
                                 append_task,
                                 batch_size,
                                 file_io,
-                                parquet_read_options,
+                                append_read_options,
                             )
                             .await;
 
@@ -398,11 +395,14 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                             }
                             DeleteScanTask::EqualityDeletes(equality_delete_task) => {
                                 spawn(async move {
+                                    // equality delete tasks always need the page index: we always have a predicate
+                                    let mut eq_read_options = parquet_read_options;
+                                    eq_read_options.preload_page_index = true;
                                     let record_batch_stream = process_equality_delete_task(
                                         equality_delete_task,
                                         batch_size,
                                         file_io.clone(),
-                                        parquet_read_options,
+                                        eq_read_options,
                                     )
                                     .await;
 

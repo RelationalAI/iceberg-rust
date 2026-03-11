@@ -24,7 +24,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use iceberg::io::{FileIO, FileIOBuilder, RefreshableStorageFactory, StorageFactory};
+use iceberg::io::{FileIO, FileIOBuilder, StorageFactory};
 use iceberg::table::Table;
 use iceberg::{
     Catalog, CatalogBuilder, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit,
@@ -34,7 +34,7 @@ use itertools::Itertools;
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, {self},
 };
-use reqwest::{Client, Method, StatusCode, Url};
+use reqwest::{Client, Method, StatusCode};
 use tokio::sync::OnceCell;
 use typed_builder::TypedBuilder;
 
@@ -77,7 +77,6 @@ impl Default for RestCatalogBuilder {
                 props: HashMap::new(),
                 client: None,
                 authenticator: None,
-                storage_credentials_loader: None,
             },
             storage_factory: None,
         }
@@ -162,13 +161,6 @@ impl RestCatalogBuilder {
     }
 }
 
-/// Trait for custom storage credential loader.
-///
-/// Implement this trait to provide custom storage credential loading logic
-/// instead of passing credentials directly or expecting them to be vended from the catalog.
-// Re-export from iceberg
-pub use iceberg::io::StorageCredentialsLoader;
-
 /// Rest catalog configuration.
 #[derive(Clone, Debug, TypedBuilder)]
 pub(crate) struct RestCatalogConfig {
@@ -188,9 +180,6 @@ pub(crate) struct RestCatalogConfig {
 
     #[builder(default)]
     authenticator: Option<Arc<dyn CustomAuthenticator>>,
-
-    #[builder(default)]
-    storage_credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
 }
 
 impl RestCatalogConfig {
@@ -399,15 +388,6 @@ impl RestCatalog {
         }
     }
 
-    /// Set a custom storage credentials loader.
-    ///
-    /// This is intended to be called after catalog construction, so the loader
-    /// can hold a reference to the catalog (e.g., `Arc<RestCatalog>`) and call
-    /// catalog-specific methods like `load_table_with_credentials`.
-    pub fn set_storage_credentials_loader(&mut self, loader: Arc<dyn StorageCredentialsLoader>) {
-        self.user_config.storage_credentials_loader = Some(loader);
-    }
-
     /// Gets the [`RestContext`] from the catalog.
     async fn context(&self) -> Result<&RestContext> {
         self.ctx
@@ -459,7 +439,6 @@ impl RestCatalog {
         &self,
         metadata_location: Option<&str>,
         extra_config: Option<HashMap<String, String>>,
-        storage_credential: Option<StorageCredential>,
         table_ident: Option<&TableIdent>,
     ) -> Result<FileIO> {
         let mut props = self.context().await?.config.props.clone();
@@ -467,64 +446,22 @@ impl RestCatalog {
             props.extend(config);
         }
 
-        // If the warehouse is a logical identifier instead of a URL we don't want
-        // to raise an exception
-        let warehouse_path = match self.context().await?.config.warehouse.as_deref() {
-            Some(url) if Url::parse(url).is_ok() => Some(url),
-            Some(_) => None,
-            None => None,
-        };
+        let factory = self.storage_factory.clone().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "StorageFactory must be provided for RestCatalog. Use `with_storage_factory` to configure it.",
+            )
+        })?;
 
-        let url = match metadata_location.or(warehouse_path) {
-            Some(url) => url,
-            None => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "Unable to load file io, neither warehouse nor metadata location is set!",
-                ));
-            }
-        };
+        let mut builder = FileIOBuilder::new(factory).with_props(props);
+        if let Some(location) = metadata_location {
+            builder = builder.with_location(location);
+        }
+        if let Some(ident) = table_ident {
+            builder = builder.with_table_ident(ident.clone());
+        }
 
-        // When a StorageCredentialsLoader is configured, create a refreshable storage factory
-        // that will rotate credentials automatically. Otherwise fall back to the explicitly
-        // provided StorageFactory.
-        let factory: Arc<dyn StorageFactory> = if let Some(loader) =
-            &self.user_config.storage_credentials_loader
-        {
-            let scheme = Url::parse(url)
-                .map_err(|e| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!("Invalid URL for storage scheme detection: {e}"),
-                    )
-                })?
-                .scheme()
-                .to_string();
-            let table_id = table_ident.cloned().unwrap_or_else(|| {
-                TableIdent::new(
-                    NamespaceIdent::new("unknown".to_string()),
-                    "unknown".to_string(),
-                )
-            });
-            Arc::new(RefreshableStorageFactory::new(
-                scheme,
-                metadata_location.unwrap_or("").to_string(),
-                table_id,
-                storage_credential,
-                Arc::clone(loader),
-            ))
-        } else {
-            self.storage_factory.clone().ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::Unexpected,
-                        "StorageFactory must be provided for RestCatalog. Use `with_storage_factory` to configure it.",
-                    )
-                })?
-        };
-
-        let file_io = FileIOBuilder::new(factory).with_props(props).build();
-
-        Ok(file_io)
+        Ok(builder.build())
     }
 
     /// Invalidate the current token without generating a new one. On the next request, the client
@@ -543,69 +480,38 @@ impl RestCatalog {
         self.context().await?.client.regenerate_token().await
     }
 
-    /// Helper method to resolve storage credentials from catalog response or custom loader.
+    /// Resolve catalog-vended storage credentials into the config HashMap.
     ///
-    /// This method implements the credential resolution logic:
-    /// 1. If catalog vended credentials via storage_credentials field, find the best match by prefix
-    /// 2. Otherwise, use custom storage_credentials_loader if configured
-    /// 3. Merge matched credentials into the config HashMap
-    ///
-    /// Returns the matched/loaded credential (if any) and updates the config in-place.
-    async fn resolve_storage_credentials(
+    /// Finds the best-match credential by prefix from the catalog response and merges
+    /// it into `config`. If no vended credentials are present, config is unchanged.
+    fn resolve_storage_credentials(
         &self,
-        table_ident: &TableIdent,
         metadata_location: Option<&String>,
         storage_credentials: Option<Vec<StorageCredential>>,
         config: &mut HashMap<String, String>,
-    ) -> Result<Option<StorageCredential>> {
-        // Per the OpenAPI spec: "Clients must first check whether the respective credentials
-        // exist in the storage-credentials field before checking the config for credentials."
-        // When vended-credentials header is set, credentials are returned in storage_credentials field.
-        let matched_credential = if let Some(storage_credentials) = storage_credentials {
-            // Find the credential with the longest prefix that matches the metadata_location
-            let mut best_match: Option<&StorageCredential> = None;
-            let mut longest_prefix_len = 0;
+    ) {
+        let Some(storage_credentials) = storage_credentials else {
+            return;
+        };
 
-            if let Some(metadata_location) = metadata_location {
-                for cred in &storage_credentials {
-                    if metadata_location.starts_with(&cred.prefix)
-                        && cred.prefix.len() > longest_prefix_len
-                    {
-                        longest_prefix_len = cred.prefix.len();
-                        best_match = Some(cred);
-                    }
+        // Find the credential with the longest prefix that matches the metadata_location
+        let mut best_match: Option<&StorageCredential> = None;
+        let mut longest_prefix_len = 0;
+
+        if let Some(metadata_location) = metadata_location {
+            for cred in &storage_credentials {
+                if metadata_location.starts_with(&cred.prefix)
+                    && cred.prefix.len() > longest_prefix_len
+                {
+                    longest_prefix_len = cred.prefix.len();
+                    best_match = Some(cred);
                 }
             }
+        }
 
-            // Extend config with the best match
-            if let Some(cred) = best_match {
-                config.extend(cred.config.clone());
-            }
-
-            best_match.cloned()
-        } else {
-            None
-        };
-
-        // Use custom storage credential loader only if no credentials were vended by the catalog.
-        let final_credential = if matched_credential.is_some() {
-            matched_credential
-        } else if let Some(storage_credentials_loader) =
-            &self.user_config.storage_credentials_loader
-        {
-            let credential = storage_credentials_loader
-                .load_credentials(
-                    table_ident,
-                    metadata_location.map(|s| s.as_str()).unwrap_or(""),
-                )
-                .await?;
-            config.extend(credential.config.clone());
-            Some(credential)
-        } else {
-            None
-        };
-
-        Ok(final_credential)
+        if let Some(cred) = best_match {
+            config.extend(cred.config.clone());
+        }
     }
 
     /// The actual logic for loading table, that supports loading vended credentials if requested.
@@ -658,20 +564,16 @@ impl RestCatalog {
             .chain(self.user_config.props.clone())
             .collect();
 
-        let final_credential = self
-            .resolve_storage_credentials(
-                table_ident,
-                response.metadata_location.as_ref(),
-                response.storage_credentials,
-                &mut config,
-            )
-            .await?;
+        self.resolve_storage_credentials(
+            response.metadata_location.as_ref(),
+            response.storage_credentials,
+            &mut config,
+        );
 
         let file_io = self
             .load_file_io(
                 response.metadata_location.as_deref(),
                 Some(config),
-                final_credential,
                 Some(table_ident),
             )
             .await?;
@@ -797,20 +699,16 @@ impl RestCatalog {
             .chain(self.user_config.props.clone())
             .collect();
 
-        let final_credential = self
-            .resolve_storage_credentials(
-                &table_ident,
-                response.metadata_location.as_ref(),
-                response.storage_credentials,
-                &mut config,
-            )
-            .await?;
+        self.resolve_storage_credentials(
+            response.metadata_location.as_ref(),
+            response.storage_credentials,
+            &mut config,
+        );
 
         let file_io = self
             .load_file_io(
                 response.metadata_location.as_deref(),
                 Some(config),
-                final_credential,
                 Some(&table_ident),
             )
             .await?;
@@ -1225,7 +1123,7 @@ impl Catalog for RestCatalog {
 
         // TODO: Support vended credentials here.
         let file_io = self
-            .load_file_io(Some(metadata_location), None, None, None)
+            .load_file_io(Some(metadata_location), None, None)
             .await?;
 
         Table::builder()
@@ -1298,7 +1196,7 @@ impl Catalog for RestCatalog {
 
         // TODO: Support vended credentials here.
         let file_io = self
-            .load_file_io(Some(&response.metadata_location), None, None, None)
+            .load_file_io(Some(&response.metadata_location), None, None)
             .await?;
 
         Table::builder()
@@ -3299,14 +3197,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_table_with_custom_credential_loader() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    async fn test_load_table_with_refreshable_storage_factory() {
+        use iceberg::io::{RefreshableStorageFactory, StorageCredential, StorageCredentialsLoader};
 
-        // Dummy credential loader that just marks that it was called
         #[derive(Debug)]
-        struct DummyCredentialLoader {
-            was_called: Arc<AtomicBool>,
-        }
+        struct DummyCredentialLoader;
 
         #[async_trait::async_trait]
         impl StorageCredentialsLoader for DummyCredentialLoader {
@@ -3315,12 +3210,9 @@ mod tests {
                 _table_ident: &TableIdent,
                 _location: &str,
             ) -> Result<StorageCredential> {
-                self.was_called.store(true, Ordering::SeqCst);
-                let mut config = HashMap::new();
-                config.insert("custom.key".to_string(), "custom.value".to_string());
                 Ok(StorageCredential {
-                    prefix: "custom".to_string(),
-                    config,
+                    prefix: "s3://".to_string(),
+                    config: HashMap::new(),
                 })
             }
         }
@@ -3340,36 +3232,29 @@ mod tests {
             .create_async()
             .await;
 
-        let was_called = Arc::new(AtomicBool::new(false));
-        let loader = Arc::new(DummyCredentialLoader {
-            was_called: was_called.clone(),
-        });
+        let factory = Arc::new(RefreshableStorageFactory::new(Arc::new(
+            DummyCredentialLoader,
+        )));
 
         let catalog = RestCatalog::new(
-            RestCatalogConfig::builder()
-                .uri(server.url())
-                .storage_credentials_loader(Some(loader))
-                .build(),
-            None,
+            RestCatalogConfig::builder().uri(server.url()).build(),
+            Some(factory),
         );
 
-        let table = catalog
-            .load_table(&TableIdent::new(
-                NamespaceIdent::new("ns1".to_string()),
-                "test1".to_string(),
-            ))
-            .await
-            .unwrap();
+        let expected_ident = TableIdent::from_strs(["ns1", "test1"]).unwrap();
+        let table = catalog.load_table(&expected_ident).await.unwrap();
 
+        assert_eq!(table.identifier(), &expected_ident);
+
+        // Verify that the FileIO was constructed with the correct runtime context so that
+        // RefreshableStorageFactory::build() will receive it when first invoked for I/O.
+        let file_io_config = table.file_io().config();
+        assert_eq!(file_io_config.table_ident(), Some(&expected_ident));
         assert_eq!(
-            &TableIdent::from_strs(vec!["ns1", "test1"]).unwrap(),
-            table.identifier()
-        );
-
-        // Verify that the custom credential loader was called
-        assert!(
-            was_called.load(Ordering::SeqCst),
-            "Custom credential loader should have been called"
+            file_io_config.location(),
+            Some(
+                "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json"
+            )
         );
 
         config_mock.assert_async().await;

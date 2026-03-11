@@ -206,6 +206,18 @@ impl FileIOBuilder {
         self
     }
 
+    /// Set the runtime table identity context (passed to `StorageFactory::build`).
+    pub fn with_table_ident(mut self, table_ident: crate::catalog::TableIdent) -> Self {
+        self.config = self.config.with_table_ident(table_ident);
+        self
+    }
+
+    /// Set the runtime metadata location context (passed to `StorageFactory::build`).
+    pub fn with_location(mut self, location: impl Into<String>) -> Self {
+        self.config = self.config.with_location(location);
+        self
+    }
+
     /// Get the storage configuration.
     pub fn config(&self) -> &StorageConfig {
         &self.config

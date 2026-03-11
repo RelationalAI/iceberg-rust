@@ -32,6 +32,7 @@ use arrow_schema::{
 use arrow_string::like::starts_with;
 use bytes::Bytes;
 use fnv::FnvHashSet;
+use futures::channel::mpsc::channel;
 use futures::future::BoxFuture;
 use futures::{FutureExt, SinkExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use parquet::arrow::arrow_reader::{
@@ -60,6 +61,7 @@ use crate::io::{FileIO, FileMetadata, FileRead};
 use crate::metadata_columns::{
     RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS, is_metadata_field, row_pos_field,
 };
+use crate::runtime::spawn;
 use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
 use crate::spec::{
     Datum, NameMapping, NestedField, PartitionSpec, PrimitiveType, Schema, SchemaRef, Struct, Type,
@@ -319,28 +321,49 @@ impl ArrowReader {
                     .try_flatten(),
             )
         } else {
-            Box::pin(
-                tasks
-                    .map_ok(move |task| {
-                        let file_io = file_io.clone();
+            // Multi-concurrency path: spawn each file's IO-heavy processing as an independent
+            // tokio task for true parallelism, streaming results through a channel.
+            let (tx, rx) = channel::<Result<RecordBatch>>(concurrency_limit_data_files);
+            let delete_file_loader = self.delete_file_loader;
 
-                        Self::process_file_scan_task(
-                            task,
-                            batch_size,
-                            file_io,
-                            self.delete_file_loader.clone(),
-                            row_group_filtering_enabled,
-                            row_selection_enabled,
-                            parquet_read_options,
-                        )
+            // Outer spawn: runs the task coordination loop without blocking the caller.
+            spawn(async move {
+                let _ = tasks
+                    .try_for_each_concurrent(concurrency_limit_data_files, |task| {
+                        let file_io = file_io.clone();
+                        let delete_file_loader = delete_file_loader.clone();
+                        let tx = tx.clone();
+
+                        async move {
+                            // Inner spawn: each file's IO operations run on their own tokio task.
+                            spawn(async move {
+                                let record_batch_stream = Self::process_file_scan_task(
+                                    task,
+                                    batch_size,
+                                    file_io,
+                                    delete_file_loader,
+                                    row_group_filtering_enabled,
+                                    row_selection_enabled,
+                                    parquet_read_options,
+                                )
+                                .await;
+
+                                process_record_batch_stream(
+                                    record_batch_stream,
+                                    tx,
+                                    "failed to read record batch",
+                                )
+                                .await;
+                            })
+                            .await;
+
+                            Ok(())
+                        }
                     })
-                    .map_err(|err| {
-                        Error::new(ErrorKind::Unexpected, "file scan task generate failed")
-                            .with_source(err)
-                    })
-                    .try_buffer_unordered(concurrency_limit_data_files)
-                    .try_flatten_unordered(concurrency_limit_data_files),
-            )
+                    .await;
+            });
+
+            Box::pin(rx) as ArrowRecordBatchStream
         };
 
         Ok(stream)
@@ -2025,16 +2048,24 @@ impl AsyncFileReader for ArrowFileReader {
         _options: Option<&'_ ArrowReaderOptions>,
     ) -> BoxFuture<'_, parquet::errors::Result<Arc<ParquetMetaData>>> {
         async move {
+            fn page_index_policy(enabled: bool) -> PageIndexPolicy {
+                if enabled {
+                    PageIndexPolicy::Optional
+                } else {
+                    PageIndexPolicy::Skip
+                }
+            }
+
             let reader = ParquetMetaDataReader::new()
                 .with_prefetch_hint(self.parquet_read_options.metadata_size_hint())
                 // Set the page policy first because it updates both column and offset policies.
-                .with_page_index_policy(PageIndexPolicy::from(
+                .with_page_index_policy(page_index_policy(
                     self.parquet_read_options.preload_page_index(),
                 ))
-                .with_column_index_policy(PageIndexPolicy::from(
+                .with_column_index_policy(page_index_policy(
                     self.parquet_read_options.preload_column_index(),
                 ))
-                .with_offset_index_policy(PageIndexPolicy::from(
+                .with_offset_index_policy(page_index_policy(
                     self.parquet_read_options.preload_offset_index(),
                 ));
             let size = self.meta.size;

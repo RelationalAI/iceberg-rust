@@ -38,12 +38,13 @@ use opendal::services::S3Config;
 #[cfg(feature = "storage-s3")]
 pub use s3::CustomAwsCredentialLoader;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
-use crate::catalog::TableIdent;
+use crate::catalog::{NamespaceIdent, TableIdent};
 use crate::io::refreshable_storage::RefreshableOpenDalStorageBuilder;
 use crate::io::{
     FileMetadata, FileRead, FileWrite, InputFile, OutputFile, Storage, StorageConfig,
-    StorageCredential, StorageCredentialsLoader, StorageFactory,
+    StorageCredentialsLoader, StorageFactory,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -481,6 +482,9 @@ impl FileWrite for opendal::Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TableIdent;
+    use crate::io::StorageCredential;
+    use crate::io::storage::StorageConfig;
 
     #[cfg(feature = "storage-memory")]
     #[test]
@@ -515,39 +519,86 @@ mod tests {
             _ => panic!("Expected S3 variant"),
         }
     }
+
+    #[derive(Debug)]
+    struct TestCredentialLoader;
+
+    #[async_trait::async_trait]
+    impl StorageCredentialsLoader for TestCredentialLoader {
+        async fn load_credentials(
+            &self,
+            _table_ident: &TableIdent,
+            _location: &str,
+        ) -> crate::Result<StorageCredential> {
+            Ok(StorageCredential {
+                prefix: "s3://test/".to_string(),
+                config: HashMap::new(),
+            })
+        }
+    }
+
+    #[cfg(feature = "storage-s3")]
+    #[test]
+    fn test_refreshable_storage_factory_creates_refreshable() {
+        let loader: Arc<dyn StorageCredentialsLoader> = Arc::new(TestCredentialLoader);
+        let factory = RefreshableStorageFactory::new(loader);
+        let table_ident = TableIdent::from_strs(["ns", "tbl"]).unwrap();
+        let config = StorageConfig::new()
+            .with_location("s3://test-bucket/")
+            .with_table_ident(table_ident);
+        assert!(
+            factory.build(&config).is_ok(),
+            "RefreshableStorageFactory should build a Refreshable storage successfully"
+        );
+    }
+
+    #[cfg(feature = "storage-s3")]
+    #[test]
+    fn test_refreshable_storage_factory_with_initial_credentials_creates_refreshable() {
+        let loader: Arc<dyn StorageCredentialsLoader> = Arc::new(TestCredentialLoader);
+        let factory = RefreshableStorageFactory::new(loader);
+        let table_ident = TableIdent::from_strs(["ns", "tbl"]).unwrap();
+        // Initial credentials are merged into props before build() is called
+        let config = StorageConfig::new()
+            .with_location("s3://test-bucket/")
+            .with_table_ident(table_ident);
+        assert!(
+            factory.build(&config).is_ok(),
+            "RefreshableStorageFactory should build successfully"
+        );
+    }
 }
 
-/// A [`StorageFactory`] that creates a [`OpenDalStorage::Refreshable`] backend.
+/// A [`StorageFactory`] that creates a [`OpenDalStorage::Refreshable`] backend with
+/// automatic credential rotation.
 ///
-/// Used by [`RestCatalog`] when a `StorageCredentialsLoader` is configured, enabling
-/// automatic credential rotation without rebuilding `FileIO`.
+/// Inject it at catalog construction time via `with_storage_factory`. At table-load time
+/// the catalog populates [`StorageConfig`] with the table identity and metadata location;
+/// `build()` reads those to pass context to the credential loader on each refresh.
 ///
-/// [`RestCatalog`]: iceberg_catalog_rest::RestCatalog
+/// # Example
+///
+/// ```rust,no_run
+/// use std::sync::Arc;
+///
+/// use iceberg::io::{RefreshableStorageFactory, StorageCredentialsLoader};
+///
+/// // Implement your own loader:
+/// // let loader: Arc<dyn StorageCredentialsLoader> = ...;
+/// // let factory = Arc::new(RefreshableStorageFactory::new(loader));
+/// // catalog_config.with_storage_factory(factory);
+/// ```
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RefreshableStorageFactory {
-    scheme: String,
-    location: String,
-    table_ident: TableIdent,
-    initial_credential: Option<StorageCredential>,
     /// The credentials loader. `None` only after serde deserialization (field is skipped).
     #[serde(skip)]
     credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
 }
 
 impl RefreshableStorageFactory {
-    /// Creates a new factory that will produce refreshable storage.
-    pub fn new(
-        scheme: String,
-        location: String,
-        table_ident: TableIdent,
-        initial_credential: Option<StorageCredential>,
-        credentials_loader: Arc<dyn StorageCredentialsLoader>,
-    ) -> Self {
+    /// Creates a new factory.
+    pub fn new(credentials_loader: Arc<dyn StorageCredentialsLoader>) -> Self {
         Self {
-            scheme,
-            location,
-            table_ident,
-            initial_credential,
             credentials_loader: Some(credentials_loader),
         }
     }
@@ -562,13 +613,24 @@ impl StorageFactory for RefreshableStorageFactory {
                 "RefreshableStorageFactory: credentials loader unavailable after deserialization",
             )
         })?;
+
+        let location = config.location().unwrap_or("").to_string();
+        let scheme = Url::parse(&location)
+            .map(|u| u.scheme().to_string())
+            .unwrap_or_default();
+        let table_ident = config.table_ident().cloned().unwrap_or_else(|| {
+            TableIdent::new(
+                NamespaceIdent::new("unknown".to_string()),
+                "unknown".to_string(),
+            )
+        });
+
         let backend = RefreshableOpenDalStorageBuilder::new()
-            .scheme(self.scheme.clone())
+            .scheme(scheme)
             .base_props(config.props().clone())
             .credentials_loader(Arc::clone(loader))
-            .initial_credentials(self.initial_credential.clone())
-            .location(self.location.clone())
-            .table_ident(self.table_ident.clone())
+            .location(location)
+            .table_ident(table_ident)
             .build()?;
         Ok(Arc::new(OpenDalStorage::Refreshable {
             backend: Some(backend),
