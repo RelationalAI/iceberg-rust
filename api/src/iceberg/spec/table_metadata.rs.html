@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/iceberg/src/spec/table_metadata.rs`."><title>table_metadata.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-84e720fa.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iceberg" data-themes="" data-resource-suffix="" data-rustdoc-version="1.89.0-nightly (be19eda0d 2025-06-22)" data-channel="nightly" data-search-js="search-92309212.js" data-settings-js="settings-5514c975.js" ><script src="../../../static.files/storage-4e99c027.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fd3af306.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-32bb7600.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iceberg/spec/</div>table_metadata.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/iceberg/src/spec/table_metadata.rs`."><title>table_metadata.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iceberg" data-themes="" data-resource-suffix="" data-rustdoc-version="1.93.0-nightly (f37aa9955 2025-10-26)" data-channel="nightly" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iceberg/spec/</div>table_metadata.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
 <a href=#2 id=2 data-nosnippet>2</a>// or more contributor license agreements.  See the NOTICE file
 <a href=#3 id=3 data-nosnippet>3</a>// distributed with this work for additional information
 <a href=#4 id=4 data-nosnippet>4</a>// regarding copyright ownership.  The ASF licenses this file
@@ -530,7 +530,7 @@
 <a href=#530 id=530 data-nosnippet>530</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
 <a href=#531 id=531 data-nosnippet>531</a>        }
 <a href=#532 id=532 data-nosnippet>532</a>
-<a href=#533 id=533 data-nosnippet>533</a>        <span class="kw">if </span><span class="self">self</span>.default_sort_order_id != SortOrder::UNSORTED_ORDER_ID {
+<a href=#533 id=533 data-nosnippet>533</a>        <span class="kw">if </span><span class="self">self</span>.<span class="macro">default_sort_order_id !</span>= SortOrder::UNSORTED_ORDER_ID {
 <a href=#534 id=534 data-nosnippet>534</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::new(
 <a href=#535 id=535 data-nosnippet>535</a>                ErrorKind::DataInvalid,
 <a href=#536 id=536 data-nosnippet>536</a>                <span class="macro">format!</span>(
@@ -593,7 +593,7 @@
 <a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">let </span>main_ref = <span class="self">self</span>.refs.get(MAIN_BRANCH);
 <a href=#594 id=594 data-nosnippet>594</a>        <span class="kw">if </span><span class="self">self</span>.current_snapshot_id.is_some() {
 <a href=#595 id=595 data-nosnippet>595</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(main_ref) = main_ref
-<a href=#596 id=596 data-nosnippet>596</a>                &amp;&amp; main_ref.snapshot_id != <span class="self">self</span>.current_snapshot_id.unwrap_or_default()
+<a href=#596 id=596 data-nosnippet>596</a>                &amp;&amp; main_ref.<span class="macro">snapshot_id !</span>= <span class="self">self</span>.current_snapshot_id.unwrap_or_default()
 <a href=#597 id=597 data-nosnippet>597</a>            {
 <a href=#598 id=598 data-nosnippet>598</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::new(
 <a href=#599 id=599 data-nosnippet>599</a>                    ErrorKind::DataInvalid,
@@ -616,7 +616,7 @@
 <a href=#616 id=616 data-nosnippet>616</a>
 <a href=#617 id=617 data-nosnippet>617</a>    <span class="doccomment">/// Validate that for V1 Metadata the last_sequence_number is 0
 <a href=#618 id=618 data-nosnippet>618</a>    </span><span class="kw">fn </span>validate_snapshot_sequence_number(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
-<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw">if </span><span class="self">self</span>.format_version &lt; FormatVersion::V2 &amp;&amp; <span class="self">self</span>.last_sequence_number != <span class="number">0 </span>{
+<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw">if </span><span class="self">self</span>.format_version &lt; FormatVersion::V2 &amp;&amp; <span class="self">self</span>.<span class="macro">last_sequence_number !</span>= <span class="number">0 </span>{
 <a href=#620 id=620 data-nosnippet>620</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::new(
 <a href=#621 id=621 data-nosnippet>621</a>                ErrorKind::DataInvalid,
 <a href=#622 id=622 data-nosnippet>622</a>                <span class="macro">format!</span>(
@@ -1568,7 +1568,7 @@
 <a href=#1568 id=1568 data-nosnippet>1568</a>
 <a href=#1569 id=1569 data-nosnippet>1569</a>    <span class="kw">use super</span>::{FormatVersion, MetadataLog, SnapshotLog, TableMetadataBuilder};
 <a href=#1570 id=1570 data-nosnippet>1570</a>    <span class="kw">use </span><span class="kw">crate</span>::compression::CompressionCodec;
-<a href=#1571 id=1571 data-nosnippet>1571</a>    <span class="kw">use </span><span class="kw">crate</span>::io::FileIOBuilder;
+<a href=#1571 id=1571 data-nosnippet>1571</a>    <span class="kw">use </span><span class="kw">crate</span>::io::FileIO;
 <a href=#1572 id=1572 data-nosnippet>1572</a>    <span class="kw">use </span><span class="kw">crate</span>::spec::table_metadata::TableMetadata;
 <a href=#1573 id=1573 data-nosnippet>1573</a>    <span class="kw">use </span><span class="kw">crate</span>::spec::{
 <a href=#1574 id=1574 data-nosnippet>1574</a>        BlobMetadata, EncryptedKey, INITIAL_ROW_ID, Literal, NestedField, NullOrder, Operation,
@@ -3541,7 +3541,7 @@
 <a href=#3541 id=3541 data-nosnippet>3541</a>        <span class="kw">let </span>temp_path = temp_dir.path().to_str().unwrap();
 <a href=#3542 id=3542 data-nosnippet>3542</a>
 <a href=#3543 id=3543 data-nosnippet>3543</a>        <span class="comment">// Create a FileIO instance
-<a href=#3544 id=3544 data-nosnippet>3544</a>        </span><span class="kw">let </span>file_io = FileIOBuilder::new_fs_io().build().unwrap();
+<a href=#3544 id=3544 data-nosnippet>3544</a>        </span><span class="kw">let </span>file_io = FileIO::new_with_fs();
 <a href=#3545 id=3545 data-nosnippet>3545</a>
 <a href=#3546 id=3546 data-nosnippet>3546</a>        <span class="comment">// Use an existing test metadata from the test files
 <a href=#3547 id=3547 data-nosnippet>3547</a>        </span><span class="kw">let </span>original_metadata: TableMetadata = get_test_table_metadata(<span class="string">"TableMetadataV2Valid.json"</span>);
@@ -3581,7 +3581,7 @@
 <a href=#3581 id=3581 data-nosnippet>3581</a>        std::fs::write(<span class="kw-2">&amp;</span>metadata_location, <span class="kw-2">&amp;</span>compressed).expect(<span class="string">"failed to write metadata"</span>);
 <a href=#3582 id=3582 data-nosnippet>3582</a>
 <a href=#3583 id=3583 data-nosnippet>3583</a>        <span class="comment">// Read the metadata back
-<a href=#3584 id=3584 data-nosnippet>3584</a>        </span><span class="kw">let </span>file_io = FileIOBuilder::new_fs_io().build().unwrap();
+<a href=#3584 id=3584 data-nosnippet>3584</a>        </span><span class="kw">let </span>file_io = FileIO::new_with_fs();
 <a href=#3585 id=3585 data-nosnippet>3585</a>        <span class="kw">let </span>metadata_location = metadata_location.to_str().unwrap();
 <a href=#3586 id=3586 data-nosnippet>3586</a>        <span class="kw">let </span>read_metadata = TableMetadata::read_from(<span class="kw-2">&amp;</span>file_io, metadata_location)
 <a href=#3587 id=3587 data-nosnippet>3587</a>            .<span class="kw">await
@@ -3594,7 +3594,7 @@
 <a href=#3594 id=3594 data-nosnippet>3594</a>    <span class="attr">#[tokio::test]
 <a href=#3595 id=3595 data-nosnippet>3595</a>    </span><span class="kw">async fn </span>test_table_metadata_read_nonexistent_file() {
 <a href=#3596 id=3596 data-nosnippet>3596</a>        <span class="comment">// Create a FileIO instance
-<a href=#3597 id=3597 data-nosnippet>3597</a>        </span><span class="kw">let </span>file_io = FileIOBuilder::new_fs_io().build().unwrap();
+<a href=#3597 id=3597 data-nosnippet>3597</a>        </span><span class="kw">let </span>file_io = FileIO::new_with_fs();
 <a href=#3598 id=3598 data-nosnippet>3598</a>
 <a href=#3599 id=3599 data-nosnippet>3599</a>        <span class="comment">// Try to read a non-existent file
 <a href=#3600 id=3600 data-nosnippet>3600</a>        </span><span class="kw">let </span>result = TableMetadata::read_from(<span class="kw-2">&amp;</span>file_io, <span class="string">"/nonexistent/path/metadata.json"</span>).<span class="kw">await</span>;
@@ -4168,4 +4168,5 @@
 <a href=#4168 id=4168 data-nosnippet>4168</a>        <span class="macro">assert_eq!</span>(deserialized_first_row_id, <span class="number">100</span>);
 <a href=#4169 id=4169 data-nosnippet>4169</a>        <span class="macro">assert_eq!</span>(deserialized_added_rows, <span class="number">50</span>);
 <a href=#4170 id=4170 data-nosnippet>4170</a>    }
-<a href=#4171 id=4171 data-nosnippet>4171</a>}</code></pre></div></section></main></body></html>
+<a href=#4171 id=4171 data-nosnippet>4171</a>}
+</code></pre></div></section></main></body></html>

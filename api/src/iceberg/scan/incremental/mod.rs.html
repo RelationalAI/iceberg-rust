@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/iceberg/src/scan/incremental/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-84e720fa.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="iceberg" data-themes="" data-resource-suffix="" data-rustdoc-version="1.89.0-nightly (be19eda0d 2025-06-22)" data-channel="nightly" data-search-js="search-92309212.js" data-settings-js="settings-5514c975.js" ><script src="../../../../static.files/storage-4e99c027.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fd3af306.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-32bb7600.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iceberg/scan/incremental/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/iceberg/src/scan/incremental/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="iceberg" data-themes="" data-resource-suffix="" data-rustdoc-version="1.93.0-nightly (f37aa9955 2025-10-26)" data-channel="nightly" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iceberg/scan/incremental/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
 <a href=#2 id=2 data-nosnippet>2</a>// or more contributor license agreements.  See the NOTICE file
 <a href=#3 id=3 data-nosnippet>3</a>// distributed with this work for additional information
 <a href=#4 id=4 data-nosnippet>4</a>// regarding copyright ownership.  The ASF licenses this file
@@ -303,7 +303,7 @@
 <a href=#303 id=303 data-nosnippet>303</a>            })<span class="question-mark">?
 <a href=#304 id=304 data-nosnippet>304</a>            </span>.clone();
 <a href=#305 id=305 data-nosnippet>305</a>
-<a href=#306 id=306 data-nosnippet>306</a>        <span class="kw">if </span>!snapshots.is_empty() {
+<a href=#306 id=306 data-nosnippet>306</a>        <span class="macro">if !</span>snapshots.is_empty() {
 <a href=#307 id=307 data-nosnippet>307</a>            <span class="macro">assert_eq!</span>(
 <a href=#308 id=308 data-nosnippet>308</a>                snapshots.first().map(|s| s.snapshot_id()),
 <a href=#309 id=309 data-nosnippet>309</a>                <span class="prelude-val">Some</span>(snapshot_to.snapshot_id())
@@ -612,14 +612,14 @@
 <a href=#612 id=612 data-nosnippet>612</a>
 <a href=#613 id=613 data-nosnippet>613</a>        <span class="comment">// Add net append tasks (only files not in deleted_files)
 <a href=#614 id=614 data-nosnippet>614</a>        </span><span class="kw">for </span>append_task <span class="kw">in </span>append_tasks {
-<a href=#615 id=615 data-nosnippet>615</a>            <span class="kw">if </span>!deleted_files.contains(append_task.data_file_path()) {
+<a href=#615 id=615 data-nosnippet>615</a>            <span class="macro">if !</span>deleted_files.contains(append_task.data_file_path()) {
 <a href=#616 id=616 data-nosnippet>616</a>                final_append_tasks.push(append_task);
 <a href=#617 id=617 data-nosnippet>617</a>            }
 <a href=#618 id=618 data-nosnippet>618</a>        }
 <a href=#619 id=619 data-nosnippet>619</a>
 <a href=#620 id=620 data-nosnippet>620</a>        <span class="comment">// Add net delete tasks (only files not in appended_files)
 <a href=#621 id=621 data-nosnippet>621</a>        </span><span class="kw">for </span>delete_task <span class="kw">in </span>delete_tasks {
-<a href=#622 id=622 data-nosnippet>622</a>            <span class="kw">if </span>!appended_files.contains(delete_task.data_file_path()) {
+<a href=#622 id=622 data-nosnippet>622</a>            <span class="macro">if !</span>appended_files.contains(delete_task.data_file_path()) {
 <a href=#623 id=623 data-nosnippet>623</a>                final_delete_tasks.push(DeleteScanTask::DeletedFile(delete_task));
 <a href=#624 id=624 data-nosnippet>624</a>            }
 <a href=#625 id=625 data-nosnippet>625</a>        }
@@ -683,7 +683,7 @@
 <a href=#683 id=683 data-nosnippet>683</a>                    .get_equality_deletes_for_data_file(entry.data_file(), entry.sequence_number())
 <a href=#684 id=684 data-nosnippet>684</a>                    .<span class="kw">await</span>;
 <a href=#685 id=685 data-nosnippet>685</a>
-<a href=#686 id=686 data-nosnippet>686</a>                <span class="kw">if </span>!equality_deletes.is_empty() {
+<a href=#686 id=686 data-nosnippet>686</a>                <span class="macro">if !</span>equality_deletes.is_empty() {
 <a href=#687 id=687 data-nosnippet>687</a>                    <span class="comment">// The predicate from build_combined_equality_delete_predicate is a "survival"
 <a href=#688 id=688 data-nosnippet>688</a>                    // filter (keeps non-deleted rows). Negate it to select rows TO DELETE.
 <a href=#689 id=689 data-nosnippet>689</a>                    </span><span class="kw">let </span><span class="prelude-val">Some</span>(survival_predicate) = delete_filter
@@ -841,7 +841,7 @@
 <a href=#841 id=841 data-nosnippet>841</a>        }
 <a href=#842 id=842 data-nosnippet>842</a>
 <a href=#843 id=843 data-nosnippet>843</a>        <span class="comment">// Abort if it has been marked as deleted.
-<a href=#844 id=844 data-nosnippet>844</a>        </span><span class="kw">if </span>!manifest_entry_context.manifest_entry.is_alive()
+<a href=#844 id=844 data-nosnippet>844</a>        </span><span class="macro">if !</span>manifest_entry_context.manifest_entry.is_alive()
 <a href=#845 id=845 data-nosnippet>845</a>            &amp;&amp; manifest_entry_context.manifest_entry.content_type()
 <a href=#846 id=846 data-nosnippet>846</a>                == DataContentType::PositionDeletes
 <a href=#847 id=847 data-nosnippet>847</a>        {
@@ -867,7 +867,7 @@
 <a href=#867 id=867 data-nosnippet>867</a>        table_metadata: <span class="kw-2">&amp;</span>TableMetadataRef,
 <a href=#868 id=868 data-nosnippet>868</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
 <a href=#869 id=869 data-nosnippet>869</a>        <span class="comment">// Skip processing this manifest entry if it has been marked as deleted.
-<a href=#870 id=870 data-nosnippet>870</a>        </span><span class="kw">if </span>!manifest_entry_context.manifest_entry.is_alive() {
+<a href=#870 id=870 data-nosnippet>870</a>        </span><span class="macro">if !</span>manifest_entry_context.manifest_entry.is_alive() {
 <a href=#871 id=871 data-nosnippet>871</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
 <a href=#872 id=872 data-nosnippet>872</a>        }
 <a href=#873 id=873 data-nosnippet>873</a>
@@ -925,4 +925,5 @@
 <a href=#925 id=925 data-nosnippet>925</a>}
 <a href=#926 id=926 data-nosnippet>926</a>
 <a href=#927 id=927 data-nosnippet>927</a><span class="attr">#[cfg(test)]
-<a href=#928 id=928 data-nosnippet>928</a></span><span class="kw">mod </span>tests;</code></pre></div></section></main></body></html>
+<a href=#928 id=928 data-nosnippet>928</a></span><span class="kw">mod </span>tests;
+</code></pre></div></section></main></body></html>
