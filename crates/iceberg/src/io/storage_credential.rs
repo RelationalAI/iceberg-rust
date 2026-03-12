@@ -48,7 +48,7 @@ pub struct MetadataLocation(pub String);
 /// use std::collections::HashMap;
 /// use std::sync::Arc;
 ///
-/// use iceberg::io::{FileIOBuilder, StorageCredential, StorageCredentialsLoader};
+/// use iceberg::io::{StorageCredential, StorageCredentialsLoader};
 ///
 /// #[derive(Debug)]
 /// struct MyCredentialLoader;
@@ -58,7 +58,7 @@ pub struct MetadataLocation(pub String);
 ///     async fn load_credentials(
 ///         &self,
 ///         _table_ident: &iceberg::TableIdent,
-///         location: &str,
+///         _location: &str,
 ///     ) -> iceberg::Result<StorageCredential> {
 ///         // Fetch fresh credentials from your credential service
 ///         let mut config = HashMap::new();
@@ -72,18 +72,9 @@ pub struct MetadataLocation(pub String);
 ///     }
 /// }
 ///
-/// # async fn example() -> iceberg::Result<()> {
-/// // Create FileIO with credential refresh enabled
+/// // The loader is passed to the catalog configuration (e.g., RestCatalogConfig),
+/// // which creates storage instances with automatic credential refresh.
 /// let loader: Arc<dyn StorageCredentialsLoader> = Arc::new(MyCredentialLoader);
-/// let file_io = FileIOBuilder::new("s3")
-///     .with_prop("bucket", "my-bucket")
-///     .with_extension(loader)
-///     .build()?;
-///
-/// // Each operation will refresh credentials automatically
-/// let input = file_io.new_input("s3://my-bucket/path/file.parquet")?;
-/// # Ok(())
-/// # }
 /// ```
 #[async_trait::async_trait]
 pub trait StorageCredentialsLoader: Send + Sync + Debug {

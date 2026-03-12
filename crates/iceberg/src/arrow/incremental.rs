@@ -24,7 +24,7 @@ use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{Stream, StreamExt, TryStreamExt};
 
-use crate::arrow::reader::process_record_batch_stream;
+use crate::arrow::reader::{ParquetReadOptions, process_record_batch_stream};
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Bind;
@@ -60,7 +60,7 @@ async fn process_incremental_append_task(
     task: AppendedFileScanTask,
     batch_size: Option<usize>,
     file_io: FileIO,
-    metadata_size_hint: Option<usize>,
+    parquet_read_options: ParquetReadOptions,
 ) -> Result<ArrowRecordBatchStream> {
     let AppendedFileScanTask {
         base,
@@ -68,8 +68,6 @@ async fn process_incremental_append_task(
         equality_delete_predicate,
     } = task;
 
-    let should_load_page_index =
-        equality_delete_predicate.is_some() || positional_deletes.is_some();
     let equality_delete_bound = equality_delete_predicate
         .map(|p| p.bind(base.schema.clone(), base.case_sensitive))
         .transpose()?;
@@ -78,9 +76,8 @@ async fn process_incremental_append_task(
         &base.data_file_path,
         base.file_size_in_bytes,
         file_io,
-        should_load_page_index,
+        parquet_read_options,
         ArrowReader::build_virtual_columns(&base.project_field_ids),
-        metadata_size_hint,
         batch_size,
         None, // name_mapping not yet supported in incremental scan
     )
@@ -186,7 +183,7 @@ async fn process_equality_delete_task(
     task: EqualityDeleteScanTask,
     batch_size: Option<usize>,
     file_io: FileIO,
-    metadata_size_hint: Option<usize>,
+    parquet_read_options: ParquetReadOptions,
 ) -> Result<ArrowRecordBatchStream> {
     let file_path = task.data_file_path().to_string();
 
@@ -204,9 +201,8 @@ async fn process_equality_delete_task(
         &task.base.data_file_path,
         task.base.file_size_in_bytes,
         file_io,
-        true, // always load page index: we always have a predicate
+        parquet_read_options,
         vec![Arc::clone(row_pos_field())],
-        metadata_size_hint,
         batch_size,
         None, // name_mapping not yet supported in incremental scan
     )
@@ -313,7 +309,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
             channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
 
         let batch_size = reader.batch_size;
-        let metadata_size_hint = reader.metadata_size_hint;
+        let parquet_read_options = reader.parquet_read_options;
 
         let (append_stream, delete_stream) = self;
 
@@ -326,11 +322,16 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                     let appends_tx = appends_tx.clone();
                     async move {
                         spawn(async move {
+                            let should_load_page_index =
+                                append_task.equality_delete_predicate.is_some()
+                                    || append_task.positional_deletes.is_some();
+                            let mut append_read_options = parquet_read_options;
+                            append_read_options.preload_page_index = should_load_page_index;
                             let record_batch_stream = process_incremental_append_task(
                                 append_task,
                                 batch_size,
                                 file_io,
-                                metadata_size_hint,
+                                append_read_options,
                             )
                             .await;
 
@@ -394,11 +395,14 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                             }
                             DeleteScanTask::EqualityDeletes(equality_delete_task) => {
                                 spawn(async move {
+                                    // equality delete tasks always need the page index: we always have a predicate
+                                    let mut eq_read_options = parquet_read_options;
+                                    eq_read_options.preload_page_index = true;
                                     let record_batch_stream = process_equality_delete_task(
                                         equality_delete_task,
                                         batch_size,
                                         file_io.clone(),
-                                        metadata_size_hint,
+                                        eq_read_options,
                                     )
                                     .await;
 
