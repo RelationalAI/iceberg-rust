@@ -480,6 +480,81 @@ impl FileWrite for opendal::Writer {
     }
 }
 
+/// A [`StorageFactory`] that creates a [`OpenDalStorage::Refreshable`] backend with
+/// automatic credential rotation.
+///
+/// Inject it at catalog construction time via `with_storage_factory`. At table-load time
+/// the catalog populates [`StorageConfig`] with the table identity and metadata location;
+/// `build()` reads those to pass context to the credential loader on each refresh.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::sync::Arc;
+///
+/// use iceberg::io::{RefreshableStorageFactory, StorageCredentialsLoader};
+///
+/// // Implement your own loader:
+/// // let loader: Arc<dyn StorageCredentialsLoader> = ...;
+/// // let factory = Arc::new(RefreshableStorageFactory::new(loader));
+/// // catalog_config.with_storage_factory(factory);
+/// ```
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RefreshableStorageFactory {
+    /// The credentials loader. `None` only after serde deserialization (field is skipped).
+    #[serde(skip)]
+    credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
+}
+
+impl RefreshableStorageFactory {
+    /// Creates a new factory.
+    pub fn new(credentials_loader: Arc<dyn StorageCredentialsLoader>) -> Self {
+        Self {
+            credentials_loader: Some(credentials_loader),
+        }
+    }
+}
+
+#[typetag::serde]
+impl StorageFactory for RefreshableStorageFactory {
+    fn build(&self, config: &StorageConfig) -> Result<Arc<dyn Storage>> {
+        let loader = self.credentials_loader.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "RefreshableStorageFactory: credentials loader unavailable after deserialization",
+            )
+        })?;
+
+        // Extract runtime context from props, stripping the internal keys so they
+        // don't leak into the underlying OpenDAL operator configuration.
+        let mut props = config.props().clone();
+        let location = props.remove(PROP_METADATA_LOCATION).unwrap_or_default();
+        let scheme = Url::parse(&location)
+            .map(|u| u.scheme().to_string())
+            .unwrap_or_default();
+        let table_ident = props
+            .remove(PROP_TABLE_IDENT)
+            .and_then(|s| serde_json::from_str::<TableIdent>(&s).ok())
+            .unwrap_or_else(|| {
+                TableIdent::new(
+                    NamespaceIdent::new("unknown".to_string()),
+                    "unknown".to_string(),
+                )
+            });
+
+        let backend = RefreshableOpenDalStorageBuilder::new()
+            .scheme(scheme)
+            .base_props(props)
+            .credentials_loader(Arc::clone(loader))
+            .location(location)
+            .table_ident(table_ident)
+            .build()?;
+        Ok(Arc::new(OpenDalStorage::Refreshable {
+            backend: Some(backend),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,80 +648,5 @@ mod tests {
             factory.build(&config).is_ok(),
             "RefreshableStorageFactory should build successfully"
         );
-    }
-}
-
-/// A [`StorageFactory`] that creates a [`OpenDalStorage::Refreshable`] backend with
-/// automatic credential rotation.
-///
-/// Inject it at catalog construction time via `with_storage_factory`. At table-load time
-/// the catalog populates [`StorageConfig`] with the table identity and metadata location;
-/// `build()` reads those to pass context to the credential loader on each refresh.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use std::sync::Arc;
-///
-/// use iceberg::io::{RefreshableStorageFactory, StorageCredentialsLoader};
-///
-/// // Implement your own loader:
-/// // let loader: Arc<dyn StorageCredentialsLoader> = ...;
-/// // let factory = Arc::new(RefreshableStorageFactory::new(loader));
-/// // catalog_config.with_storage_factory(factory);
-/// ```
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RefreshableStorageFactory {
-    /// The credentials loader. `None` only after serde deserialization (field is skipped).
-    #[serde(skip)]
-    credentials_loader: Option<Arc<dyn StorageCredentialsLoader>>,
-}
-
-impl RefreshableStorageFactory {
-    /// Creates a new factory.
-    pub fn new(credentials_loader: Arc<dyn StorageCredentialsLoader>) -> Self {
-        Self {
-            credentials_loader: Some(credentials_loader),
-        }
-    }
-}
-
-#[typetag::serde]
-impl StorageFactory for RefreshableStorageFactory {
-    fn build(&self, config: &StorageConfig) -> Result<Arc<dyn Storage>> {
-        let loader = self.credentials_loader.as_ref().ok_or_else(|| {
-            Error::new(
-                ErrorKind::Unexpected,
-                "RefreshableStorageFactory: credentials loader unavailable after deserialization",
-            )
-        })?;
-
-        // Extract runtime context from props, stripping the internal keys so they
-        // don't leak into the underlying OpenDAL operator configuration.
-        let mut props = config.props().clone();
-        let location = props.remove(PROP_METADATA_LOCATION).unwrap_or_default();
-        let scheme = Url::parse(&location)
-            .map(|u| u.scheme().to_string())
-            .unwrap_or_default();
-        let table_ident = props
-            .remove(PROP_TABLE_IDENT)
-            .and_then(|s| serde_json::from_str::<TableIdent>(&s).ok())
-            .unwrap_or_else(|| {
-                TableIdent::new(
-                    NamespaceIdent::new("unknown".to_string()),
-                    "unknown".to_string(),
-                )
-            });
-
-        let backend = RefreshableOpenDalStorageBuilder::new()
-            .scheme(scheme)
-            .base_props(props)
-            .credentials_loader(Arc::clone(loader))
-            .location(location)
-            .table_ident(table_ident)
-            .build()?;
-        Ok(Arc::new(OpenDalStorage::Refreshable {
-            backend: Some(backend),
-        }))
     }
 }
