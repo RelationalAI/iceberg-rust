@@ -321,6 +321,9 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                     let file_io = file_io_append.clone();
                     let appends_tx = appends_tx.clone();
                     async move {
+                        // Inner spawn: each file's IO runs on its own tokio task for true
+                        // parallelism. Awaiting it keeps the concurrency slot occupied until
+                        // the file is fully read, matching the full-scan reader pattern.
                         spawn(async move {
                             let should_load_page_index =
                                 append_task.equality_delete_predicate.is_some()
@@ -341,7 +344,9 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                 "failed to read appended record batch",
                             )
                             .await;
-                        });
+                        })
+                        .await;
+
                         Ok(())
                     }
                 })
@@ -356,9 +361,11 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                     let deletes_tx = deletes_tx.clone();
                     let file_io = file_io_delete.clone();
                     async move {
-                        match delete_task {
-                            DeleteScanTask::DeletedFile(deleted_file_task) => {
-                                spawn(async move {
+                        // Inner spawn: same pattern as full-scan reader — spawn for parallelism,
+                        // await to keep the concurrency slot occupied until the task completes.
+                        spawn(async move {
+                            match delete_task {
+                                DeleteScanTask::DeletedFile(deleted_file_task) => {
                                     let file_path = deleted_file_task.data_file_path().to_string();
                                     let total_records =
                                         deleted_file_task.base.record_count.unwrap_or(0);
@@ -375,10 +382,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         "failed to read deleted file record batch",
                                     )
                                     .await;
-                                });
-                            }
-                            DeleteScanTask::PositionalDeletes(file_path, delete_vector) => {
-                                spawn(async move {
+                                }
+                                DeleteScanTask::PositionalDeletes(file_path, delete_vector) => {
                                     let record_batch_stream = process_incremental_delete_task(
                                         file_path,
                                         delete_vector,
@@ -391,10 +396,8 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         "failed to read deleted record batch",
                                     )
                                     .await;
-                                });
-                            }
-                            DeleteScanTask::EqualityDeletes(equality_delete_task) => {
-                                spawn(async move {
+                                }
+                                DeleteScanTask::EqualityDeletes(equality_delete_task) => {
                                     // equality delete tasks always need the page index: we always have a predicate
                                     let mut eq_read_options = parquet_read_options;
                                     eq_read_options.preload_page_index = true;
@@ -412,9 +415,11 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         "failed to read equality delete record batch",
                                     )
                                     .await;
-                                });
+                                }
                             }
-                        }
+                        })
+                        .await;
+
                         Ok(())
                     }
                 })
