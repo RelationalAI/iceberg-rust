@@ -321,110 +321,115 @@
 <a href=#321 id=321 data-nosnippet>321</a>                    <span class="kw">let </span>file_io = file_io_append.clone();
 <a href=#322 id=322 data-nosnippet>322</a>                    <span class="kw">let </span>appends_tx = appends_tx.clone();
 <a href=#323 id=323 data-nosnippet>323</a>                    <span class="kw">async move </span>{
-<a href=#324 id=324 data-nosnippet>324</a>                        spawn(<span class="kw">async move </span>{
-<a href=#325 id=325 data-nosnippet>325</a>                            <span class="kw">let </span>should_load_page_index =
-<a href=#326 id=326 data-nosnippet>326</a>                                append_task.equality_delete_predicate.is_some()
-<a href=#327 id=327 data-nosnippet>327</a>                                    || append_task.positional_deletes.is_some();
-<a href=#328 id=328 data-nosnippet>328</a>                            <span class="kw">let </span><span class="kw-2">mut </span>append_read_options = parquet_read_options;
-<a href=#329 id=329 data-nosnippet>329</a>                            append_read_options.preload_page_index = should_load_page_index;
-<a href=#330 id=330 data-nosnippet>330</a>                            <span class="kw">let </span>record_batch_stream = process_incremental_append_task(
-<a href=#331 id=331 data-nosnippet>331</a>                                append_task,
-<a href=#332 id=332 data-nosnippet>332</a>                                batch_size,
-<a href=#333 id=333 data-nosnippet>333</a>                                file_io,
-<a href=#334 id=334 data-nosnippet>334</a>                                append_read_options,
-<a href=#335 id=335 data-nosnippet>335</a>                            )
-<a href=#336 id=336 data-nosnippet>336</a>                            .<span class="kw">await</span>;
-<a href=#337 id=337 data-nosnippet>337</a>
-<a href=#338 id=338 data-nosnippet>338</a>                            process_record_batch_stream(
-<a href=#339 id=339 data-nosnippet>339</a>                                record_batch_stream,
-<a href=#340 id=340 data-nosnippet>340</a>                                appends_tx,
-<a href=#341 id=341 data-nosnippet>341</a>                                <span class="string">"failed to read appended record batch"</span>,
-<a href=#342 id=342 data-nosnippet>342</a>                            )
-<a href=#343 id=343 data-nosnippet>343</a>                            .<span class="kw">await</span>;
-<a href=#344 id=344 data-nosnippet>344</a>                        });
-<a href=#345 id=345 data-nosnippet>345</a>                        <span class="prelude-val">Ok</span>(())
-<a href=#346 id=346 data-nosnippet>346</a>                    }
-<a href=#347 id=347 data-nosnippet>347</a>                })
-<a href=#348 id=348 data-nosnippet>348</a>                .<span class="kw">await</span>;
-<a href=#349 id=349 data-nosnippet>349</a>        });
-<a href=#350 id=350 data-nosnippet>350</a>
-<a href=#351 id=351 data-nosnippet>351</a>        <span class="comment">// Process delete tasks
-<a href=#352 id=352 data-nosnippet>352</a>        </span><span class="kw">let </span>file_io_delete = reader.file_io.clone();
-<a href=#353 id=353 data-nosnippet>353</a>        spawn(<span class="kw">async move </span>{
-<a href=#354 id=354 data-nosnippet>354</a>            <span class="kw">let _ </span>= delete_stream
-<a href=#355 id=355 data-nosnippet>355</a>                .try_for_each_concurrent(reader.concurrency_limit_data_files, |delete_task| {
-<a href=#356 id=356 data-nosnippet>356</a>                    <span class="kw">let </span>deletes_tx = deletes_tx.clone();
-<a href=#357 id=357 data-nosnippet>357</a>                    <span class="kw">let </span>file_io = file_io_delete.clone();
-<a href=#358 id=358 data-nosnippet>358</a>                    <span class="kw">async move </span>{
-<a href=#359 id=359 data-nosnippet>359</a>                        <span class="kw">match </span>delete_task {
-<a href=#360 id=360 data-nosnippet>360</a>                            DeleteScanTask::DeletedFile(deleted_file_task) =&gt; {
-<a href=#361 id=361 data-nosnippet>361</a>                                spawn(<span class="kw">async move </span>{
-<a href=#362 id=362 data-nosnippet>362</a>                                    <span class="kw">let </span>file_path = deleted_file_task.data_file_path().to_string();
-<a href=#363 id=363 data-nosnippet>363</a>                                    <span class="kw">let </span>total_records =
-<a href=#364 id=364 data-nosnippet>364</a>                                        deleted_file_task.base.record_count.unwrap_or(<span class="number">0</span>);
-<a href=#365 id=365 data-nosnippet>365</a>
-<a href=#366 id=366 data-nosnippet>366</a>                                    <span class="kw">let </span>record_batch_stream = process_incremental_deleted_file_task(
-<a href=#367 id=367 data-nosnippet>367</a>                                        file_path,
-<a href=#368 id=368 data-nosnippet>368</a>                                        total_records,
-<a href=#369 id=369 data-nosnippet>369</a>                                        batch_size,
-<a href=#370 id=370 data-nosnippet>370</a>                                    );
-<a href=#371 id=371 data-nosnippet>371</a>
-<a href=#372 id=372 data-nosnippet>372</a>                                    process_record_batch_stream(
-<a href=#373 id=373 data-nosnippet>373</a>                                        record_batch_stream,
-<a href=#374 id=374 data-nosnippet>374</a>                                        deletes_tx,
-<a href=#375 id=375 data-nosnippet>375</a>                                        <span class="string">"failed to read deleted file record batch"</span>,
-<a href=#376 id=376 data-nosnippet>376</a>                                    )
-<a href=#377 id=377 data-nosnippet>377</a>                                    .<span class="kw">await</span>;
-<a href=#378 id=378 data-nosnippet>378</a>                                });
-<a href=#379 id=379 data-nosnippet>379</a>                            }
-<a href=#380 id=380 data-nosnippet>380</a>                            DeleteScanTask::PositionalDeletes(file_path, delete_vector) =&gt; {
-<a href=#381 id=381 data-nosnippet>381</a>                                spawn(<span class="kw">async move </span>{
-<a href=#382 id=382 data-nosnippet>382</a>                                    <span class="kw">let </span>record_batch_stream = process_incremental_delete_task(
-<a href=#383 id=383 data-nosnippet>383</a>                                        file_path,
-<a href=#384 id=384 data-nosnippet>384</a>                                        delete_vector,
-<a href=#385 id=385 data-nosnippet>385</a>                                        batch_size,
-<a href=#386 id=386 data-nosnippet>386</a>                                    );
-<a href=#387 id=387 data-nosnippet>387</a>
-<a href=#388 id=388 data-nosnippet>388</a>                                    process_record_batch_stream(
-<a href=#389 id=389 data-nosnippet>389</a>                                        record_batch_stream,
-<a href=#390 id=390 data-nosnippet>390</a>                                        deletes_tx,
-<a href=#391 id=391 data-nosnippet>391</a>                                        <span class="string">"failed to read deleted record batch"</span>,
-<a href=#392 id=392 data-nosnippet>392</a>                                    )
-<a href=#393 id=393 data-nosnippet>393</a>                                    .<span class="kw">await</span>;
-<a href=#394 id=394 data-nosnippet>394</a>                                });
-<a href=#395 id=395 data-nosnippet>395</a>                            }
-<a href=#396 id=396 data-nosnippet>396</a>                            DeleteScanTask::EqualityDeletes(equality_delete_task) =&gt; {
-<a href=#397 id=397 data-nosnippet>397</a>                                spawn(<span class="kw">async move </span>{
-<a href=#398 id=398 data-nosnippet>398</a>                                    <span class="comment">// equality delete tasks always need the page index: we always have a predicate
-<a href=#399 id=399 data-nosnippet>399</a>                                    </span><span class="kw">let </span><span class="kw-2">mut </span>eq_read_options = parquet_read_options;
-<a href=#400 id=400 data-nosnippet>400</a>                                    eq_read_options.preload_page_index = <span class="bool-val">true</span>;
-<a href=#401 id=401 data-nosnippet>401</a>                                    <span class="kw">let </span>record_batch_stream = process_equality_delete_task(
-<a href=#402 id=402 data-nosnippet>402</a>                                        equality_delete_task,
-<a href=#403 id=403 data-nosnippet>403</a>                                        batch_size,
-<a href=#404 id=404 data-nosnippet>404</a>                                        file_io.clone(),
-<a href=#405 id=405 data-nosnippet>405</a>                                        eq_read_options,
-<a href=#406 id=406 data-nosnippet>406</a>                                    )
-<a href=#407 id=407 data-nosnippet>407</a>                                    .<span class="kw">await</span>;
-<a href=#408 id=408 data-nosnippet>408</a>
-<a href=#409 id=409 data-nosnippet>409</a>                                    process_record_batch_stream(
-<a href=#410 id=410 data-nosnippet>410</a>                                        record_batch_stream,
-<a href=#411 id=411 data-nosnippet>411</a>                                        deletes_tx,
-<a href=#412 id=412 data-nosnippet>412</a>                                        <span class="string">"failed to read equality delete record batch"</span>,
-<a href=#413 id=413 data-nosnippet>413</a>                                    )
-<a href=#414 id=414 data-nosnippet>414</a>                                    .<span class="kw">await</span>;
-<a href=#415 id=415 data-nosnippet>415</a>                                });
-<a href=#416 id=416 data-nosnippet>416</a>                            }
-<a href=#417 id=417 data-nosnippet>417</a>                        }
-<a href=#418 id=418 data-nosnippet>418</a>                        <span class="prelude-val">Ok</span>(())
-<a href=#419 id=419 data-nosnippet>419</a>                    }
-<a href=#420 id=420 data-nosnippet>420</a>                })
-<a href=#421 id=421 data-nosnippet>421</a>                .<span class="kw">await</span>;
-<a href=#422 id=422 data-nosnippet>422</a>        });
-<a href=#423 id=423 data-nosnippet>423</a>
-<a href=#424 id=424 data-nosnippet>424</a>        <span class="prelude-val">Ok</span>((
-<a href=#425 id=425 data-nosnippet>425</a>            Box::pin(appends_rx) <span class="kw">as </span>ArrowRecordBatchStream,
-<a href=#426 id=426 data-nosnippet>426</a>            Box::pin(deletes_rx) <span class="kw">as </span>ArrowRecordBatchStream,
-<a href=#427 id=427 data-nosnippet>427</a>        ))
-<a href=#428 id=428 data-nosnippet>428</a>    }
-<a href=#429 id=429 data-nosnippet>429</a>}
+<a href=#324 id=324 data-nosnippet>324</a>                        <span class="comment">// Inner spawn: each file's IO runs on its own tokio task for true
+<a href=#325 id=325 data-nosnippet>325</a>                        // parallelism. Awaiting it keeps the concurrency slot occupied until
+<a href=#326 id=326 data-nosnippet>326</a>                        // the file is fully read, matching the full-scan reader pattern.
+<a href=#327 id=327 data-nosnippet>327</a>                        </span>spawn(<span class="kw">async move </span>{
+<a href=#328 id=328 data-nosnippet>328</a>                            <span class="kw">let </span>should_load_page_index =
+<a href=#329 id=329 data-nosnippet>329</a>                                append_task.equality_delete_predicate.is_some()
+<a href=#330 id=330 data-nosnippet>330</a>                                    || append_task.positional_deletes.is_some();
+<a href=#331 id=331 data-nosnippet>331</a>                            <span class="kw">let </span><span class="kw-2">mut </span>append_read_options = parquet_read_options;
+<a href=#332 id=332 data-nosnippet>332</a>                            append_read_options.preload_page_index = should_load_page_index;
+<a href=#333 id=333 data-nosnippet>333</a>                            <span class="kw">let </span>record_batch_stream = process_incremental_append_task(
+<a href=#334 id=334 data-nosnippet>334</a>                                append_task,
+<a href=#335 id=335 data-nosnippet>335</a>                                batch_size,
+<a href=#336 id=336 data-nosnippet>336</a>                                file_io,
+<a href=#337 id=337 data-nosnippet>337</a>                                append_read_options,
+<a href=#338 id=338 data-nosnippet>338</a>                            )
+<a href=#339 id=339 data-nosnippet>339</a>                            .<span class="kw">await</span>;
+<a href=#340 id=340 data-nosnippet>340</a>
+<a href=#341 id=341 data-nosnippet>341</a>                            process_record_batch_stream(
+<a href=#342 id=342 data-nosnippet>342</a>                                record_batch_stream,
+<a href=#343 id=343 data-nosnippet>343</a>                                appends_tx,
+<a href=#344 id=344 data-nosnippet>344</a>                                <span class="string">"failed to read appended record batch"</span>,
+<a href=#345 id=345 data-nosnippet>345</a>                            )
+<a href=#346 id=346 data-nosnippet>346</a>                            .<span class="kw">await</span>;
+<a href=#347 id=347 data-nosnippet>347</a>                        })
+<a href=#348 id=348 data-nosnippet>348</a>                        .<span class="kw">await</span>;
+<a href=#349 id=349 data-nosnippet>349</a>
+<a href=#350 id=350 data-nosnippet>350</a>                        <span class="prelude-val">Ok</span>(())
+<a href=#351 id=351 data-nosnippet>351</a>                    }
+<a href=#352 id=352 data-nosnippet>352</a>                })
+<a href=#353 id=353 data-nosnippet>353</a>                .<span class="kw">await</span>;
+<a href=#354 id=354 data-nosnippet>354</a>        });
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a>        <span class="comment">// Process delete tasks
+<a href=#357 id=357 data-nosnippet>357</a>        </span><span class="kw">let </span>file_io_delete = reader.file_io.clone();
+<a href=#358 id=358 data-nosnippet>358</a>        spawn(<span class="kw">async move </span>{
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="kw">let _ </span>= delete_stream
+<a href=#360 id=360 data-nosnippet>360</a>                .try_for_each_concurrent(reader.concurrency_limit_data_files, |delete_task| {
+<a href=#361 id=361 data-nosnippet>361</a>                    <span class="kw">let </span>deletes_tx = deletes_tx.clone();
+<a href=#362 id=362 data-nosnippet>362</a>                    <span class="kw">let </span>file_io = file_io_delete.clone();
+<a href=#363 id=363 data-nosnippet>363</a>                    <span class="kw">async move </span>{
+<a href=#364 id=364 data-nosnippet>364</a>                        <span class="comment">// Inner spawn: same pattern as full-scan reader — spawn for parallelism,
+<a href=#365 id=365 data-nosnippet>365</a>                        // await to keep the concurrency slot occupied until the task completes.
+<a href=#366 id=366 data-nosnippet>366</a>                        </span>spawn(<span class="kw">async move </span>{
+<a href=#367 id=367 data-nosnippet>367</a>                            <span class="kw">match </span>delete_task {
+<a href=#368 id=368 data-nosnippet>368</a>                                DeleteScanTask::DeletedFile(deleted_file_task) =&gt; {
+<a href=#369 id=369 data-nosnippet>369</a>                                    <span class="kw">let </span>file_path = deleted_file_task.data_file_path().to_string();
+<a href=#370 id=370 data-nosnippet>370</a>                                    <span class="kw">let </span>total_records =
+<a href=#371 id=371 data-nosnippet>371</a>                                        deleted_file_task.base.record_count.unwrap_or(<span class="number">0</span>);
+<a href=#372 id=372 data-nosnippet>372</a>
+<a href=#373 id=373 data-nosnippet>373</a>                                    <span class="kw">let </span>record_batch_stream = process_incremental_deleted_file_task(
+<a href=#374 id=374 data-nosnippet>374</a>                                        file_path,
+<a href=#375 id=375 data-nosnippet>375</a>                                        total_records,
+<a href=#376 id=376 data-nosnippet>376</a>                                        batch_size,
+<a href=#377 id=377 data-nosnippet>377</a>                                    );
+<a href=#378 id=378 data-nosnippet>378</a>
+<a href=#379 id=379 data-nosnippet>379</a>                                    process_record_batch_stream(
+<a href=#380 id=380 data-nosnippet>380</a>                                        record_batch_stream,
+<a href=#381 id=381 data-nosnippet>381</a>                                        deletes_tx,
+<a href=#382 id=382 data-nosnippet>382</a>                                        <span class="string">"failed to read deleted file record batch"</span>,
+<a href=#383 id=383 data-nosnippet>383</a>                                    )
+<a href=#384 id=384 data-nosnippet>384</a>                                    .<span class="kw">await</span>;
+<a href=#385 id=385 data-nosnippet>385</a>                                }
+<a href=#386 id=386 data-nosnippet>386</a>                                DeleteScanTask::PositionalDeletes(file_path, delete_vector) =&gt; {
+<a href=#387 id=387 data-nosnippet>387</a>                                    <span class="kw">let </span>record_batch_stream = process_incremental_delete_task(
+<a href=#388 id=388 data-nosnippet>388</a>                                        file_path,
+<a href=#389 id=389 data-nosnippet>389</a>                                        delete_vector,
+<a href=#390 id=390 data-nosnippet>390</a>                                        batch_size,
+<a href=#391 id=391 data-nosnippet>391</a>                                    );
+<a href=#392 id=392 data-nosnippet>392</a>
+<a href=#393 id=393 data-nosnippet>393</a>                                    process_record_batch_stream(
+<a href=#394 id=394 data-nosnippet>394</a>                                        record_batch_stream,
+<a href=#395 id=395 data-nosnippet>395</a>                                        deletes_tx,
+<a href=#396 id=396 data-nosnippet>396</a>                                        <span class="string">"failed to read deleted record batch"</span>,
+<a href=#397 id=397 data-nosnippet>397</a>                                    )
+<a href=#398 id=398 data-nosnippet>398</a>                                    .<span class="kw">await</span>;
+<a href=#399 id=399 data-nosnippet>399</a>                                }
+<a href=#400 id=400 data-nosnippet>400</a>                                DeleteScanTask::EqualityDeletes(equality_delete_task) =&gt; {
+<a href=#401 id=401 data-nosnippet>401</a>                                    <span class="comment">// equality delete tasks always need the page index: we always have a predicate
+<a href=#402 id=402 data-nosnippet>402</a>                                    </span><span class="kw">let </span><span class="kw-2">mut </span>eq_read_options = parquet_read_options;
+<a href=#403 id=403 data-nosnippet>403</a>                                    eq_read_options.preload_page_index = <span class="bool-val">true</span>;
+<a href=#404 id=404 data-nosnippet>404</a>                                    <span class="kw">let </span>record_batch_stream = process_equality_delete_task(
+<a href=#405 id=405 data-nosnippet>405</a>                                        equality_delete_task,
+<a href=#406 id=406 data-nosnippet>406</a>                                        batch_size,
+<a href=#407 id=407 data-nosnippet>407</a>                                        file_io.clone(),
+<a href=#408 id=408 data-nosnippet>408</a>                                        eq_read_options,
+<a href=#409 id=409 data-nosnippet>409</a>                                    )
+<a href=#410 id=410 data-nosnippet>410</a>                                    .<span class="kw">await</span>;
+<a href=#411 id=411 data-nosnippet>411</a>
+<a href=#412 id=412 data-nosnippet>412</a>                                    process_record_batch_stream(
+<a href=#413 id=413 data-nosnippet>413</a>                                        record_batch_stream,
+<a href=#414 id=414 data-nosnippet>414</a>                                        deletes_tx,
+<a href=#415 id=415 data-nosnippet>415</a>                                        <span class="string">"failed to read equality delete record batch"</span>,
+<a href=#416 id=416 data-nosnippet>416</a>                                    )
+<a href=#417 id=417 data-nosnippet>417</a>                                    .<span class="kw">await</span>;
+<a href=#418 id=418 data-nosnippet>418</a>                                }
+<a href=#419 id=419 data-nosnippet>419</a>                            }
+<a href=#420 id=420 data-nosnippet>420</a>                        })
+<a href=#421 id=421 data-nosnippet>421</a>                        .<span class="kw">await</span>;
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a>                        <span class="prelude-val">Ok</span>(())
+<a href=#424 id=424 data-nosnippet>424</a>                    }
+<a href=#425 id=425 data-nosnippet>425</a>                })
+<a href=#426 id=426 data-nosnippet>426</a>                .<span class="kw">await</span>;
+<a href=#427 id=427 data-nosnippet>427</a>        });
+<a href=#428 id=428 data-nosnippet>428</a>
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="prelude-val">Ok</span>((
+<a href=#430 id=430 data-nosnippet>430</a>            Box::pin(appends_rx) <span class="kw">as </span>ArrowRecordBatchStream,
+<a href=#431 id=431 data-nosnippet>431</a>            Box::pin(deletes_rx) <span class="kw">as </span>ArrowRecordBatchStream,
+<a href=#432 id=432 data-nosnippet>432</a>        ))
+<a href=#433 id=433 data-nosnippet>433</a>    }
+<a href=#434 id=434 data-nosnippet>434</a>}
 </code></pre></div></section></main></body></html>
