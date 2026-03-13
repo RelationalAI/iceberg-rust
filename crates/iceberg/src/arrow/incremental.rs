@@ -366,17 +366,15 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                         spawn(async move {
                             match delete_task {
                                 DeleteScanTask::DeletedFile(deleted_file_task) => {
-                                    let file_path =
-                                        deleted_file_task.data_file_path().to_string();
+                                    let file_path = deleted_file_task.data_file_path().to_string();
                                     let total_records =
                                         deleted_file_task.base.record_count.unwrap_or(0);
 
-                                    let record_batch_stream =
-                                        process_incremental_deleted_file_task(
-                                            file_path,
-                                            total_records,
-                                            batch_size,
-                                        );
+                                    let record_batch_stream = process_incremental_deleted_file_task(
+                                        file_path,
+                                        total_records,
+                                        batch_size,
+                                    );
 
                                     process_record_batch_stream(
                                         record_batch_stream,
