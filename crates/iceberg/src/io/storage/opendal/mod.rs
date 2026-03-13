@@ -555,6 +555,54 @@ impl StorageFactory for RefreshableStorageFactory {
     }
 }
 
+/// A [`StorageFactory`] that routes to the appropriate [`OpenDalStorageFactory`] variant
+/// based on the URI scheme parsed from [`PROP_METADATA_LOCATION`].
+///
+/// Unlike [`OpenDalStorageFactory`] (which is pre-configured for a specific scheme),
+/// this factory determines the scheme at build time from the metadata location. This is
+/// useful when a catalog serves tables across multiple storage backends (e.g. S3 and GCS).
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::sync::Arc;
+///
+/// use iceberg::io::OpenDalRoutingStorageFactory;
+///
+/// let factory = Arc::new(OpenDalRoutingStorageFactory);
+/// // Pass to catalog builder via .with_storage_factory(factory)
+/// ```
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenDalRoutingStorageFactory;
+
+#[typetag::serde]
+impl StorageFactory for OpenDalRoutingStorageFactory {
+    fn build(&self, config: &StorageConfig) -> Result<Arc<dyn Storage>> {
+        let mut props = config.props().clone();
+        let location = props.remove(PROP_METADATA_LOCATION).ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "OpenDalRoutingStorageFactory: missing metadata location in config props",
+            )
+        })?;
+        let scheme = Url::parse(&location)
+            .map(|u| u.scheme().to_string())
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!(
+                        "OpenDalRoutingStorageFactory: failed to parse metadata location URL: {e}"
+                    ),
+                )
+            })?;
+
+        // Strip internal keys so they don't leak into the OpenDAL operator config.
+        props.remove(PROP_TABLE_IDENT);
+
+        Ok(Arc::new(OpenDalStorage::build_from_props(&scheme, props)?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +695,41 @@ mod tests {
         assert!(
             factory.build(&config).is_ok(),
             "RefreshableStorageFactory should build successfully"
+        );
+    }
+
+    #[cfg(feature = "storage-s3")]
+    #[test]
+    fn test_routing_factory_routes_to_s3() {
+        let factory = OpenDalRoutingStorageFactory;
+        let config = StorageConfig::new()
+            .with_prop(PROP_METADATA_LOCATION, "s3://test-bucket/path/metadata")
+            .with_prop("bucket", "test-bucket");
+        assert!(
+            factory.build(&config).is_ok(),
+            "OpenDalRoutingStorageFactory should route s3:// to S3 storage"
+        );
+    }
+
+    #[cfg(feature = "storage-memory")]
+    #[test]
+    fn test_routing_factory_routes_to_memory() {
+        let factory = OpenDalRoutingStorageFactory;
+        let config =
+            StorageConfig::new().with_prop(PROP_METADATA_LOCATION, "memory:/path/metadata");
+        assert!(
+            factory.build(&config).is_ok(),
+            "OpenDalRoutingStorageFactory should route memory:/ to Memory storage"
+        );
+    }
+
+    #[test]
+    fn test_routing_factory_errors_on_missing_location() {
+        let factory = OpenDalRoutingStorageFactory;
+        let config = StorageConfig::new();
+        assert!(
+            factory.build(&config).is_err(),
+            "OpenDalRoutingStorageFactory should error when metadata location is missing"
         );
     }
 }
