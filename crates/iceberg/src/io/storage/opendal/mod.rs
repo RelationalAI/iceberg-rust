@@ -587,14 +587,7 @@ impl StorageFactory for OpenDalRoutingStorageFactory {
         })?;
         let scheme = Url::parse(&location)
             .map(|u| u.scheme().to_string())
-            .map_err(|e| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!(
-                        "OpenDalRoutingStorageFactory: failed to parse metadata location URL: {e}"
-                    ),
-                )
-            })?;
+            .unwrap_or_else(|_| "file".to_string());
 
         // Strip internal keys so they don't leak into the OpenDAL operator config.
         props.remove(PROP_TABLE_IDENT);
