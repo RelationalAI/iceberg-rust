@@ -4873,8 +4873,8 @@ message schema {
         let uuid_bytes: Vec<[u8; 16]> = vec![
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             [
-                0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D,
-                0x7E, 0x8F, 0x90,
+                0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E,
+                0x8F, 0x90,
             ],
             [0xFF; 16],
         ];
@@ -4921,8 +4921,7 @@ message schema {
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
-        let mut writer =
-            ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
 
@@ -4948,8 +4947,7 @@ message schema {
                 partition_spec: None,
                 name_mapping: None,
                 case_sensitive: false,
-            })]))
-                as FileScanTaskStream;
+            })])) as FileScanTaskStream;
 
             let batches: Vec<RecordBatch> =
                 reader.read(tasks).unwrap().try_collect().await.unwrap();
@@ -4972,13 +4970,14 @@ message schema {
             let uuid_arr = result.column_by_name("uuid_col").unwrap();
             assert_eq!(uuid_arr.null_count(), 0, "uuid_col should have no nulls");
             // The transformer may cast Binary -> FixedSizeBinary to match the target schema
-            let uuid_values: Vec<&[u8]> = if let Some(bin) = uuid_arr.as_any().downcast_ref::<BinaryArray>() {
-                (0..bin.len()).map(|i| bin.value(i)).collect()
-            } else if let Some(fsb) = uuid_arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
-                (0..fsb.len()).map(|i| fsb.value(i)).collect()
-            } else {
-                panic!("uuid_col has unexpected type: {}", uuid_arr.data_type())
-            };
+            let uuid_values: Vec<&[u8]> =
+                if let Some(bin) = uuid_arr.as_any().downcast_ref::<BinaryArray>() {
+                    (0..bin.len()).map(|i| bin.value(i)).collect()
+                } else if let Some(fsb) = uuid_arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+                    (0..fsb.len()).map(|i| fsb.value(i)).collect()
+                } else {
+                    panic!("uuid_col has unexpected type: {}", uuid_arr.data_type())
+                };
             for (i, expected) in uuid_bytes.iter().enumerate() {
                 assert_eq!(
                     uuid_values[i],
@@ -5006,8 +5005,7 @@ message schema {
                 partition_spec: None,
                 name_mapping: None,
                 case_sensitive: false,
-            })]))
-                as FileScanTaskStream;
+            })])) as FileScanTaskStream;
 
             let batches: Vec<RecordBatch> =
                 reader2.read(tasks).unwrap().try_collect().await.unwrap();
@@ -5019,13 +5017,14 @@ message schema {
 
             let uuid_arr = result.column(0);
             assert_eq!(uuid_arr.null_count(), 0, "uuid_col should have no nulls");
-            let uuid_values: Vec<&[u8]> = if let Some(bin) = uuid_arr.as_any().downcast_ref::<BinaryArray>() {
-                (0..bin.len()).map(|i| bin.value(i)).collect()
-            } else if let Some(fsb) = uuid_arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
-                (0..fsb.len()).map(|i| fsb.value(i)).collect()
-            } else {
-                panic!("uuid_col has unexpected type: {}", uuid_arr.data_type())
-            };
+            let uuid_values: Vec<&[u8]> =
+                if let Some(bin) = uuid_arr.as_any().downcast_ref::<BinaryArray>() {
+                    (0..bin.len()).map(|i| bin.value(i)).collect()
+                } else if let Some(fsb) = uuid_arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+                    (0..fsb.len()).map(|i| fsb.value(i)).collect()
+                } else {
+                    panic!("uuid_col has unexpected type: {}", uuid_arr.data_type())
+                };
             for (i, expected) in uuid_bytes.iter().enumerate() {
                 assert_eq!(
                     uuid_values[i],
