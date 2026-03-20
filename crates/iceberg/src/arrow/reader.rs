@@ -2146,7 +2146,10 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::cast::AsArray;
-    use arrow_array::{ArrayRef, LargeStringArray, RecordBatch, StringArray};
+    use arrow_array::{
+        Array, ArrayRef, BinaryArray, FixedSizeBinaryArray, Int32Array, LargeStringArray,
+        RecordBatch, StringArray,
+    };
     use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use futures::TryStreamExt;
     use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
@@ -4854,5 +4857,182 @@ message schema {
         assert_eq!(result[0], expected_0);
         assert_eq!(result[1], expected_1);
         assert_eq!(result[2], expected_2);
+    }
+
+    /// Test that a Parquet file written with Arrow Binary type can be read when the
+    /// Iceberg schema declares the column as Fixed(N).
+    ///
+    /// This reproduces a real-world issue where Snowflake writes `FIXED_LEN_BYTE_ARRAY`
+    /// columns that the Arrow Parquet reader decodes as `Binary` rather than
+    /// `FixedSizeBinary(N)`. Without the `(Binary, Fixed(_))` arm in
+    /// `type_promotion_is_valid`, the column is silently excluded from projection and
+    /// filled with nulls.
+    #[tokio::test]
+    async fn test_binary_to_fixed_type_promotion() {
+        // UUID-like 16-byte values
+        let uuid_bytes: Vec<[u8; 16]> = vec![
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            [
+                0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D,
+                0x7E, 0x8F, 0x90,
+            ],
+            [0xFF; 16],
+        ];
+        let int_data = vec![1i32, 2, 3];
+
+        // Iceberg schema: field 1 = Int, field 2 = Fixed(16)
+        let iceberg_schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(2, "uuid_col", Type::Primitive(PrimitiveType::Fixed(16)))
+                        .into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        // Arrow schema: write uuid_col as Binary (not FixedSizeBinary), simulating
+        // what the Arrow Parquet reader produces for some writers (e.g. Snowflake).
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "1".to_string(),
+            )])),
+            Field::new("uuid_col", DataType::Binary, true).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "2".to_string(),
+            )])),
+        ]));
+
+        let id_col = Arc::new(Int32Array::from(int_data.clone())) as ArrayRef;
+        let uuid_col = Arc::new(BinaryArray::from_vec(
+            uuid_bytes.iter().map(|b| b.as_slice()).collect(),
+        )) as ArrayRef;
+
+        let batch = RecordBatch::try_new(arrow_schema.clone(), vec![id_col, uuid_col]).unwrap();
+
+        // Write Parquet file
+        let tmp_dir = TempDir::new().unwrap();
+        let table_location = tmp_dir.path().to_str().unwrap().to_string();
+        let parquet_path = format!("{table_location}/1.parquet");
+        let file = File::create(&parquet_path).unwrap();
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let file_io = FileIO::new_with_fs();
+        let file_size = std::fs::metadata(&parquet_path).unwrap().len();
+        let reader = ArrowReaderBuilder::new(file_io.clone()).build();
+
+        // --- Test 1: Full scan (all columns projected) ---
+        // This is the case that previously failed.
+        {
+            let tasks = Box::pin(futures::stream::iter(vec![Ok(FileScanTask {
+                file_size_in_bytes: file_size,
+                start: 0,
+                length: 0,
+                record_count: None,
+                data_file_path: parquet_path.clone(),
+                data_file_format: DataFileFormat::Parquet,
+                schema: iceberg_schema.clone(),
+                project_field_ids: vec![1, 2],
+                predicate: None,
+                deletes: vec![],
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            })]))
+                as FileScanTaskStream;
+
+            let batches: Vec<RecordBatch> =
+                reader.read(tasks).unwrap().try_collect().await.unwrap();
+
+            assert_eq!(batches.len(), 1);
+            let result = &batches[0];
+            assert_eq!(result.num_rows(), 3);
+            assert_eq!(result.num_columns(), 2);
+
+            // Verify id column
+            let id_arr = result
+                .column_by_name("id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(id_arr.values(), &int_data);
+
+            // Verify uuid_col: data must come through as Binary, preserving every byte
+            let uuid_arr = result.column_by_name("uuid_col").unwrap();
+            assert_eq!(uuid_arr.null_count(), 0, "uuid_col should have no nulls");
+            // The transformer may cast Binary -> FixedSizeBinary to match the target schema
+            let uuid_values: Vec<&[u8]> = if let Some(bin) = uuid_arr.as_any().downcast_ref::<BinaryArray>() {
+                (0..bin.len()).map(|i| bin.value(i)).collect()
+            } else if let Some(fsb) = uuid_arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+                (0..fsb.len()).map(|i| fsb.value(i)).collect()
+            } else {
+                panic!("uuid_col has unexpected type: {}", uuid_arr.data_type())
+            };
+            for (i, expected) in uuid_bytes.iter().enumerate() {
+                assert_eq!(
+                    uuid_values[i],
+                    expected.as_slice(),
+                    "uuid_col row {i} bytes mismatch"
+                );
+            }
+        }
+
+        // --- Test 2: Projected scan (only uuid_col) ---
+        {
+            let reader2 = ArrowReaderBuilder::new(file_io).build();
+            let tasks = Box::pin(futures::stream::iter(vec![Ok(FileScanTask {
+                file_size_in_bytes: file_size,
+                start: 0,
+                length: 0,
+                record_count: None,
+                data_file_path: parquet_path.clone(),
+                data_file_format: DataFileFormat::Parquet,
+                schema: iceberg_schema.clone(),
+                project_field_ids: vec![2],
+                predicate: None,
+                deletes: vec![],
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            })]))
+                as FileScanTaskStream;
+
+            let batches: Vec<RecordBatch> =
+                reader2.read(tasks).unwrap().try_collect().await.unwrap();
+
+            assert_eq!(batches.len(), 1);
+            let result = &batches[0];
+            assert_eq!(result.num_rows(), 3);
+            assert_eq!(result.num_columns(), 1);
+
+            let uuid_arr = result.column(0);
+            assert_eq!(uuid_arr.null_count(), 0, "uuid_col should have no nulls");
+            let uuid_values: Vec<&[u8]> = if let Some(bin) = uuid_arr.as_any().downcast_ref::<BinaryArray>() {
+                (0..bin.len()).map(|i| bin.value(i)).collect()
+            } else if let Some(fsb) = uuid_arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+                (0..fsb.len()).map(|i| fsb.value(i)).collect()
+            } else {
+                panic!("uuid_col has unexpected type: {}", uuid_arr.data_type())
+            };
+            for (i, expected) in uuid_bytes.iter().enumerate() {
+                assert_eq!(
+                    uuid_values[i],
+                    expected.as_slice(),
+                    "uuid_col row {i} bytes mismatch in projected scan"
+                );
+            }
+        }
     }
 }
