@@ -870,10 +870,6 @@ impl ArrowReader {
                 ) if requested_precision >= file_precision && file_scale == requested_scale => true,
                 // Uuid will be store as Fixed(16) in parquet file, so the read back type will be Fixed(16).
                 (Some(PrimitiveType::Fixed(16)), Some(PrimitiveType::Uuid)) => true,
-                // Some Parquet writers (e.g. Snowflake) store FIXED_LEN_BYTE_ARRAY as
-                // Arrow Binary rather than FixedSizeBinary. Allow Binary -> Fixed(N)
-                // since the underlying bytes are the same.
-                (Some(PrimitiveType::Binary), Some(PrimitiveType::Fixed(_))) => true,
                 _ => false,
             }
         }
