@@ -66,7 +66,7 @@ use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
 use crate::spec::{
     Datum, NameMapping, NestedField, PartitionSpec, PrimitiveType, Schema, SchemaRef, Struct, Type,
 };
-use crate::utils::available_parallelism;
+use crate::util::available_parallelism;
 use crate::{Error, ErrorKind};
 
 /// Default gap between byte ranges below which they are coalesced into a
@@ -2737,7 +2737,7 @@ message schema {
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
-            .set_max_row_group_size(100)
+            .set_max_row_group_row_count(Some(100))
             .build();
 
         let file = File::create(&file_path).unwrap();
@@ -3052,7 +3052,7 @@ message schema {
         // Force each batch into its own row group
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
-            .set_max_row_group_size(100)
+            .set_max_row_group_row_count(Some(100))
             .build();
 
         let file = File::create(&data_file_path).unwrap();
@@ -3248,7 +3248,7 @@ message schema {
         // Force each batch into its own row group
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
-            .set_max_row_group_size(100)
+            .set_max_row_group_row_count(Some(100))
             .build();
 
         let file = File::create(&data_file_path).unwrap();
@@ -3472,7 +3472,7 @@ message schema {
         // Force each batch into its own row group
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
-            .set_max_row_group_size(100)
+            .set_max_row_group_row_count(Some(100))
             .build();
 
         let file = File::create(&data_file_path).unwrap();
@@ -3920,7 +3920,7 @@ message schema {
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .set_write_batch_size(2)
-            .set_max_row_group_size(2)
+            .set_max_row_group_row_count(Some(2))
             .build();
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
