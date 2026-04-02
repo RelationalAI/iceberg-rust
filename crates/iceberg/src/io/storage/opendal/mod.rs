@@ -25,6 +25,8 @@ use async_trait::async_trait;
 #[cfg(feature = "storage-azdls")]
 use azdls::AzureStorageScheme;
 use bytes::Bytes;
+use futures::StreamExt;
+use futures::stream::BoxStream;
 use opendal::Operator;
 use opendal::layers::RetryLayer;
 #[cfg(feature = "storage-azdls")]
@@ -436,6 +438,13 @@ impl Storage for OpenDalStorage {
     async fn delete(&self, path: &str) -> Result<()> {
         let (op, relative_path) = self.create_operator(&path)?;
         Ok(op.delete(relative_path).await?)
+    }
+
+    async fn delete_stream(&self, mut paths: BoxStream<'static, String>) -> Result<()> {
+        while let Some(path) = paths.next().await {
+            self.delete(&path).await?;
+        }
+        Ok(())
     }
 
     async fn delete_prefix(&self, path: &str) -> Result<()> {
