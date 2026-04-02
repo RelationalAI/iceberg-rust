@@ -193,7 +193,7 @@
 <a href=#193 id=193 data-nosnippet>193</a>}
 <a href=#194 id=194 data-nosnippet>194</a>
 <a href=#195 id=195 data-nosnippet>195</a><span class="doccomment">/// Validates whether the given path matches what's configured for the backend.
-<a href=#196 id=196 data-nosnippet>196</a></span><span class="kw">fn </span>match_path_with_config(
+<a href=#196 id=196 data-nosnippet>196</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>match_path_with_config(
 <a href=#197 id=197 data-nosnippet>197</a>    path: <span class="kw-2">&amp;</span>AzureStoragePath,
 <a href=#198 id=198 data-nosnippet>198</a>    config: <span class="kw-2">&amp;</span>AzdlsConfig,
 <a href=#199 id=199 data-nosnippet>199</a>    configured_scheme: <span class="kw-2">&amp;</span>AzureStorageScheme,
@@ -258,7 +258,7 @@
 <a href=#258 id=258 data-nosnippet>258</a>
 <a href=#259 id=259 data-nosnippet>259</a><span class="doccomment">/// Represents a fully qualified path to blob/ file in Azure Storage.
 <a href=#260 id=260 data-nosnippet>260</a></span><span class="attr">#[derive(Debug, PartialEq)]
-<a href=#261 id=261 data-nosnippet>261</a></span><span class="kw">struct </span>AzureStoragePath {
+<a href=#261 id=261 data-nosnippet>261</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>AzureStoragePath {
 <a href=#262 id=262 data-nosnippet>262</a>    <span class="doccomment">/// The scheme of the URL, e.g., `abfss`, `abfs`, `wasbs`, or `wasb`.
 <a href=#263 id=263 data-nosnippet>263</a>    </span>scheme: AzureStorageScheme,
 <a href=#264 id=264 data-nosnippet>264</a>
@@ -274,7 +274,7 @@
 <a href=#274 id=274 data-nosnippet>274</a>    <span class="doccomment">/// Path to the file.
 <a href=#275 id=275 data-nosnippet>275</a>    ///
 <a href=#276 id=276 data-nosnippet>276</a>    /// It is relative to the `root` of the `AzdlsConfig`.
-<a href=#277 id=277 data-nosnippet>277</a>    </span>path: String,
+<a href=#277 id=277 data-nosnippet>277</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) path: String,
 <a href=#278 id=278 data-nosnippet>278</a>}
 <a href=#279 id=279 data-nosnippet>279</a>
 <a href=#280 id=280 data-nosnippet>280</a><span class="kw">impl </span>AzureStoragePath {

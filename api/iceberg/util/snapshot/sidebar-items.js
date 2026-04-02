@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["ancestors_between","ancestors_of","root_snapshot_id"]};
+window.SIDEBAR_ITEMS = {"fn":["ancestors_between","ancestors_of"]};
