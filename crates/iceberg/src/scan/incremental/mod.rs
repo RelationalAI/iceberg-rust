@@ -40,8 +40,8 @@ use crate::spec::{
     DataContentType, ManifestEntryRef, ManifestStatus, Snapshot, SnapshotRef, TableMetadataRef,
 };
 use crate::table::Table;
+use crate::util::available_parallelism;
 use crate::util::snapshot::ancestors_between;
-use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind, Result};
 
 mod context;
