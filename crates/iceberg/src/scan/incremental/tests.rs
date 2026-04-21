@@ -1540,9 +1540,7 @@ impl IncrementalTestFixture {
             .metadata(modified_metadata)
             .identifier(self.table.identifier().clone())
             .file_io(self.table.file_io().clone())
-            .metadata_location(
-                format!("{}/metadata/v1.json", self.table_location).as_str(),
-            )
+            .metadata_location(format!("{}/metadata/v1.json", self.table_location).as_str())
             .build()
             .unwrap()
     }
