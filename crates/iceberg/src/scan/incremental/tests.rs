@@ -2774,9 +2774,7 @@ async fn test_incremental_scan_from_none_includes_existing_entries_from_expired_
         .metadata(modified_metadata)
         .identifier(TableIdent::from_strs(["db", "incremental_test"]).unwrap())
         .file_io(fixture.table.file_io().clone())
-        .metadata_location(
-            format!("{}/metadata/v1.json", fixture.table_location).as_str(),
-        )
+        .metadata_location(format!("{}/metadata/v1.json", fixture.table_location).as_str())
         .build()
         .unwrap();
 
