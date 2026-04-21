@@ -38,6 +38,11 @@ pub(crate) struct IncrementalPlanContext {
     /// The snapshot to start the incremental scan from.
     pub from_snapshot: SnapshotRef,
 
+    /// The user-provided from_snapshot_id (None means "scan from the beginning").
+    /// Used to distinguish a true "from beginning" scan (full scan semantics) from
+    /// an incremental scan with an explicit starting snapshot.
+    pub from_snapshot_id: Option<i64>,
+
     /// The metadata of the table being scanned.
     pub table_metadata: TableMetadataRef,
 
@@ -67,13 +72,41 @@ impl IncrementalPlanContext {
         delete_file_idx: DeleteFileIndex,
         delete_file_tx: Sender<ManifestEntryContext>,
     ) -> Result<Box<impl Iterator<Item = Result<ManifestFileContext>> + 'static>> {
-        // Collect all snapshot IDs (all operation types are supported)
-        let snapshot_ids: HashSet<i64> = self.snapshots.iter().map(|s| s.snapshot_id()).collect();
-
         // Separate delete and data manifests to ensure deletes are processed first.
         // This prevents deadlock by ensuring delete processing completes
         // (and builds the delete filter) before data manifests are fetched.
-        let (delete_manifests, data_manifests, filter_fn) = {
+        let (delete_manifests, data_manifests, filter_fn) = if self.from_snapshot_id.is_none() {
+            // When from=None, use full-scan semantics: read ALL manifests from to_snapshot's
+            // manifest list without filtering by added_snapshot_id. This handles tables where
+            // older snapshots have been expired — their data files appear as EXISTING entries
+            // in later manifests and would otherwise be silently dropped.
+            let to_snapshot = self.snapshots.first().expect("snapshots is non-empty");
+            let manifest_list = self
+                .object_cache
+                .get_manifest_list(to_snapshot, &self.table_metadata)
+                .await?;
+
+            let mut delete_manifests = HashSet::<ManifestFile>::new();
+            let mut data_manifests = HashSet::<ManifestFile>::new();
+            for entry in manifest_list.entries() {
+                if entry.content == ManifestContentType::Deletes {
+                    delete_manifests.insert(entry.clone());
+                } else {
+                    data_manifests.insert(entry.clone());
+                }
+            }
+
+            // No entry-level filtering: include entries from expired snapshots too.
+            (
+                delete_manifests,
+                data_manifests,
+                None::<Arc<ManifestEntryFilterFn>>,
+            )
+        } else {
+            // Collect all snapshot IDs (all operation types are supported)
+            let snapshot_ids: HashSet<i64> =
+                self.snapshots.iter().map(|s| s.snapshot_id()).collect();
+
             let mut delete_manifests = HashSet::<ManifestFile>::new();
             let mut data_manifests = HashSet::<ManifestFile>::new();
 

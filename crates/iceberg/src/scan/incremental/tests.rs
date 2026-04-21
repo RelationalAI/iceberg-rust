@@ -1424,89 +1424,210 @@ impl IncrementalTestFixture {
         expected_appends: Vec<(i32, &str)>,
         expected_deletes: Vec<(i64, &str)>,
     ) {
-        use arrow_array::cast::AsArray;
-        use arrow_select::concat::concat_batches;
-        use futures::TryStreamExt;
+        scan_and_verify(
+            &self.table,
+            Some(from_snapshot_id),
+            Some(to_snapshot_id),
+            expected_appends,
+            expected_deletes,
+        )
+        .await;
+    }
 
-        let incremental_scan = self
-            .table
-            .incremental_scan(Some(from_snapshot_id), Some(to_snapshot_id))
+    /// Return a new `Table` backed by the same files but with the `num_to_expire` oldest
+    /// snapshots removed from the metadata, simulating catalog-level snapshot expiry.
+    pub fn with_expired_snapshots(&self, num_to_expire: usize) -> Table {
+        use std::collections::HashSet;
+
+        let metadata = self.table.metadata();
+
+        let mut snapshots: Vec<_> = metadata.snapshots().collect();
+        snapshots.sort_by_key(|s| s.snapshot_id());
+        let kept = &snapshots[num_to_expire..];
+
+        let kept_ids: HashSet<i64> = kept.iter().map(|s| s.snapshot_id()).collect();
+
+        let snapshots_str = kept
+            .iter()
+            .map(|s| {
+                let parent_str = s
+                    .parent_snapshot_id()
+                    .filter(|pid| kept_ids.contains(pid))
+                    .map(|pid| format!(r#""parent-snapshot-id": {pid},"#))
+                    .unwrap_or_default();
+                format!(
+                    r#"    {{
+      "snapshot-id": {},
+      {}
+      "timestamp-ms": {},
+      "sequence-number": {},
+      "summary": {{"operation": "{}"}},
+      "manifest-list": "{}",
+      "schema-id": {}
+    }}"#,
+                    s.snapshot_id(),
+                    parent_str,
+                    s.timestamp_ms(),
+                    s.sequence_number(),
+                    s.summary().operation.as_str(),
+                    s.manifest_list(),
+                    s.schema_id().unwrap_or(0),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+
+        let snapshot_log_str = kept
+            .iter()
+            .map(|s| {
+                format!(
+                    r#"    {{"snapshot-id": {}, "timestamp-ms": {}}}"#,
+                    s.snapshot_id(),
+                    s.timestamp_ms()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+
+        let last_sequence_number = kept.iter().map(|s| s.sequence_number()).max().unwrap_or(0);
+        let current_snapshot_id = metadata.current_snapshot_id().unwrap();
+
+        let metadata_json = format!(
+            r#"{{
+  "format-version": 2,
+  "table-uuid": "{}",
+  "location": "{}",
+  "last-sequence-number": {},
+  "last-updated-ms": 1602638573590,
+  "last-column-id": 2,
+  "current-schema-id": 0,
+  "schemas": [
+    {{
+      "type": "struct",
+      "schema-id": 0,
+      "fields": [
+        {{"id": 1, "name": "n", "required": true, "type": "int"}},
+        {{"id": 2, "name": "data", "required": true, "type": "string"}}
+      ]
+    }}
+  ],
+  "default-spec-id": 0,
+  "partition-specs": [{{"spec-id": 0, "fields": []}}],
+  "last-partition-id": 0,
+  "default-sort-order-id": 0,
+  "sort-orders": [{{"order-id": 0, "fields": []}}],
+  "properties": {{}},
+  "current-snapshot-id": {},
+  "snapshots": [
+{}
+  ],
+  "snapshot-log": [
+{}
+  ],
+  "metadata-log": []
+}}"#,
+            Uuid::new_v4(),
+            self.table_location,
+            last_sequence_number,
+            current_snapshot_id,
+            snapshots_str,
+            snapshot_log_str,
+        );
+
+        let modified_metadata: TableMetadata = serde_json::from_str(&metadata_json).unwrap();
+
+        Table::builder()
+            .metadata(modified_metadata)
+            .identifier(self.table.identifier().clone())
+            .file_io(self.table.file_io().clone())
+            .metadata_location(format!("{}/metadata/v1.json", self.table_location).as_str())
             .build()
-            .unwrap();
+            .unwrap()
+    }
+}
 
-        let stream = incremental_scan.to_arrow().await.unwrap();
-        let batches: Vec<_> = stream.try_collect().await.unwrap();
+/// Run an incremental scan on `table` and assert the results match `expected_appends` /
+/// `expected_deletes`.  Pass `None` for either snapshot ID to use full-scan / current
+/// semantics (the same as `table.incremental_scan(None, None)`).
+async fn scan_and_verify(
+    table: &Table,
+    from_snapshot_id: Option<i64>,
+    to_snapshot_id: Option<i64>,
+    expected_appends: Vec<(i32, &str)>,
+    expected_deletes: Vec<(i64, &str)>,
+) {
+    use arrow_array::cast::AsArray;
+    use arrow_select::concat::concat_batches;
+    use futures::TryStreamExt;
 
-        // Separate appends and deletes
-        let append_batches: Vec<_> = batches
-            .iter()
-            .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
-            .map(|(_, b)| b.clone())
+    let incremental_scan = table
+        .incremental_scan(from_snapshot_id, to_snapshot_id)
+        .build()
+        .unwrap();
+
+    let stream = incremental_scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    let append_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Append)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    let delete_batches: Vec<_> = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Delete)
+        .map(|(_, b)| b.clone())
+        .collect();
+
+    if !append_batches.is_empty() {
+        let append_batch =
+            concat_batches(&append_batches[0].schema(), append_batches.iter()).unwrap();
+
+        let n_array = append_batch
+            .column(0)
+            .as_primitive::<arrow_array::types::Int32Type>();
+        let data_array = append_batch.column(1).as_string::<i32>();
+
+        let mut appended_pairs: Vec<(i32, String)> = (0..append_batch.num_rows())
+            .map(|i| (n_array.value(i), data_array.value(i).to_string()))
             .collect();
+        appended_pairs.sort();
 
-        let delete_batches: Vec<_> = batches
-            .iter()
-            .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Delete)
-            .map(|(_, b)| b.clone())
+        let mut expected: Vec<(i32, String)> = expected_appends
+            .into_iter()
+            .map(|(n, s)| (n, s.to_string()))
             .collect();
+        expected.sort();
 
-        // Verify appended records
-        if !append_batches.is_empty() {
-            let append_batch =
-                concat_batches(&append_batches[0].schema(), append_batches.iter()).unwrap();
+        assert_eq!(appended_pairs, expected);
+    } else {
+        assert!(expected_appends.is_empty(), "Expected appends but got none");
+    }
 
-            let n_array = append_batch
-                .column(0)
-                .as_primitive::<arrow_array::types::Int32Type>();
-            let data_array = append_batch.column(1).as_string::<i32>();
+    if !delete_batches.is_empty() {
+        let delete_batch =
+            concat_batches(&delete_batches[0].schema(), delete_batches.iter()).unwrap();
 
-            let mut appended_pairs: Vec<(i32, String)> = (0..append_batch.num_rows())
-                .map(|i| (n_array.value(i), data_array.value(i).to_string()))
-                .collect();
-            appended_pairs.sort();
+        let file_path_array = delete_batch.column(0).as_string::<i32>();
+        let pos_array = delete_batch
+            .column(1)
+            .as_primitive::<arrow_array::types::Int64Type>();
 
-            let expected_appends: Vec<(i32, String)> = expected_appends
-                .into_iter()
-                .map(|(n, s)| (n, s.to_string()))
-                .collect();
+        let mut deleted_pairs: Vec<(i64, String)> = (0..delete_batch.num_rows())
+            .map(|i| (pos_array.value(i), file_path_array.value(i).to_string()))
+            .collect();
+        deleted_pairs.sort();
 
-            assert_eq!(appended_pairs, expected_appends);
-        } else {
-            assert!(expected_appends.is_empty(), "Expected appends but got none");
-        }
+        let mut expected: Vec<(i64, String)> = expected_deletes
+            .into_iter()
+            .map(|(pos, file)| (pos, file.to_string()))
+            .collect();
+        expected.sort();
 
-        // Verify deleted records
-        if !delete_batches.is_empty() {
-            let delete_batch =
-                concat_batches(&delete_batches[0].schema(), delete_batches.iter()).unwrap();
-
-            // The file path column is first (column 0)
-            let file_path_column = delete_batch.column(0);
-            let file_path_array = file_path_column.as_string::<i32>();
-
-            // The pos column is second (column 1) and is Int64
-            let pos_array = delete_batch
-                .column(1)
-                .as_primitive::<arrow_array::types::Int64Type>();
-
-            let mut deleted_pairs: Vec<(i64, String)> = (0..delete_batch.num_rows())
-                .map(|i| {
-                    let pos = pos_array.value(i);
-                    let file_path = file_path_array.value(i).to_string();
-                    (pos, file_path)
-                })
-                .collect();
-            deleted_pairs.sort();
-
-            let expected_deletes: Vec<(i64, String)> = expected_deletes
-                .into_iter()
-                .map(|(pos, file)| (pos, file.to_string()))
-                .collect();
-
-            assert_eq!(deleted_pairs, expected_deletes);
-        } else {
-            assert!(expected_deletes.is_empty(), "Expected deletes but got none");
-        }
+        assert_eq!(deleted_pairs, expected);
+    } else {
+        assert!(expected_deletes.is_empty(), "Expected deletes but got none");
     }
 }
 
@@ -2690,6 +2811,34 @@ async fn test_incremental_scan_includes_root_when_from_is_none() {
         ],
         "Scan with from=None should include root snapshot data"
     );
+}
+
+#[tokio::test]
+async fn test_incremental_scan_from_none_includes_existing_entries_from_expired_snapshots() {
+    // Simulate a table where older snapshots have been expired from the catalog.
+    // Snapshot 2's manifest has EXISTING entries for files added by the now-expired
+    // snapshot 1.  The old code dropped them silently; after the fix, from=None uses
+    // full-scan semantics and includes all EXISTING entries.
+    let fixture = IncrementalTestFixture::new(vec![
+        Operation::Add(
+            vec![(1, "a".to_string()), (2, "b".to_string())],
+            "snap1-data.parquet".to_string(),
+        ),
+        Operation::Add(vec![(3, "c".to_string())], "snap2-data.parquet".to_string()),
+    ])
+    .await;
+
+    // Rebuild the table as if snapshot 1 was expired (only snapshot 2 visible).
+    let table = fixture.with_expired_snapshots(1);
+
+    scan_and_verify(
+        &table,
+        None,
+        None,
+        vec![(1, "a"), (2, "b"), (3, "c")],
+        vec![],
+    )
+    .await;
 }
 
 #[tokio::test]

@@ -370,6 +370,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         let plan_context = IncrementalPlanContext {
             snapshots,
             from_snapshot: snapshot_from,
+            from_snapshot_id: self.from_snapshot_id,
             table_metadata: self.table.metadata_ref(),
             to_snapshot_schema: schema,
             object_cache: self.table.object_cache().clone(),
@@ -504,8 +505,11 @@ impl IncrementalTableScan {
 
         // Collect data files that were live at from_snapshot. These are needed to generate
         // equality delete tasks for files that predate the scan range.
-        // Runs in parallel with the rest of the planning.
-        let from_snapshot_collection = if all_deletes.iter().any(is_equality_delete) {
+        // Skipped when from=None because in that case all data files are treated as appends
+        // (full-scan semantics), so equality deletes are handled via AppendedFileScanTask.
+        let from_snapshot_collection = if self.plan_context.from_snapshot_id.is_some()
+            && all_deletes.iter().any(is_equality_delete)
+        {
             Some(Self::spawn_manifest_entry_collection(
                 self.plan_context.from_snapshot.clone(),
                 self.plan_context.table_metadata.clone(),
@@ -536,6 +540,7 @@ impl IncrementalTableScan {
         // Process the data file [`ManifestEntry`] stream in parallel
         let filter = delete_filter.clone();
         let table_metadata = self.plan_context.table_metadata.clone();
+        let from_snapshot_is_none = self.plan_context.from_snapshot_id.is_none();
         spawn(async move {
             let result = manifest_entry_data_ctx_rx
                 .map(|me_ctx| Ok((me_ctx, file_scan_task_tx.clone())))
@@ -545,8 +550,13 @@ impl IncrementalTableScan {
                         let filter = filter.clone();
                         let table_metadata = table_metadata.clone();
                         async move {
-                            if manifest_entry_context.manifest_entry.status()
-                                == ManifestStatus::Added
+                            let status = manifest_entry_context.manifest_entry.status();
+                            // When from=None (full-scan semantics), treat both Added and Existing
+                            // entries as appends. Existing entries arise from expired snapshots or
+                            // manifest rewrites — they represent live files that must be included.
+                            // Deleted entries are skipped since they are not live.
+                            if status == ManifestStatus::Added
+                                || (from_snapshot_is_none && status == ManifestStatus::Existing)
                             {
                                 spawn(async move {
                                     Self::process_data_manifest_entry(
@@ -558,9 +568,7 @@ impl IncrementalTableScan {
                                     .await
                                 })
                                 .await
-                            } else if manifest_entry_context.manifest_entry.status()
-                                == ManifestStatus::Deleted
-                            {
+                            } else if status == ManifestStatus::Deleted && !from_snapshot_is_none {
                                 spawn(async move {
                                     Self::process_deleted_data_manifest_entry(
                                         tx,
