@@ -2693,6 +2693,130 @@ async fn test_incremental_scan_includes_root_when_from_is_none() {
 }
 
 #[tokio::test]
+async fn test_incremental_scan_from_none_includes_existing_entries_from_expired_snapshots() {
+    // Simulate a table where older snapshots have been expired from the catalog.
+    // The only visible snapshot's manifest has EXISTING entries for data files that
+    // were added by the now-expired snapshot.  Their snapshot_id is not in the
+    // accessible ancestry, so the old incremental-scan code dropped them silently.
+    // After the fix, from=None uses full-scan semantics and includes EXISTING entries.
+
+    let fixture = IncrementalTestFixture::new(vec![
+        // Snapshot 1 (will be expired): adds rows 1 and 2
+        Operation::Add(
+            vec![(1, "a".to_string()), (2, "b".to_string())],
+            "snap1-data.parquet".to_string(),
+        ),
+        // Snapshot 2 (remains visible): adds row 3
+        Operation::Add(vec![(3, "c".to_string())], "snap2-data.parquet".to_string()),
+    ])
+    .await;
+
+    // Snapshot 2's manifest (snap-2-manifest-list.avro) contains:
+    //   - EXISTING entry for snap1-data.parquet  (snapshot_id = 1, i.e. expired)
+    //   - ADDED   entry for snap2-data.parquet   (snapshot_id = 2)
+    //
+    // Build table metadata that includes ONLY snapshot 2, simulating expiry of
+    // snapshot 1.  Snapshot 2's parent-snapshot-id still points at 1, but since 1
+    // is absent, ancestors_of() stops at 2, giving snapshot_ids = {2}.
+    // Snapshot 2's manifest has Existing entries with snapshot_id=1 which is NOT in
+    // {2}, so the old code silently dropped them.
+    let snap2_manifest_list = format!(
+        "{}/metadata/snap-2-manifest-list.avro",
+        fixture.table_location
+    );
+    let metadata_json = format!(
+        r#"{{
+  "format-version": 2,
+  "table-uuid": "{uuid}",
+  "location": "{loc}",
+  "last-sequence-number": 1,
+  "last-updated-ms": 1602638573590,
+  "last-column-id": 2,
+  "current-schema-id": 0,
+  "schemas": [
+    {{
+      "type": "struct",
+      "schema-id": 0,
+      "fields": [
+        {{"id": 1, "name": "n", "required": true, "type": "int"}},
+        {{"id": 2, "name": "data", "required": true, "type": "string"}}
+      ]
+    }}
+  ],
+  "default-spec-id": 0,
+  "partition-specs": [{{"spec-id": 0, "fields": []}}],
+  "last-partition-id": 0,
+  "default-sort-order-id": 0,
+  "sort-orders": [{{"order-id": 0, "fields": []}}],
+  "properties": {{}},
+  "current-snapshot-id": 2,
+  "snapshots": [
+    {{
+      "snapshot-id": 2,
+      "parent-snapshot-id": 1,
+      "timestamp-ms": 1515100956770,
+      "sequence-number": 1,
+      "summary": {{"operation": "append"}},
+      "manifest-list": "{mlist}",
+      "schema-id": 0
+    }}
+  ],
+  "snapshot-log": [{{"snapshot-id": 2, "timestamp-ms": 1515100956770}}],
+  "metadata-log": []
+}}"#,
+        uuid = Uuid::new_v4(),
+        loc = fixture.table_location,
+        mlist = snap2_manifest_list,
+    );
+    let modified_metadata: TableMetadata = serde_json::from_str(&metadata_json).unwrap();
+
+    let table = Table::builder()
+        .metadata(modified_metadata)
+        .identifier(TableIdent::from_strs(["db", "incremental_test"]).unwrap())
+        .file_io(fixture.table.file_io().clone())
+        .metadata_location(
+            format!("{}/metadata/v1.json", fixture.table_location).as_str(),
+        )
+        .build()
+        .unwrap();
+
+    // from=None: should return ALL live rows including those from the expired snapshot.
+    let scan = table.incremental_scan(None, None).build().unwrap();
+    let stream = scan.to_arrow().await.unwrap();
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+
+    let mut n_values: Vec<i32> = Vec::new();
+    for (batch_type, batch) in &batches {
+        if *batch_type == crate::arrow::IncrementalBatchType::Append {
+            let arr = batch
+                .column_by_name("n")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int32Type>();
+            for i in 0..batch.num_rows() {
+                n_values.push(arr.value(i));
+            }
+        }
+    }
+    n_values.sort();
+
+    assert_eq!(
+        n_values,
+        vec![1, 2, 3],
+        "from=None must include EXISTING entries from expired snapshots"
+    );
+
+    let delete_rows: usize = batches
+        .iter()
+        .filter(|(t, _)| *t == crate::arrow::IncrementalBatchType::Delete)
+        .map(|(_, b)| b.num_rows())
+        .sum();
+    assert_eq!(
+        delete_rows, 0,
+        "from=None should produce no delete-stream entries"
+    );
+}
+
+#[tokio::test]
 async fn test_incremental_scan_with_file_column() {
     // Test that the _file metadata column works correctly in incremental scans
 
