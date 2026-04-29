@@ -38,7 +38,9 @@ use iceberg_catalog_hms::{
     HMS_CATALOG_PROP_THRIFT_TRANSPORT, HMS_CATALOG_PROP_URI, HMS_CATALOG_PROP_WAREHOUSE,
     HmsCatalog, HmsCatalogBuilder, THRIFT_TRANSPORT_BUFFERED,
 };
-use iceberg_catalog_rest::{REST_CATALOG_PROP_URI, RestCatalog, RestCatalogBuilder};
+use iceberg_catalog_rest::{
+    CustomAuthenticator, REST_CATALOG_PROP_URI, RestCatalog, RestCatalogBuilder,
+};
 use iceberg_catalog_s3tables::{
     S3TABLES_CATALOG_PROP_ENDPOINT_URL, S3TABLES_CATALOG_PROP_TABLE_BUCKET_ARN,
     S3TablesCatalogBuilder,
@@ -186,6 +188,12 @@ pub async fn load_catalog(kind: CatalogKind) -> Option<CatalogHarness> {
 // Catalog-specific setup is intentionally isolated here so the suites
 // remain implementation-agnostic.
 async fn rest_catalog() -> RestCatalog {
+    rest_catalog_with_auth(None).await
+}
+
+pub async fn rest_catalog_with_auth(
+    authenticator: Option<Arc<dyn CustomAuthenticator>>,
+) -> RestCatalog {
     let rest_endpoint = get_rest_catalog_endpoint();
 
     let client = reqwest::Client::new();
@@ -204,8 +212,13 @@ async fn rest_catalog() -> RestCatalog {
         retries += 1;
     }
 
-    RestCatalogBuilder::default()
-        .with_storage_factory(Arc::new(LocalFsStorageFactory))
+    let mut builder =
+        RestCatalogBuilder::default().with_storage_factory(Arc::new(LocalFsStorageFactory));
+    if let Some(auth) = authenticator {
+        builder = builder.with_token_authenticator(auth);
+    }
+
+    builder
         .load(
             "rest",
             HashMap::from([(REST_CATALOG_PROP_URI.to_string(), rest_endpoint)]),

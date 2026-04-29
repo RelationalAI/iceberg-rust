@@ -113,16 +113,24 @@ impl AsyncFileReader for ArrowFileReader {
         _options: Option<&'_ ArrowReaderOptions>,
     ) -> BoxFuture<'_, parquet::errors::Result<Arc<ParquetMetaData>>> {
         async move {
+            fn page_index_policy(enabled: bool) -> PageIndexPolicy {
+                if enabled {
+                    PageIndexPolicy::Optional
+                } else {
+                    PageIndexPolicy::Skip
+                }
+            }
+
             let reader = ParquetMetaDataReader::new()
                 .with_prefetch_hint(self.parquet_read_options.metadata_size_hint())
                 // Set the page policy first because it updates both column and offset policies.
-                .with_page_index_policy(PageIndexPolicy::from(
+                .with_page_index_policy(page_index_policy(
                     self.parquet_read_options.preload_page_index(),
                 ))
-                .with_column_index_policy(PageIndexPolicy::from(
+                .with_column_index_policy(page_index_policy(
                     self.parquet_read_options.preload_column_index(),
                 ))
-                .with_offset_index_policy(PageIndexPolicy::from(
+                .with_offset_index_policy(page_index_policy(
                     self.parquet_read_options.preload_offset_index(),
                 ));
             let size = self.meta.size;

@@ -61,21 +61,21 @@ jobs:
             exit 1
           fi
           echo "✅ Release tag format is valid: $RELEASE_TAG"
-          
+
           # Strip 'v' prefix for cargo version
           CARGO_VERSION="${RELEASE_TAG#v}"
           echo "Cargo version (without v prefix): $CARGO_VERSION"
-          
+
           # For manual triggers, validate that the tag matches the version in Cargo.toml
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             # Extract base version (without -rc.X suffix) for comparison with Cargo.toml
             BASE_VERSION="${CARGO_VERSION%-rc.*}"
             echo "Base version (for Cargo.toml comparison): $BASE_VERSION"
-            
+
             # Read version from Cargo.toml and validate it matches
             CARGO_TOML_VERSION=$(grep '^version = ' bindings/python/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
             echo "Version in bindings/python/Cargo.toml: $CARGO_TOML_VERSION"
-            
+
             if [ "$BASE_VERSION" != "$CARGO_TOML_VERSION" ]; then
               echo "❌ Version mismatch!"
               echo "   Release tag base version: $BASE_VERSION"
@@ -85,7 +85,7 @@ jobs:
             fi
             echo "✅ Version matches bindings/python/Cargo.toml"
           fi
-          
+
           # Check if this is a release candidate
           if [[ "$RELEASE_TAG" =~ -rc\.[0-9]+$ ]]; then
             IS_RC="true"
@@ -94,7 +94,7 @@ jobs:
             IS_RC="false"
             echo "This is a stable release"
           fi
-          
+
           # Set outputs for other jobs to use
           echo "cargo-version=$CARGO_VERSION" >> $GITHUB_OUTPUT
           echo "is-rc=$IS_RC" >> $GITHUB_OUTPUT
@@ -110,7 +110,7 @@ jobs:
       - name: Install toml-cli
         if: ${{ needs.validate-release-tag.outputs.is-rc == 'true' }}
         run: cargo install toml-cli
-      
+
       - name: Set cargo version for RC
         if: ${{ needs.validate-release-tag.outputs.is-rc == 'true' }}
         working-directory: "bindings/python"
@@ -159,7 +159,7 @@ jobs:
       - name: Install toml-cli
         if: ${{ needs.validate-release-tag.outputs.is-rc == 'true' }}
         run: cargo install toml-cli
-      
+
       - name: Set cargo version for RC
         if: ${{ needs.validate-release-tag.outputs.is-rc == 'true' }}
         working-directory: "bindings/python"

@@ -50,10 +50,14 @@
 //! - `new_output`: Create output file for writing.
 
 mod file_io;
+mod refreshable_accessor;
+mod refreshable_storage;
 mod storage;
+mod storage_credential;
 
 pub use file_io::*;
 pub use storage::*;
+pub use storage_credential::{MetadataLocation, StorageCredential, StorageCredentialsLoader};
 
 pub(crate) mod object_cache;
 

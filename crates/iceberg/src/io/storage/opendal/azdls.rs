@@ -19,57 +19,16 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::str::FromStr;
 
-use iceberg::io::{
-    ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID, ADLS_CLIENT_SECRET,
-    ADLS_CONNECTION_STRING, ADLS_ENDPOINT, ADLS_SAS_TOKEN, ADLS_TENANT_ID,
-};
-use iceberg::{Error, ErrorKind, Result};
 use opendal::Configurator;
 use opendal::services::AzdlsConfig;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::utils::from_opendal_error;
-
-/// Local version of `ensure_data_valid` macro since the iceberg crate's macro
-/// uses `$crate::error::Error` paths that don't resolve from external crates
-/// (the `error` module is private).
-macro_rules! ensure_data_valid {
-    ($cond:expr, $fmt:literal, $($arg:tt)*) => {
-        if !$cond {
-            return Err(Error::new(ErrorKind::DataInvalid, format!($fmt, $($arg)*)));
-        }
-    };
-}
-
-/// Finds the appropriate SAS token from properties based on account name.
-///
-/// Strategy:
-/// 1. If account name is known, search for keys matching `adls.sas-token.<account_name>` prefix
-/// 2. If not found, fall back to searching for keys matching `adls.sas-token` prefix
-/// 3. Return the shortest matching key (least specific)
-/// 4. Trim leading '?' from the token if present
-fn find_sas_token(
-    properties: &HashMap<String, String>,
-    account_name: Option<&str>,
-) -> Option<String> {
-    let find_with_prefix = |prefix: &str| {
-        properties
-            .iter()
-            .filter(|(key, _)| key.as_str() == prefix || key.starts_with(&format!("{prefix}.")))
-            .min_by_key(|(key, _)| key.len())
-            .map(|(_, value)| value.strip_prefix('?').unwrap_or(value).to_string())
-    };
-
-    if let Some(account) = account_name {
-        let account_prefix = format!("{ADLS_SAS_TOKEN}.{account}");
-        if let Some(token) = find_with_prefix(&account_prefix) {
-            return Some(token);
-        }
-    }
-
-    find_with_prefix(ADLS_SAS_TOKEN)
-}
+use super::super::config::{
+    ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID, ADLS_CLIENT_SECRET,
+    ADLS_CONNECTION_STRING, ADLS_ENDPOINT, ADLS_TENANT_ID, find_sas_token,
+};
+use crate::{Error, ErrorKind, Result, ensure_data_valid};
 
 /// Parses adls.* prefixed configuration properties.
 pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Result<AzdlsConfig> {
@@ -124,9 +83,10 @@ pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Res
 pub(crate) fn azdls_create_operator<'a>(
     absolute_path: &'a str,
     config: &AzdlsConfig,
+    configured_scheme: &AzureStorageScheme,
 ) -> Result<(opendal::Operator, &'a str)> {
     let path = absolute_path.parse::<AzureStoragePath>()?;
-    match_path_with_config(&path, config)?;
+    match_path_with_config(&path, config, configured_scheme)?;
 
     let op = azdls_config_build(config, &path)?;
 
@@ -192,7 +152,18 @@ impl FromStr for AzureStorageScheme {
 }
 
 /// Validates whether the given path matches what's configured for the backend.
-pub(crate) fn match_path_with_config(path: &AzureStoragePath, config: &AzdlsConfig) -> Result<()> {
+fn match_path_with_config(
+    path: &AzureStoragePath,
+    config: &AzdlsConfig,
+    configured_scheme: &AzureStorageScheme,
+) -> Result<()> {
+    ensure_data_valid!(
+        &path.scheme == configured_scheme,
+        "Storage::Azdls: Scheme mismatch: configured {}, passed {}",
+        configured_scheme,
+        path.scheme
+    );
+
     if let Some(ref configured_account_name) = config.account_name {
         ensure_data_valid!(
             &path.account_name == configured_account_name,
@@ -239,14 +210,12 @@ fn azdls_config_build(config: &AzdlsConfig, path: &AzureStoragePath) -> Result<o
     }
     builder = builder.filesystem(&path.filesystem);
 
-    Ok(opendal::Operator::new(builder)
-        .map_err(from_opendal_error)?
-        .finish())
+    Ok(opendal::Operator::new(builder)?.finish())
 }
 
 /// Represents a fully qualified path to blob/ file in Azure Storage.
 #[derive(Debug, PartialEq)]
-pub(crate) struct AzureStoragePath {
+struct AzureStoragePath {
     /// The scheme of the URL, e.g., `abfss`, `abfs`, `wasbs`, or `wasb`.
     scheme: AzureStorageScheme,
 
@@ -262,7 +231,7 @@ pub(crate) struct AzureStoragePath {
     /// Path to the file.
     ///
     /// It is relative to the `root` of the `AzdlsConfig`.
-    pub(crate) path: String,
+    path: String,
 }
 
 impl AzureStoragePath {
@@ -344,7 +313,7 @@ fn validate_storage_and_scheme(
     // always use abfs in URL, regardless of the endpoint.
     ensure_data_valid!(
         storage_service == "dfs" || storage_service == "blob",
-        "AzureStoragePath: Unexpected storage service: {}",
+        "AzureStoragePath: Unexpected storage service for abfs[s]: {}",
         storage_service
     );
     Ok(scheme)
@@ -357,6 +326,7 @@ mod tests {
     use opendal::services::AzdlsConfig;
 
     use super::{AzureStoragePath, AzureStorageScheme, azdls_config_parse, azdls_create_operator};
+    use crate::io::storage::config::ADLS_SAS_TOKEN;
 
     #[test]
     fn test_azdls_config_parse() {
@@ -370,34 +340,6 @@ mod tests {
                 Some(AzdlsConfig {
                     account_name: Some("test".to_string()),
                     account_key: Some("secret".to_string()),
-                    ..Default::default()
-                }),
-            ),
-            (
-                "account name and SAS token",
-                HashMap::from([
-                    (super::ADLS_ACCOUNT_NAME.to_string(), "test".to_string()),
-                    (super::ADLS_SAS_TOKEN.to_string(), "token".to_string()),
-                ]),
-                Some(AzdlsConfig {
-                    account_name: Some("test".to_string()),
-                    sas_token: Some("token".to_string()),
-                    ..Default::default()
-                }),
-            ),
-            (
-                "account name and ADD credentials",
-                HashMap::from([
-                    (super::ADLS_ACCOUNT_NAME.to_string(), "test".to_string()),
-                    (super::ADLS_CLIENT_ID.to_string(), "abcdef".to_string()),
-                    (super::ADLS_CLIENT_SECRET.to_string(), "secret".to_string()),
-                    (super::ADLS_TENANT_ID.to_string(), "12345".to_string()),
-                ]),
-                Some(AzdlsConfig {
-                    account_name: Some("test".to_string()),
-                    client_id: Some("abcdef".to_string()),
-                    client_secret: Some("secret".to_string()),
-                    tenant_id: Some("12345".to_string()),
                     ..Default::default()
                 }),
             ),
@@ -422,6 +364,34 @@ mod tests {
                 }),
             ),
             (
+                "account name and SAS token",
+                HashMap::from([
+                    (super::ADLS_ACCOUNT_NAME.to_string(), "test".to_string()),
+                    (ADLS_SAS_TOKEN.to_string(), "token".to_string()),
+                ]),
+                Some(AzdlsConfig {
+                    account_name: Some("test".to_string()),
+                    sas_token: Some("token".to_string()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "account name and ADD credentials",
+                HashMap::from([
+                    (super::ADLS_ACCOUNT_NAME.to_string(), "test".to_string()),
+                    (super::ADLS_CLIENT_ID.to_string(), "abcdef".to_string()),
+                    (super::ADLS_CLIENT_SECRET.to_string(), "secret".to_string()),
+                    (super::ADLS_TENANT_ID.to_string(), "12345".to_string()),
+                ]),
+                Some(AzdlsConfig {
+                    account_name: Some("test".to_string()),
+                    client_id: Some("abcdef".to_string()),
+                    client_secret: Some("secret".to_string()),
+                    tenant_id: Some("12345".to_string()),
+                    ..Default::default()
+                }),
+            ),
+            (
                 "account-specific SAS token with full domain",
                 HashMap::from([
                     (
@@ -439,7 +409,7 @@ mod tests {
                 ]),
                 Some(AzdlsConfig {
                     account_name: Some("azteststorage".to_string()),
-                    sas_token: Some("token-account".to_string()), // shorter key wins
+                    sas_token: Some("token-account".to_string()), // Should pick the shorter one
                     ..Default::default()
                 }),
             ),
@@ -462,19 +432,20 @@ mod tests {
                 }),
             ),
             (
-                "generic SAS token picked when no account name",
+                "SAS token without account name picks shortest",
                 HashMap::from([
-                    (
-                        super::ADLS_SAS_TOKEN.to_string(),
-                        "token-generic".to_string(),
-                    ),
+                    (ADLS_SAS_TOKEN.to_string(), "token-generic".to_string()),
                     (
                         "adls.sas-token.someaccount".to_string(),
                         "token-account".to_string(),
                     ),
+                    (
+                        "adls.sas-token.someaccount.blob.core.windows.net".to_string(),
+                        "token-specific".to_string(),
+                    ),
                 ]),
                 Some(AzdlsConfig {
-                    sas_token: Some("token-generic".to_string()), // shortest key wins
+                    sas_token: Some("token-generic".to_string()), // Should pick the shortest one
                     ..Default::default()
                 }),
             ),
@@ -506,6 +477,7 @@ mod tests {
                         endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfss,
                 ),
                 Some(("myfs", "/path/to/file.parquet")),
             ),
@@ -518,19 +490,33 @@ mod tests {
                         endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfss,
+                ),
+                None,
+            ),
+            (
+                "different scheme",
+                (
+                    "wasbs://myfs@myaccount.dfs.core.windows.net/path/to/file.parquet",
+                    AzdlsConfig {
+                        account_name: Some("myaccount".to_string()),
+                        endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
+                        ..Default::default()
+                    },
+                    AzureStorageScheme::Abfss,
                 ),
                 None,
             ),
             (
                 "incompatible scheme for endpoint",
                 (
-                    // `abfss` implies https; configured endpoint is plain http.
-                    "abfss://myfs@myaccount.dfs.core.windows.net/path/to/file.parquet",
+                    "abfs://myfs@myaccount.dfs.core.windows.net/path/to/file.parquet",
                     AzdlsConfig {
                         account_name: Some("myaccount".to_string()),
                         endpoint: Some("http://myaccount.dfs.core.windows.net".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfss,
                 ),
                 None,
             ),
@@ -543,6 +529,7 @@ mod tests {
                         endpoint: Some("https://myaccount.dfs.core.chinacloudapi.cn".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfss,
                 ),
                 None,
             ),
@@ -556,20 +543,7 @@ mod tests {
                         endpoint: None,
                         ..Default::default()
                     },
-                ),
-                Some(("myfs", "/path/to/file.parquet")),
-            ),
-            (
-                "scheme differs from a previously-configured one is accepted",
-                (
-                    // No configured scheme exists anymore; both abfss and wasbs
-                    // should be accepted by the same storage.
-                    "wasbs://myfs@myaccount.blob.core.windows.net/path/to/file.parquet",
-                    AzdlsConfig {
-                        account_name: Some("myaccount".to_string()),
-                        endpoint: Some("https://myaccount.blob.core.windows.net".to_string()),
-                        ..Default::default()
-                    },
+                    AzureStorageScheme::Abfs,
                 ),
                 Some(("myfs", "/path/to/file.parquet")),
             ),
@@ -590,7 +564,7 @@ mod tests {
         ];
 
         for (name, input, expected) in test_cases {
-            let result = azdls_create_operator(input.0, &input.1);
+            let result = azdls_create_operator(input.0, &input.1, &input.2);
             match expected {
                 Some((expected_filesystem, expected_path)) => {
                     assert!(result.is_ok(), "Test case {name} failed: {result:?}");

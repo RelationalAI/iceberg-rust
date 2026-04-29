@@ -47,10 +47,21 @@ enum PosDelState {
 }
 
 #[derive(Debug, Default)]
-struct DeleteFileFilterState {
+pub(crate) struct DeleteFileFilterState {
     delete_vectors: HashMap<String, Arc<Mutex<DeleteVector>>>,
     equality_deletes: HashMap<String, EqDelState>,
     positional_deletes: HashMap<String, PosDelState>,
+}
+
+impl DeleteFileFilterState {
+    pub fn delete_vectors(&self) -> &HashMap<String, Arc<Mutex<DeleteVector>>> {
+        &self.delete_vectors
+    }
+
+    /// Remove and return the delete vector for the given data file path.
+    pub fn remove_delete_vector(&mut self, path: &str) -> Option<Arc<Mutex<DeleteVector>>> {
+        self.delete_vectors.remove(path)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -88,6 +99,28 @@ impl DeleteFilter {
             .read()
             .ok()
             .and_then(|st| st.delete_vectors.get(data_file_path).cloned())
+    }
+
+    pub(crate) fn with_read<F, G>(&self, f: F) -> Result<G>
+    where F: FnOnce(&DeleteFileFilterState) -> Result<G> {
+        let state = self.state.read().map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                format!("Failed to acquire read lock: {e}"),
+            )
+        })?;
+        f(&state)
+    }
+
+    pub(crate) fn with_write<F, G>(&self, f: F) -> Result<G>
+    where F: FnOnce(&mut DeleteFileFilterState) -> Result<G> {
+        let mut state = self.state.write().map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                format!("Failed to acquire write lock: {e}"),
+            )
+        })?;
+        f(&mut state)
     }
 
     pub(crate) fn try_start_eq_del_load(&self, file_path: &str) -> Option<Arc<Notify>> {
@@ -171,22 +204,15 @@ impl DeleteFilter {
         }
     }
 
-    /// Builds eq delete predicate for the provided task.
-    pub(crate) async fn build_equality_delete_predicate(
+    /// Builds combined predicate from a list of equality delete files.
+    /// Retrieves predicates for each file, combines them with AND logic.
+    pub(crate) async fn build_combined_equality_delete_predicate(
         &self,
-        file_scan_task: &FileScanTask,
-    ) -> Result<Option<BoundPredicate>> {
-        // * Filter the task's deletes into just the Equality deletes
-        // * Retrieve the unbound predicate for each from self.state.equality_deletes
-        // * Logical-AND them all together to get a single combined `Predicate`
-        // * Bind the predicate to the task's schema to get a `BoundPredicate`
-
+        equality_delete_files: &[FileScanTaskDeleteFile],
+    ) -> Result<Option<Predicate>> {
         let mut combined_predicate = AlwaysTrue;
-        for delete in &file_scan_task.deletes {
-            if !is_equality_delete(delete) {
-                continue;
-            }
 
+        for delete in equality_delete_files {
             let Some(predicate) = self
                 .get_equality_delete_predicate_for_delete_file_path(&delete.file_path)
                 .await
@@ -206,6 +232,33 @@ impl DeleteFilter {
         if combined_predicate == AlwaysTrue {
             return Ok(None);
         }
+
+        Ok(Some(combined_predicate))
+    }
+
+    /// Builds eq delete predicate for the provided task.
+    pub(crate) async fn build_equality_delete_predicate(
+        &self,
+        file_scan_task: &FileScanTask,
+    ) -> Result<Option<BoundPredicate>> {
+        // Filter the task's deletes into just the Equality deletes
+        let equality_deletes: Vec<FileScanTaskDeleteFile> = file_scan_task
+            .deletes
+            .iter()
+            .filter(|delete| is_equality_delete(delete))
+            .cloned()
+            .collect();
+
+        if equality_deletes.is_empty() {
+            return Ok(None);
+        }
+
+        let Some(combined_predicate) = self
+            .build_combined_equality_delete_predicate(&equality_deletes)
+            .await?
+        else {
+            return Ok(None);
+        };
 
         let bound_predicate = combined_predicate
             .bind(file_scan_task.schema.clone(), file_scan_task.case_sensitive)?;

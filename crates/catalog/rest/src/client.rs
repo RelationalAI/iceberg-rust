@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use http::StatusCode;
 use iceberg::{Error, ErrorKind, Result};
@@ -27,6 +28,17 @@ use tokio::sync::Mutex;
 
 use crate::RestCatalogConfig;
 use crate::types::{ErrorResponse, TokenResponse};
+
+/// Trait for custom token authentication.
+///
+/// Implement this trait to provide custom token generation/refresh logic
+/// instead of using OAuth credentials.
+#[async_trait::async_trait]
+pub trait CustomAuthenticator: Send + Sync + Debug {
+    /// Get or refresh the authentication token.
+    /// Called when the client needs a token for authentication.
+    async fn get_token(&self) -> Result<String>;
+}
 
 pub(crate) struct HttpClient {
     client: Client,
@@ -39,6 +51,8 @@ pub(crate) struct HttpClient {
     token_endpoint: String,
     /// The credential to be used for authentication.
     credential: Option<(Option<String>, String)>,
+    /// Custom token authenticator (takes precedence over credential/token)
+    authenticator: Option<Arc<dyn CustomAuthenticator>>,
     /// Extra headers to be added to each request.
     extra_headers: HeaderMap,
     /// Extra oauth parameters to be added to each authentication request.
@@ -65,6 +79,7 @@ impl HttpClient {
             token: Mutex::new(cfg.token()),
             token_endpoint: cfg.get_token_endpoint(),
             credential: cfg.credential(),
+            authenticator: None,
             extra_headers,
             extra_oauth_params: cfg.extra_oauth_params(),
             disable_header_redaction: cfg.disable_header_redaction(),
@@ -89,6 +104,7 @@ impl HttpClient {
                 self.token_endpoint
             },
             credential: cfg.credential().or(self.credential),
+            authenticator: self.authenticator,
             extra_headers,
             extra_oauth_params: if !cfg.extra_oauth_params().is_empty() {
                 cfg.extra_oauth_params()
@@ -178,6 +194,27 @@ impl HttpClient {
         Ok(auth_res.access_token)
     }
 
+    /// Set a custom token authenticator.
+    ///
+    /// When set, the authenticator will be called to get tokens instead of using
+    /// static tokens or OAuth credentials. This allows for custom token management
+    /// such as reading from files, APIs, or other custom sources.
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn CustomAuthenticator>) -> Self {
+        self.authenticator = Some(authenticator);
+        self
+    }
+
+    /// Add bearer token to request authorization header.
+    fn set_bearer_token(req: &mut Request, token: &str, error_msg: &str) -> Result<()> {
+        req.headers_mut().insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|e| Error::new(ErrorKind::DataInvalid, error_msg).with_source(e))?,
+        );
+        Ok(())
+    }
+
     /// Invalidate the current token without generating a new one. On the next request, the client
     /// will attempt to generate a new token.
     pub(crate) async fn invalidate_token(&self) -> Result<()> {
@@ -199,18 +236,26 @@ impl HttpClient {
 
     /// Authenticates the request by adding a bearer token to the authorization header.
     ///
-    /// This method supports three authentication modes:
+    /// This method supports four authentication modes (in order of precedence):
     ///
-    /// 1. **No authentication** - Skip authentication when both `credential` and `token` are missing.
-    /// 2. **Token authentication** - Use the provided `token` directly for authentication.
-    /// 3. **OAuth authentication** - Exchange `credential` for a token, cache it, then use it for authentication.
+    /// 1. **Custom authenticator** - If set, use the custom CustomAuthenticator to get tokens.
+    /// 2. **Token authentication** - Use the provided static `token` directly.
+    /// 3. **OAuth authentication** - Exchange `credential` for a token, cache it, then use it.
+    /// 4. **No authentication** - Skip authentication when none of the above are available.
     ///
-    /// When both `credential` and `token` are present, `token` takes precedence.
-    ///
-    /// # TODO: Support automatic token refreshing.
+    /// When an authenticator is provided, it takes precedence over static tokens and credentials.
     async fn authenticate(&self, req: &mut Request) -> Result<()> {
+        // Try authenticator first (highest priority)
+        if let Some(authenticator) = &self.authenticator {
+            let token = authenticator.get_token().await?;
+            // Cache the token so that subsequent requests can use it without calling the authenticator
+            *self.token.lock().await = Some(token.clone());
+            Self::set_bearer_token(req, &token, "Invalid custom token")?;
+            return Ok(());
+        }
+
         // Clone the token from lock without holding the lock for entire function.
-        let token = self.token.lock().await.clone();
+        let token: Option<String> = self.token.lock().await.clone();
 
         if self.credential.is_none() && token.is_none() {
             return Ok(());
@@ -228,18 +273,7 @@ impl HttpClient {
             }
         };
 
-        // Insert token in request.
-        req.headers_mut().insert(
-            http::header::AUTHORIZATION,
-            format!("Bearer {token}").parse().map_err(|e| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    "Invalid token received from catalog server!",
-                )
-                .with_source(e)
-            })?,
-        );
-
+        Self::set_bearer_token(req, &token, "Invalid token received from catalog server!")?;
         Ok(())
     }
 
@@ -256,11 +290,56 @@ impl HttpClient {
         Ok(self.client.execute(request).await?)
     }
 
-    // Queries the Iceberg REST catalog after authentication with the given `Request` and
-    // returns a `Response`.
+    // Queries the Iceberg REST catalog with authentication and returns a `Response`.
+    //
+    // For custom authenticators:
+    // - On the first request, fetches a token from the authenticator and caches it.
+    // - On subsequent requests, reuses the cached token without calling the authenticator.
+    // - If a request returns 401/403, invalidates the cache and fetches a fresh token.
+    //
+    // For other authentication methods (static token, OAuth credentials), authentication
+    // is applied to all requests as before.
     pub async fn query_catalog(&self, mut request: Request) -> Result<Response> {
-        self.authenticate(&mut request).await?;
-        self.execute(request).await
+        if self.authenticator.is_some() {
+            // For custom authenticators, use cached token if available
+            let token_is_set = self.token.lock().await.is_some();
+
+            if token_is_set {
+                // We have a cached token, use it by applying the cached authorization
+                // without calling the authenticator again
+                let cached_token = self.token.lock().await.clone();
+                if let Some(token) = cached_token {
+                    HttpClient::set_bearer_token(&mut request, &token, "Invalid cached token")?;
+                }
+            } else {
+                // No cached token, fetch one from the authenticator
+                self.authenticate(&mut request).await?;
+            }
+
+            // Send request with authentication
+            let response =
+                self.execute(request.try_clone().ok_or_else(|| {
+                    Error::new(ErrorKind::DataInvalid, "Unable to clone request")
+                })?)
+                .await?;
+
+            // Check if we got a permission denied error
+            if matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ) {
+                // Token was rejected, invalidate and get a fresh one from the authenticator
+                self.invalidate_token().await?;
+                self.authenticate(&mut request).await?;
+                return self.execute(request).await;
+            }
+
+            Ok(response)
+        } else {
+            // Other auth methods: authenticate on every request
+            self.authenticate(&mut request).await?;
+            self.execute(request).await
+        }
     }
 
     /// Returns whether header redaction is disabled for this client.

@@ -18,6 +18,7 @@
 //! This module contains the iceberg REST catalog implementation.
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -33,17 +34,19 @@ use itertools::Itertools;
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, {self},
 };
-use reqwest::{Client, Method, StatusCode, Url};
+use reqwest::{Client, Method, StatusCode};
 use tokio::sync::OnceCell;
 use typed_builder::TypedBuilder;
 
 use crate::client::{
-    HttpClient, deserialize_catalog_response, deserialize_unexpected_catalog_error,
+    CustomAuthenticator, HttpClient, deserialize_catalog_response,
+    deserialize_unexpected_catalog_error,
 };
 use crate::types::{
     CatalogConfig, CommitTableRequest, CommitTableResponse, CreateNamespaceRequest,
-    CreateTableRequest, ListNamespaceResponse, ListTablesResponse, LoadTableResult,
-    NamespaceResponse, RegisterTableRequest, RenameTableRequest,
+    CreateTableRequest, ListNamespaceResponse, ListTablesResponse, LoadCredentialsResponse,
+    LoadTableResult, NamespaceResponse, RegisterTableRequest, RenameTableRequest,
+    StorageCredential,
 };
 
 /// REST catalog URI
@@ -73,6 +76,7 @@ impl Default for RestCatalogBuilder {
                 warehouse: None,
                 props: HashMap::new(),
                 client: None,
+                authenticator: None,
             },
             storage_factory: None,
         }
@@ -137,6 +141,24 @@ impl RestCatalogBuilder {
         self.config.client = Some(client);
         self
     }
+
+    /// Set a custom token authenticator.
+    ///
+    /// The authenticator will be used to obtain tokens instead of using static tokens
+    /// or OAuth credentials.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let authenticator = Arc::new(MyAuthenticator::new());
+    /// let catalog = RestCatalogBuilder::default()
+    ///     .with_token_authenticator(authenticator)
+    ///     .load("rest", config)
+    ///     .await?;
+    /// ```
+    pub fn with_token_authenticator(mut self, authenticator: Arc<dyn CustomAuthenticator>) -> Self {
+        self.config.authenticator = Some(authenticator);
+        self
+    }
 }
 
 /// Rest catalog configuration.
@@ -155,6 +177,9 @@ pub(crate) struct RestCatalogConfig {
 
     #[builder(default)]
     client: Option<Client>,
+
+    #[builder(default)]
+    authenticator: Option<Arc<dyn CustomAuthenticator>>,
 }
 
 impl RestCatalogConfig {
@@ -396,7 +421,13 @@ impl RestCatalog {
     async fn context(&self) -> Result<&RestContext> {
         self.ctx
             .get_or_try_init(|| async {
-                let client = HttpClient::new(&self.user_config)?;
+                let mut client = HttpClient::new(&self.user_config)?;
+
+                // Set authenticator if one was configured
+                if let Some(authenticator) = &self.user_config.authenticator {
+                    client = client.with_authenticator(authenticator.clone());
+                }
+
                 let catalog_config = RestCatalog::load_config(&client, &self.user_config).await?;
                 let config = self.user_config.clone().merge_with_config(catalog_config);
                 let client = client.update_with(&config)?;
@@ -437,41 +468,29 @@ impl RestCatalog {
         &self,
         metadata_location: Option<&str>,
         extra_config: Option<HashMap<String, String>>,
+        table_ident: Option<&TableIdent>,
     ) -> Result<FileIO> {
         let mut props = self.context().await?.config.props.clone();
         if let Some(config) = extra_config {
             props.extend(config);
         }
 
-        // If the warehouse is a logical identifier instead of a URL we don't want
-        // to raise an exception
-        let warehouse_path = match self.context().await?.config.warehouse.as_deref() {
-            Some(url) if Url::parse(url).is_ok() => Some(url),
-            Some(_) => None,
-            None => None,
-        };
-
-        if metadata_location.or(warehouse_path).is_none() {
-            return Err(Error::new(
+        let factory = self.storage_factory.clone().ok_or_else(|| {
+            Error::new(
                 ErrorKind::Unexpected,
-                "Unable to load file io, neither warehouse nor metadata location is set!",
-            ));
+                "StorageFactory must be provided for RestCatalog. Use `with_storage_factory` to configure it.",
+            )
+        })?;
+
+        let mut builder = FileIOBuilder::new(factory).with_props(props);
+        if let Some(location) = metadata_location {
+            builder = builder.with_location(location);
+        }
+        if let Some(ident) = table_ident {
+            builder = builder.with_table_ident(ident.clone());
         }
 
-        // Require a StorageFactory to be provided
-        let factory = self
-            .storage_factory
-            .clone()
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    "StorageFactory must be provided for RestCatalog. Use `with_storage_factory` to configure it.",
-                )
-            })?;
-
-        let file_io = FileIOBuilder::new(factory).with_props(props).build();
-
-        Ok(file_io)
+        Ok(builder.build())
     }
 
     /// Invalidate the current token without generating a new one. On the next request, the client
@@ -488,6 +507,264 @@ impl RestCatalog {
     /// the current token unchanged.
     pub async fn regenerate_token(&self) -> Result<()> {
         self.context().await?.client.regenerate_token().await
+    }
+
+    /// Resolve catalog-vended storage credentials into the config HashMap.
+    ///
+    /// Finds the best-match credential by prefix from the catalog response and merges
+    /// it into `config`. If no vended credentials are present, config is unchanged.
+    fn resolve_storage_credentials(
+        &self,
+        metadata_location: Option<&String>,
+        storage_credentials: Option<Vec<StorageCredential>>,
+        config: &mut HashMap<String, String>,
+    ) {
+        let Some(storage_credentials) = storage_credentials else {
+            return;
+        };
+
+        // Find the credential with the longest prefix that matches the metadata_location
+        let mut best_match: Option<&StorageCredential> = None;
+        let mut longest_prefix_len = 0;
+
+        if let Some(metadata_location) = metadata_location {
+            for cred in &storage_credentials {
+                if metadata_location.starts_with(&cred.prefix)
+                    && cred.prefix.len() > longest_prefix_len
+                {
+                    longest_prefix_len = cred.prefix.len();
+                    best_match = Some(cred);
+                }
+            }
+        }
+
+        if let Some(cred) = best_match {
+            config.extend(cred.config.clone());
+        }
+    }
+
+    /// The actual logic for loading table, that supports loading vended credentials if requested.
+    async fn load_table_internal(
+        &self,
+        table_ident: &TableIdent,
+        load_credentials: bool,
+    ) -> Result<Table> {
+        let context = self.context().await?;
+
+        let mut request_builder = context
+            .client
+            .request(Method::GET, context.config.table_endpoint(table_ident));
+
+        if load_credentials {
+            request_builder =
+                request_builder.header("X-Iceberg-Access-Delegation", "vended-credentials");
+        }
+
+        let request = request_builder.build()?;
+
+        let http_response = context.client.query_catalog(request).await?;
+
+        let response = match http_response.status() {
+            StatusCode::OK | StatusCode::NOT_MODIFIED => {
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
+            }
+            StatusCode::NOT_FOUND => {
+                return Err(Error::new(
+                    ErrorKind::TableNotFound,
+                    "Tried to load a table that does not exist",
+                ));
+            }
+            _ => {
+                return Err(deserialize_unexpected_catalog_error(
+                    http_response,
+                    context.client.disable_header_redaction(),
+                )
+                .await);
+            }
+        };
+
+        // Build config with proper precedence, with each next config overriding previous one:
+        // 1. response.config (server defaults)
+        // 2. user_config.props (user configuration)
+        // 3. storage_credentials (vended credentials - highest priority)
+        let mut config: HashMap<String, String> = response
+            .config
+            .into_iter()
+            .chain(self.user_config.props.clone())
+            .collect();
+
+        self.resolve_storage_credentials(
+            response.metadata_location.as_ref(),
+            response.storage_credentials,
+            &mut config,
+        );
+
+        let file_io = self
+            .load_file_io(
+                response.metadata_location.as_deref(),
+                Some(config),
+                Some(table_ident),
+            )
+            .await?;
+
+        let table_builder = Table::builder()
+            .identifier(table_ident.clone())
+            .file_io(file_io)
+            .metadata(response.metadata);
+
+        if let Some(metadata_location) = response.metadata_location {
+            table_builder.metadata_location(metadata_location).build()
+        } else {
+            table_builder.build()
+        }
+    }
+
+    /// Load vended credentials for a table from the catalog.
+    pub async fn load_table_credentials(
+        &self,
+        table_ident: &TableIdent,
+    ) -> Result<LoadCredentialsResponse> {
+        let context = self.context().await?;
+
+        let endpoint = format!("{}/credentials", context.config.table_endpoint(table_ident));
+
+        let request = context.client.request(Method::GET, endpoint).build()?;
+
+        let http_response = context.client.query_catalog(request).await?;
+
+        match http_response.status() {
+            StatusCode::OK => deserialize_catalog_response(http_response).await,
+            StatusCode::NOT_FOUND => Err(Error::new(
+                ErrorKind::Unexpected,
+                "Tried to load credentials for a table that does not exist",
+            )),
+            _ => Err(deserialize_unexpected_catalog_error(
+                http_response,
+                context.client.disable_header_redaction(),
+            )
+            .await),
+        }
+    }
+
+    /// Load a table with vended credentials from the catalog.
+    ///
+    /// This method loads the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
+        self.load_table_internal(table_ident, true).await
+    }
+
+    /// Internal method to create a table with optional credential vending.
+    async fn create_table_internal(
+        &self,
+        namespace: &NamespaceIdent,
+        creation: TableCreation,
+        load_credentials: bool,
+    ) -> Result<Table> {
+        let context = self.context().await?;
+
+        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
+
+        let mut request_builder = context
+            .client
+            .request(Method::POST, context.config.tables_endpoint(namespace))
+            .json(&CreateTableRequest {
+                name: creation.name,
+                location: creation.location,
+                schema: creation.schema,
+                partition_spec: creation.partition_spec,
+                write_order: creation.sort_order,
+                stage_create: Some(false),
+                properties: creation.properties,
+            });
+
+        if load_credentials {
+            request_builder =
+                request_builder.header("X-Iceberg-Access-Delegation", "vended-credentials");
+        }
+
+        let request = request_builder.build()?;
+
+        let http_response = context.client.query_catalog(request).await?;
+
+        let response = match http_response.status() {
+            StatusCode::OK => {
+                deserialize_catalog_response::<LoadTableResult>(http_response).await?
+            }
+            StatusCode::NOT_FOUND => {
+                return Err(Error::new(
+                    ErrorKind::NamespaceNotFound,
+                    "Tried to create a table under a namespace that does not exist",
+                ));
+            }
+            StatusCode::CONFLICT => {
+                return Err(Error::new(
+                    ErrorKind::TableAlreadyExists,
+                    "The table already exists",
+                ));
+            }
+            _ => {
+                return Err(deserialize_unexpected_catalog_error(
+                    http_response,
+                    context.client.disable_header_redaction(),
+                )
+                .await);
+            }
+        };
+
+        let _metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
+            ErrorKind::DataInvalid,
+            "Metadata location missing in `create_table` response!",
+        ))?;
+
+        // Build config with proper precedence, with each next config overriding previous one:
+        // 1. response.config (server defaults)
+        // 2. user_config.props (user configuration)
+        // 3. storage_credentials (vended credentials - highest priority)
+        let mut config: HashMap<String, String> = response
+            .config
+            .into_iter()
+            .chain(self.user_config.props.clone())
+            .collect();
+
+        self.resolve_storage_credentials(
+            response.metadata_location.as_ref(),
+            response.storage_credentials,
+            &mut config,
+        );
+
+        let file_io = self
+            .load_file_io(
+                response.metadata_location.as_deref(),
+                Some(config),
+                Some(&table_ident),
+            )
+            .await?;
+
+        let table_builder = Table::builder()
+            .identifier(table_ident.clone())
+            .file_io(file_io)
+            .metadata(response.metadata);
+
+        if let Some(metadata_location) = response.metadata_location {
+            table_builder.metadata_location(metadata_location).build()
+        } else {
+            table_builder.build()
+        }
+    }
+
+    /// Create a table with vended credentials from the catalog.
+    ///
+    /// This method creates the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn create_table_with_credentials(
+        &self,
+        namespace: &NamespaceIdent,
+        creation: TableCreation,
+    ) -> Result<Table> {
+        self.create_table_internal(namespace, creation, true).await
     }
 }
 
@@ -727,76 +1004,7 @@ impl Catalog for RestCatalog {
         namespace: &NamespaceIdent,
         creation: TableCreation,
     ) -> Result<Table> {
-        let context = self.context().await?;
-
-        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
-
-        let request = context
-            .client
-            .request(Method::POST, context.config.tables_endpoint(namespace))
-            .json(&CreateTableRequest {
-                name: creation.name,
-                location: creation.location,
-                schema: creation.schema,
-                partition_spec: creation.partition_spec,
-                write_order: creation.sort_order,
-                stage_create: Some(false),
-                properties: creation.properties,
-            })
-            .build()?;
-
-        let http_response = context.client.query_catalog(request).await?;
-
-        let response = match http_response.status() {
-            StatusCode::OK => {
-                deserialize_catalog_response::<LoadTableResult>(http_response).await?
-            }
-            StatusCode::NOT_FOUND => {
-                return Err(Error::new(
-                    ErrorKind::NamespaceNotFound,
-                    "Tried to create a table under a namespace that does not exist",
-                ));
-            }
-            StatusCode::CONFLICT => {
-                return Err(Error::new(
-                    ErrorKind::TableAlreadyExists,
-                    "The table already exists",
-                ));
-            }
-            _ => {
-                return Err(deserialize_unexpected_catalog_error(
-                    http_response,
-                    context.client.disable_header_redaction(),
-                )
-                .await);
-            }
-        };
-
-        let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
-            ErrorKind::DataInvalid,
-            "Metadata location missing in `create_table` response!",
-        ))?;
-
-        let config = response
-            .config
-            .into_iter()
-            .chain(self.user_config.props.clone())
-            .collect();
-
-        let file_io = self
-            .load_file_io(Some(metadata_location), Some(config))
-            .await?;
-
-        let table_builder = Table::builder()
-            .identifier(table_ident.clone())
-            .file_io(file_io)
-            .metadata(response.metadata);
-
-        if let Some(metadata_location) = response.metadata_location {
-            table_builder.metadata_location(metadata_location).build()
-        } else {
-            table_builder.build()
-        }
+        self.create_table_internal(namespace, creation, false).await
     }
 
     /// Load table from the catalog.
@@ -805,54 +1013,7 @@ impl Catalog for RestCatalog {
     /// server and the config provided when creating this `RestCatalog` instance, then the value
     /// provided locally to the `RestCatalog` will take precedence.
     async fn load_table(&self, table_ident: &TableIdent) -> Result<Table> {
-        let context = self.context().await?;
-
-        let request = context
-            .client
-            .request(Method::GET, context.config.table_endpoint(table_ident))
-            .build()?;
-
-        let http_response = context.client.query_catalog(request).await?;
-
-        let response = match http_response.status() {
-            StatusCode::OK | StatusCode::NOT_MODIFIED => {
-                deserialize_catalog_response::<LoadTableResult>(http_response).await?
-            }
-            StatusCode::NOT_FOUND => {
-                return Err(Error::new(
-                    ErrorKind::TableNotFound,
-                    "Tried to load a table that does not exist",
-                ));
-            }
-            _ => {
-                return Err(deserialize_unexpected_catalog_error(
-                    http_response,
-                    context.client.disable_header_redaction(),
-                )
-                .await);
-            }
-        };
-
-        let config = response
-            .config
-            .into_iter()
-            .chain(self.user_config.props.clone())
-            .collect();
-
-        let file_io = self
-            .load_file_io(response.metadata_location.as_deref(), Some(config))
-            .await?;
-
-        let table_builder = Table::builder()
-            .identifier(table_ident.clone())
-            .file_io(file_io)
-            .metadata(response.metadata);
-
-        if let Some(metadata_location) = response.metadata_location {
-            table_builder.metadata_location(metadata_location).build()
-        } else {
-            table_builder.build()
-        }
+        self.load_table_internal(table_ident, false).await
     }
 
     /// Drop a table from the catalog.
@@ -975,7 +1136,10 @@ impl Catalog for RestCatalog {
             "Metadata location missing in `register_table` response!",
         ))?;
 
-        let file_io = self.load_file_io(Some(metadata_location), None).await?;
+        // TODO: Support vended credentials here.
+        let file_io = self
+            .load_file_io(Some(metadata_location), None, None)
+            .await?;
 
         Table::builder()
             .identifier(table_ident.clone())
@@ -1045,8 +1209,9 @@ impl Catalog for RestCatalog {
             }
         };
 
+        // TODO: Support vended credentials here.
         let file_io = self
-            .load_file_io(Some(&response.metadata_location), None)
+            .load_file_io(Some(&response.metadata_location), None, None)
             .await?;
 
         Table::builder()
@@ -1065,6 +1230,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
+    use futures::stream::StreamExt;
     use iceberg::io::LocalFsStorageFactory;
     use iceberg::spec::{
         FormatVersion, NestedField, NullOrder, Operation, PrimitiveType, Schema, Snapshot,
@@ -2906,5 +3072,212 @@ mod tests {
             assert_eq!(err.kind(), ErrorKind::DataInvalid);
             assert_eq!(err.message(), "Catalog uri is required");
         }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_load_table_credentials_integration() {
+        use std::env;
+
+        let client_id =
+            env::var("POLARIS_USER").expect("POLARIS_USER environment variable must be set");
+        let client_secret =
+            env::var("POLARIS_SECRET").expect("POLARIS_SECRET environment variable must be set");
+        let catalog_uri = env::var("POLARIS_URI")
+            .unwrap_or_else(|_| "http://localhost:8181/api/catalog".to_string());
+
+        let mut props = HashMap::new();
+        props.insert(
+            "credential".to_string(),
+            format!("{client_id}:{client_secret}"),
+        );
+        props.insert("scope".to_string(), "PRINCIPAL_ROLE:ALL".to_string());
+        props.insert(
+            "s3.endpoint".to_string(),
+            "http://localhost:9000".to_string(),
+        );
+
+        let catalog = RestCatalog::new(
+            RestCatalogConfig::builder()
+                .uri(catalog_uri)
+                .warehouse("warehouse".to_string())
+                .props(props)
+                .build(),
+            None,
+        );
+
+        let table_ident = TableIdent::new(
+            NamespaceIdent::new("tpch.sf01".to_string()),
+            "nation".to_string(),
+        );
+
+        let credentials_result = catalog.load_table_credentials(&table_ident).await;
+
+        match credentials_result {
+            Ok(credentials) => {
+                println!("Successfully loaded credentials");
+                println!(
+                    "Number of storage credentials: {}",
+                    credentials.storage_credentials.len()
+                );
+                // println!("Full response: {:#?}", credentials);
+                assert!(!credentials.storage_credentials.is_empty());
+            }
+            Err(e) => {
+                panic!("Failed to load table credentials: {e:?}");
+            }
+        }
+
+        // Also test loading table with vended credentials
+        println!("\n--- Testing load_table_with_credentials ---");
+        let table_result = catalog.load_table_with_credentials(&table_ident).await;
+
+        match table_result {
+            Ok(table) => {
+                println!("Successfully loaded table with vended credentials");
+                println!("Table identifier: {}", table.identifier());
+                println!("Metadata location: {:?}", table.metadata_location());
+                println!("FileIO configured with vended credentials");
+
+                // Scan the table and count rows
+                println!("\n--- Scanning table ---");
+                let scan = table.scan().build().expect("Failed to build scan");
+                let mut row_count = 0;
+
+                let mut stream = scan
+                    .to_arrow()
+                    .await
+                    .expect("Failed to create arrow stream");
+
+                while let Some(batch_result) = stream.next().await {
+                    match batch_result {
+                        Ok(batch) => {
+                            row_count += batch.num_rows();
+                            println!("  Batch: {} rows", batch.num_rows());
+                        }
+                        Err(e) => {
+                            panic!("Failed to read batch: {e:?}");
+                        }
+                    }
+                }
+
+                println!("Total rows scanned: {row_count}");
+                assert_eq!(row_count, 25, "Expected 25 rows in nation table");
+                println!("✓ Successfully verified 25 rows in table");
+            }
+            Err(e) => {
+                panic!("Failed to load table with vended credentials: {e:?}");
+            }
+        }
+
+        // Test loading table WITHOUT vended credentials and verify scan fails
+        println!("\n--- Testing load_table WITHOUT vended credentials (should fail) ---");
+        let table_result_no_creds = catalog.load_table(&table_ident).await;
+
+        match table_result_no_creds {
+            Ok(table) => {
+                println!("Successfully loaded table WITHOUT vended credentials");
+                println!("Table identifier: {}", table.identifier());
+                println!("Metadata location: {:?}", table.metadata_location());
+
+                // Try to scan the table - this should fail
+                println!("\n--- Attempting to scan table without credentials ---");
+                let scan = table.scan().build().expect("Failed to build scan");
+
+                // Try to create arrow stream - this should fail when accessing manifest list
+                match scan.to_arrow().await {
+                    Ok(_stream) => {
+                        panic!(
+                            "Stream creation succeeded without vended credentials - this should not happen!"
+                        );
+                    }
+                    Err(e) => {
+                        println!("✓ Scan failed as expected without vended credentials");
+                        println!("Error: {e}");
+                        // Verify it's a permission/authentication error
+                        let error_msg = e.to_string();
+                        assert!(
+                            error_msg.contains("PermissionDenied")
+                                && error_msg.contains("InvalidAccessKeyId")
+                                && error_msg.contains("403"),
+                            "Expected permission/authentication error, got: {error_msg}"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                panic!("Failed to load table without vended credentials: {e:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_table_with_refreshable_storage_factory() {
+        use iceberg::io::{RefreshableStorageFactory, StorageCredential, StorageCredentialsLoader};
+
+        #[derive(Debug)]
+        struct DummyCredentialLoader;
+
+        #[async_trait::async_trait]
+        impl StorageCredentialsLoader for DummyCredentialLoader {
+            async fn load_credentials(
+                &self,
+                _table_ident: &TableIdent,
+                _location: &str,
+            ) -> Result<StorageCredential> {
+                Ok(StorageCredential {
+                    prefix: "s3://".to_string(),
+                    config: HashMap::new(),
+                })
+            }
+        }
+
+        let mut server = Server::new_async().await;
+
+        let config_mock = create_config_mock(&mut server).await;
+
+        let load_table_mock = server
+            .mock("GET", "/v1/namespaces/ns1/tables/test1")
+            .with_status(200)
+            .with_body_from_file(format!(
+                "{}/testdata/{}",
+                env!("CARGO_MANIFEST_DIR"),
+                "load_table_response.json"
+            ))
+            .create_async()
+            .await;
+
+        let factory = Arc::new(RefreshableStorageFactory::new(Arc::new(
+            DummyCredentialLoader,
+        )));
+
+        let catalog = RestCatalog::new(
+            RestCatalogConfig::builder().uri(server.url()).build(),
+            Some(factory),
+        );
+
+        let expected_ident = TableIdent::from_strs(["ns1", "test1"]).unwrap();
+        let table = catalog.load_table(&expected_ident).await.unwrap();
+
+        assert_eq!(table.identifier(), &expected_ident);
+
+        // Verify that the FileIO was constructed with the correct runtime context so that
+        // RefreshableStorageFactory::build() will receive it when first invoked for I/O.
+        let props = table.file_io().config().props();
+        let expected_location = "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json";
+        assert_eq!(
+            props
+                .get("iceberg.internal.metadata-location")
+                .map(String::as_str),
+            Some(expected_location),
+        );
+        let ident_json = props
+            .get("iceberg.internal.table-ident")
+            .expect("table-ident prop should be set");
+        let parsed_ident: TableIdent = serde_json::from_str(ident_json).unwrap();
+        assert_eq!(parsed_ident, expected_ident);
+
+        config_mock.assert_async().await;
+        load_table_mock.assert_async().await;
     }
 }

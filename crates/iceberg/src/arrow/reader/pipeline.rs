@@ -20,8 +20,8 @@
 //! predicates, row-group / row selection, and delete handling into a stream
 //! of transformed Arrow `RecordBatch`es.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 
 use futures::{StreamExt, TryStreamExt};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
@@ -33,13 +33,18 @@ use super::{
 };
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::int96::coerce_int96_timestamps;
-use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
+use crate::arrow::record_batch_transformer::{
+    RecordBatchTransformer, RecordBatchTransformerBuilder,
+};
 use crate::arrow::scan_metrics::{CountingFileRead, ScanMetrics, ScanResult};
+use crate::delete_vector::DeleteVector;
 use crate::error::Result;
 use crate::io::{FileIO, FileMetadata, FileRead};
-use crate::metadata_columns::{RESERVED_FIELD_ID_FILE, is_metadata_field};
+use crate::metadata_columns::{
+    RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS, is_metadata_field, row_pos_field,
+};
 use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
-use crate::spec::Datum;
+use crate::spec::{Datum, NameMapping, PartitionSpec, SchemaRef, Struct};
 use crate::{Error, ErrorKind};
 
 impl ArrowReader {
@@ -109,152 +114,28 @@ impl FileScanTaskReader {
         let mut parquet_read_options = self.parquet_read_options;
         parquet_read_options.preload_page_index = should_load_page_index;
 
+        // Concurrently open the Parquet file and start loading delete files.
+        let open_fut = ArrowReader::open_parquet_stream_builder(
+            &task.data_file_path,
+            task.file_size_in_bytes,
+            self.file_io.clone(),
+            parquet_read_options,
+            ArrowReader::build_virtual_columns(&task.project_field_ids),
+            self.batch_size,
+            task.name_mapping.as_deref(),
+            Some(Arc::clone(self.scan_metrics.bytes_read_counter())),
+            Some(&task.schema),
+        );
         let delete_filter_rx = self
             .delete_file_loader
             .load_deletes(&task.deletes, Arc::clone(&task.schema));
 
-        // Open the Parquet file once, loading its metadata
-        let (parquet_file_reader, arrow_metadata) = ArrowReader::open_parquet_file(
-            &task.data_file_path,
-            &self.file_io,
-            task.file_size_in_bytes,
-            parquet_read_options,
-            self.scan_metrics.bytes_read_counter(),
-        )
-        .await?;
+        let (open_result, delete_filter) =
+            futures::join!(open_fut, async { delete_filter_rx.await.unwrap() });
 
-        // Check if Parquet file has embedded field IDs
-        // Corresponds to Java's ParquetSchemaUtil.hasIds()
-        // Reference: parquet/src/main/java/org/apache/iceberg/parquet/ParquetSchemaUtil.java:118
-        let missing_field_ids = arrow_metadata
-            .schema()
-            .fields()
-            .iter()
-            .next()
-            .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
+        let (builder, has_missing_field_ids) = open_result?;
+        let delete_filter = delete_filter?;
 
-        // Three-branch schema resolution strategy matching Java's ReadConf constructor
-        //
-        // Per Iceberg spec Column Projection rules:
-        // "Columns in Iceberg data files are selected by field id. The table schema's column
-        //  names and order may change after a data file is written, and projection must be done
-        //  using field ids."
-        // https://iceberg.apache.org/spec/#column-projection
-        //
-        // When Parquet files lack field IDs (e.g., Hive/Spark migrations via add_files),
-        // we must assign field IDs BEFORE reading data to enable correct projection.
-        //
-        // Java's ReadConf determines field ID strategy:
-        // - Branch 1: hasIds(fileSchema) → trust embedded field IDs, use pruneColumns()
-        // - Branch 2: nameMapping present → applyNameMapping(), then pruneColumns()
-        // - Branch 3: fallback → addFallbackIds(), then pruneColumnsFallback()
-        let arrow_metadata = if missing_field_ids {
-            // Parquet file lacks field IDs - must assign them before reading
-            let arrow_schema = if let Some(name_mapping) = &task.name_mapping {
-                // Branch 2: Apply name mapping to assign correct Iceberg field IDs
-                // Per spec rule #2: "Use schema.name-mapping.default metadata to map field id
-                // to columns without field id"
-                // Corresponds to Java's ParquetSchemaUtil.applyNameMapping()
-                apply_name_mapping_to_arrow_schema(
-                    Arc::clone(arrow_metadata.schema()),
-                    name_mapping,
-                )?
-            } else {
-                // Branch 3: No name mapping - use position-based fallback IDs
-                // Corresponds to Java's ParquetSchemaUtil.addFallbackIds()
-                add_fallback_field_ids_to_arrow_schema(arrow_metadata.schema())
-            };
-
-            let options = ArrowReaderOptions::new().with_schema(arrow_schema);
-            ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options).map_err(
-                |e| {
-                    Error::new(
-                        ErrorKind::Unexpected,
-                        "Failed to create ArrowReaderMetadata with field ID schema",
-                    )
-                    .with_source(e)
-                },
-            )?
-        } else {
-            // Branch 1: File has embedded field IDs - trust them
-            arrow_metadata
-        };
-
-        // Coerce INT96 timestamp columns to the resolution specified by the Iceberg schema.
-        // This must happen before building the stream reader to avoid i64 overflow in arrow-rs.
-        let arrow_metadata = if let Some(coerced_schema) =
-            coerce_int96_timestamps(arrow_metadata.schema(), &task.schema)
-        {
-            let options = ArrowReaderOptions::new().with_schema(Arc::clone(&coerced_schema));
-            ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options).map_err(
-                |e| {
-                    Error::new(
-                        ErrorKind::Unexpected,
-                        format!(
-                            "Failed to create ArrowReaderMetadata with INT96-coerced schema: {coerced_schema}"
-                        ),
-                    )
-                    .with_source(e)
-                },
-            )?
-        } else {
-            arrow_metadata
-        };
-
-        // Build the stream reader, reusing the already-opened file reader
-        let mut record_batch_stream_builder =
-            ParquetRecordBatchStreamBuilder::new_with_metadata(parquet_file_reader, arrow_metadata);
-
-        // Filter out metadata fields for Parquet projection (they don't exist in files)
-        let project_field_ids_without_metadata: Vec<i32> = task
-            .project_field_ids
-            .iter()
-            .filter(|&&id| !is_metadata_field(id))
-            .copied()
-            .collect();
-
-        // Create projection mask based on field IDs
-        // - If file has embedded IDs: field-ID-based projection (missing_field_ids=false)
-        // - If name mapping applied: field-ID-based projection (missing_field_ids=true but IDs now match)
-        // - If fallback IDs: position-based projection (missing_field_ids=true)
-        let projection_mask = ArrowReader::get_arrow_projection_mask(
-            &project_field_ids_without_metadata,
-            &task.schema,
-            record_batch_stream_builder.parquet_schema(),
-            record_batch_stream_builder.schema(),
-            missing_field_ids, // Whether to use position-based (true) or field-ID-based (false) projection
-        )?;
-
-        record_batch_stream_builder =
-            record_batch_stream_builder.with_projection(projection_mask.clone());
-
-        // RecordBatchTransformer performs any transformations required on the RecordBatches
-        // that come back from the file, such as type promotion, default column insertion,
-        // column re-ordering, partition constants, and virtual field addition (like _file)
-        let mut record_batch_transformer_builder =
-            RecordBatchTransformerBuilder::new(task.schema_ref(), task.project_field_ids());
-
-        // Add the _file metadata column if it's in the projected fields
-        if task.project_field_ids().contains(&RESERVED_FIELD_ID_FILE) {
-            let file_datum = Datum::string(task.data_file_path.clone());
-            record_batch_transformer_builder =
-                record_batch_transformer_builder.with_constant(RESERVED_FIELD_ID_FILE, file_datum);
-        }
-
-        if let (Some(partition_spec), Some(partition_data)) =
-            (task.partition_spec.clone(), task.partition.clone())
-        {
-            record_batch_transformer_builder =
-                record_batch_transformer_builder.with_partition(partition_spec, partition_data)?;
-        }
-
-        let mut record_batch_transformer = record_batch_transformer_builder.build();
-
-        if let Some(batch_size) = self.batch_size {
-            record_batch_stream_builder = record_batch_stream_builder.with_batch_size(batch_size);
-        }
-
-        let delete_filter = delete_filter_rx.await.unwrap()?;
         let delete_predicate = delete_filter.build_equality_delete_predicate(&task).await?;
 
         // In addition to the optional predicate supplied in the `FileScanTask`,
@@ -270,130 +151,30 @@ impl FileScanTaskReader {
             }
         };
 
-        // There are three possible sources for potential lists of selected RowGroup indices,
-        // and two for `RowSelection`s.
-        // Selected RowGroup index lists can come from three sources:
-        //   * When task.start and task.length specify a byte range (file splitting);
-        //   * When there are equality delete files that are applicable;
-        //   * When there is a scan predicate and row_group_filtering_enabled = true.
-        // `RowSelection`s can be created in either or both of the following cases:
-        //   * When there are positional delete files that are applicable;
-        //   * When there is a scan predicate and row_selection_enabled = true
-        // Note that row group filtering from predicates only happens when
-        // there is a scan predicate AND row_group_filtering_enabled = true,
-        // but we perform row selection filtering if there are applicable
-        // equality delete files OR (there is a scan predicate AND row_selection_enabled),
-        // since the only implemented method of applying positional deletes is
-        // by using a `RowSelection`.
-        let mut selected_row_group_indices = None;
-        let mut row_selection = None;
+        let positional_deletes = delete_filter.get_delete_vector(&task);
 
-        // Filter row groups based on byte range from task.start and task.length.
-        // If both start and length are 0, read the entire file (backwards compatibility).
-        if task.start != 0 || task.length != 0 {
-            let byte_range_filtered_row_groups = ArrowReader::filter_row_groups_by_byte_range(
-                record_batch_stream_builder.metadata(),
-                task.start,
-                task.length,
-            )?;
-            selected_row_group_indices = Some(byte_range_filtered_row_groups);
-        }
+        let builder = ArrowReader::apply_parquet_filters(
+            builder,
+            task.start,
+            task.length,
+            &task.schema,
+            final_predicate.as_ref(),
+            positional_deletes.as_deref(),
+            self.row_group_filtering_enabled,
+            self.row_selection_enabled,
+            false, // use_predicate_projection: projection applied separately via build_projected_record_batch_stream
+            has_missing_field_ids,
+        )?;
 
-        if let Some(predicate) = final_predicate {
-            let (iceberg_field_ids, field_id_map) = ArrowReader::build_field_id_set_and_map(
-                record_batch_stream_builder.parquet_schema(),
-                &predicate,
-            )?;
-
-            let row_filter = ArrowReader::get_row_filter(
-                &predicate,
-                record_batch_stream_builder.parquet_schema(),
-                &iceberg_field_ids,
-                &field_id_map,
-            )?;
-            record_batch_stream_builder = record_batch_stream_builder.with_row_filter(row_filter);
-
-            if self.row_group_filtering_enabled {
-                let predicate_filtered_row_groups = ArrowReader::get_selected_row_group_indices(
-                    &predicate,
-                    record_batch_stream_builder.metadata(),
-                    &field_id_map,
-                    &task.schema,
-                )?;
-
-                // Merge predicate-based filtering with byte range filtering (if present)
-                // by taking the intersection of both filters
-                selected_row_group_indices = match selected_row_group_indices {
-                    Some(byte_range_filtered) => {
-                        // Keep only row groups that are in both filters
-                        let intersection: Vec<usize> = byte_range_filtered
-                            .into_iter()
-                            .filter(|idx| predicate_filtered_row_groups.contains(idx))
-                            .collect();
-                        Some(intersection)
-                    }
-                    None => Some(predicate_filtered_row_groups),
-                };
-            }
-
-            if self.row_selection_enabled {
-                row_selection = Some(ArrowReader::get_row_selection_for_filter_predicate(
-                    &predicate,
-                    record_batch_stream_builder.metadata(),
-                    &selected_row_group_indices,
-                    &field_id_map,
-                    &task.schema,
-                )?);
-            }
-        }
-
-        let positional_delete_indexes = delete_filter.get_delete_vector(&task);
-
-        if let Some(positional_delete_indexes) = positional_delete_indexes {
-            let delete_row_selection = {
-                let positional_delete_indexes = positional_delete_indexes.lock().unwrap();
-
-                ArrowReader::build_deletes_row_selection(
-                    record_batch_stream_builder.metadata().row_groups(),
-                    &selected_row_group_indices,
-                    &positional_delete_indexes,
-                )
-            }?;
-
-            // merge the row selection from the delete files with the row selection
-            // from the filter predicate, if there is one from the filter predicate
-            row_selection = match row_selection {
-                None => Some(delete_row_selection),
-                Some(filter_row_selection) => {
-                    Some(filter_row_selection.intersection(&delete_row_selection))
-                }
-            };
-        }
-
-        if let Some(row_selection) = row_selection {
-            record_batch_stream_builder =
-                record_batch_stream_builder.with_row_selection(row_selection);
-        }
-
-        if let Some(selected_row_group_indices) = selected_row_group_indices {
-            record_batch_stream_builder =
-                record_batch_stream_builder.with_row_groups(selected_row_group_indices);
-        }
-
-        // Build the batch stream and send all the RecordBatches that it generates
-        // to the requester.
-        let record_batch_stream =
-            record_batch_stream_builder
-                .build()?
-                .map(move |batch| match batch {
-                    Ok(batch) => {
-                        // Process the record batch (type promotion, column reordering, virtual fields, etc.)
-                        record_batch_transformer.process_record_batch(batch)
-                    }
-                    Err(err) => Err(err.into()),
-                });
-
-        Ok(Box::pin(record_batch_stream) as ArrowRecordBatchStream)
+        ArrowReader::build_projected_record_batch_stream(
+            builder,
+            &task.project_field_ids,
+            task.schema_ref(),
+            has_missing_field_ids,
+            &task.data_file_path,
+            task.partition_spec,
+            task.partition,
+        )
     }
 }
 
@@ -438,6 +219,339 @@ impl ArrowReader {
             })?;
 
         Ok((reader, arrow_metadata))
+    }
+
+    /// Opens a Parquet file, resolves its schema (name-mapping / field-ID fallback), and
+    /// applies the batch size. Returns `(builder, has_missing_field_ids)`.
+    ///
+    /// This is the async phase shared by every reading path. Callers that have background
+    /// work to overlap (e.g. delete-file loading) can run this concurrently with that work
+    /// using [`futures::join!`], then pass the result to [`Self::apply_parquet_filters`].
+    ///
+    /// Implements the three-branch schema resolution strategy matching Java's `ReadConf` constructor:
+    /// - Branch 1: file has embedded field IDs → trust them, use as-is
+    /// - Branch 2: name_mapping present → apply name mapping to assign correct Iceberg field IDs
+    /// - Branch 3: no name mapping → assign fallback position-based IDs
+    ///
+    /// When `iceberg_schema` is `Some`, INT96 timestamp columns are coerced to the resolution
+    /// specified by the Iceberg schema before building the stream reader.
+    ///
+    /// When `bytes_read` is `Some`, wraps the file reader with [`CountingFileRead`] so all
+    /// I/O bytes are accumulated into the provided counter.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn open_parquet_stream_builder(
+        data_file_path: &str,
+        file_size_in_bytes: u64,
+        file_io: FileIO,
+        parquet_read_options: ParquetReadOptions,
+        virtual_columns: Vec<Arc<arrow_schema::Field>>,
+        batch_size: Option<usize>,
+        name_mapping: Option<&NameMapping>,
+        bytes_read: Option<Arc<AtomicU64>>,
+        iceberg_schema: Option<&crate::spec::Schema>,
+    ) -> Result<(ParquetRecordBatchStreamBuilder<ArrowFileReader>, bool)> {
+        let parquet_file = file_io.new_input(data_file_path)?;
+        let raw_reader = parquet_file.reader().await?;
+        let boxed_reader: Box<dyn FileRead> = if let Some(counter) = bytes_read {
+            Box::new(CountingFileRead::new(raw_reader, counter))
+        } else {
+            Box::new(raw_reader)
+        };
+        let (file_reader, arrow_metadata) =
+            Self::build_parquet_reader(boxed_reader, file_size_in_bytes, parquet_read_options)
+                .await?;
+
+        // Check if Parquet file has embedded field IDs.
+        // Corresponds to Java's ParquetSchemaUtil.hasIds()
+        let has_missing_field_ids = arrow_metadata
+            .schema()
+            .fields()
+            .iter()
+            .next()
+            .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
+
+        // Three-branch schema resolution strategy matching Java's ReadConf constructor.
+        //
+        // When Parquet files lack field IDs (e.g., Hive/Spark migrations via add_files),
+        // we must assign field IDs BEFORE reading data to enable correct column projection.
+        let arrow_metadata = if has_missing_field_ids {
+            // Parquet file lacks field IDs - must assign them before reading.
+            let arrow_schema = if let Some(nm) = name_mapping {
+                // Branch 2: Apply name mapping to assign correct Iceberg field IDs.
+                // Corresponds to Java's ParquetSchemaUtil.applyNameMapping()
+                apply_name_mapping_to_arrow_schema(Arc::clone(arrow_metadata.schema()), nm)?
+            } else {
+                // Branch 3: No name mapping - use position-based fallback IDs.
+                // Corresponds to Java's ParquetSchemaUtil.addFallbackIds()
+                add_fallback_field_ids_to_arrow_schema(arrow_metadata.schema())
+            };
+            let mut options = ArrowReaderOptions::new().with_schema(arrow_schema);
+            if !virtual_columns.is_empty() {
+                options = options.with_virtual_columns(virtual_columns)?;
+            }
+            ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options).map_err(
+                |e| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "Failed to create ArrowReaderMetadata with field ID schema",
+                    )
+                    .with_source(e)
+                },
+            )?
+        } else {
+            // Branch 1: File has embedded field IDs - trust them.
+            if !virtual_columns.is_empty() {
+                let options = ArrowReaderOptions::new().with_virtual_columns(virtual_columns)?;
+                ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options)
+                    .map_err(|e| {
+                        Error::new(
+                            ErrorKind::Unexpected,
+                            "Failed to create ArrowReaderMetadata with virtual columns",
+                        )
+                        .with_source(e)
+                    })?
+            } else {
+                arrow_metadata
+            }
+        };
+
+        // Coerce INT96 timestamp columns to the resolution specified by the Iceberg schema.
+        // This must happen before building the stream reader to avoid i64 overflow in arrow-rs.
+        let arrow_metadata = if let Some(schema) = iceberg_schema {
+            if let Some(coerced_schema) = coerce_int96_timestamps(arrow_metadata.schema(), schema) {
+                let options = ArrowReaderOptions::new().with_schema(Arc::clone(&coerced_schema));
+                ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options)
+                    .map_err(|e| {
+                        Error::new(
+                            ErrorKind::Unexpected,
+                            format!(
+                                "Failed to create ArrowReaderMetadata with INT96-coerced schema: {coerced_schema}"
+                            ),
+                        )
+                        .with_source(e)
+                    })?
+            } else {
+                arrow_metadata
+            }
+        } else {
+            arrow_metadata
+        };
+
+        let mut builder =
+            ParquetRecordBatchStreamBuilder::new_with_metadata(file_reader, arrow_metadata);
+
+        if let Some(batch_size) = batch_size {
+            builder = builder.with_batch_size(batch_size);
+        }
+
+        Ok((builder, has_missing_field_ids))
+    }
+
+    /// Applies all row-level and row-group-level filters to a builder returned by
+    /// [`Self::open_parquet_stream_builder`].
+    ///
+    /// Handles byte-range row group pruning, predicate row filtering (with optional
+    /// projection), and positional-delete row selection.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_parquet_filters(
+        mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        start: u64,
+        length: u64,
+        schema: &crate::spec::Schema,
+        bound_predicate: Option<&crate::expr::BoundPredicate>,
+        positional_deletes: Option<&Mutex<DeleteVector>>,
+        row_group_filtering_enabled: bool,
+        row_selection_enabled: bool,
+        use_predicate_projection: bool,
+        has_missing_field_ids: bool,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        let mut selected_row_group_indices = None;
+        let mut row_selection = None;
+
+        if start != 0 || length != 0 {
+            selected_row_group_indices = Some(Self::filter_row_groups_by_byte_range(
+                builder.metadata(),
+                start,
+                length,
+            )?);
+        }
+
+        if let Some(predicate) = bound_predicate {
+            let (iceberg_field_ids, field_id_map) =
+                Self::build_field_id_set_and_map(builder.parquet_schema(), predicate)?;
+
+            if use_predicate_projection {
+                let predicate_field_ids: Vec<i32> = iceberg_field_ids.iter().copied().collect();
+                builder = Self::apply_projection(
+                    builder,
+                    &predicate_field_ids,
+                    schema,
+                    has_missing_field_ids,
+                )?;
+            }
+
+            let row_filter = Self::get_row_filter(
+                predicate,
+                builder.parquet_schema(),
+                &iceberg_field_ids,
+                &field_id_map,
+            )?;
+            builder = builder.with_row_filter(row_filter);
+
+            if row_group_filtering_enabled {
+                let predicate_filtered = Self::get_selected_row_group_indices(
+                    predicate,
+                    builder.metadata(),
+                    &field_id_map,
+                    schema,
+                )?;
+                selected_row_group_indices = Some(match selected_row_group_indices.take() {
+                    Some(existing) => existing
+                        .into_iter()
+                        .filter(|idx| predicate_filtered.contains(idx))
+                        .collect(),
+                    None => predicate_filtered,
+                });
+            }
+
+            if row_selection_enabled {
+                row_selection = Some(Self::get_row_selection_for_filter_predicate(
+                    predicate,
+                    builder.metadata(),
+                    &selected_row_group_indices,
+                    &field_id_map,
+                    schema,
+                )?);
+            }
+        }
+
+        if let Some(positional_delete_indexes) = positional_deletes {
+            let delete_row_selection = {
+                let guard = positional_delete_indexes.lock().unwrap();
+                Self::build_deletes_row_selection(
+                    builder.metadata().row_groups(),
+                    &selected_row_group_indices,
+                    &guard,
+                )
+            }?;
+            row_selection = Some(match row_selection.take() {
+                None => delete_row_selection,
+                Some(prev) => prev.intersection(&delete_row_selection),
+            });
+        }
+
+        if let Some(sel) = row_selection {
+            builder = builder.with_row_selection(sel);
+        }
+        if let Some(groups) = selected_row_group_indices {
+            builder = builder.with_row_groups(groups);
+        }
+
+        Ok(builder)
+    }
+
+    /// Applies a projection mask derived from `field_ids` to a builder.
+    ///
+    /// Wraps `get_arrow_projection_mask` + `with_projection` into a single call.
+    fn apply_projection(
+        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        field_ids: &[i32],
+        schema: &crate::spec::Schema,
+        has_missing_field_ids: bool,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        // Metadata fields (e.g. _file, _pos) are virtual — they don't exist as Parquet columns.
+        // Filter them out so get_arrow_projection_mask only sees real schema field IDs.
+        let project_field_ids_without_metadata: Vec<i32> = field_ids
+            .iter()
+            .filter(|&&id| !is_metadata_field(id))
+            .copied()
+            .collect();
+        let mask = Self::get_arrow_projection_mask(
+            &project_field_ids_without_metadata,
+            schema,
+            builder.parquet_schema(),
+            builder.schema(),
+            has_missing_field_ids,
+        )?;
+        Ok(builder.with_projection(mask))
+    }
+
+    /// Returns the list of virtual columns to request from the Parquet reader for the
+    /// given projection. Currently, only `_pos` is a virtual column (produced by the
+    /// Parquet reader itself rather than read from file data).
+    pub(crate) fn build_virtual_columns(
+        project_field_ids: &[i32],
+    ) -> Vec<Arc<arrow_schema::Field>> {
+        let mut virtual_columns = Vec::new();
+        if project_field_ids.contains(&RESERVED_FIELD_ID_POS) {
+            virtual_columns.push(Arc::clone(row_pos_field()));
+        }
+        virtual_columns
+    }
+
+    /// Builds a [`RecordBatchTransformer`] for a data file scan task.
+    ///
+    /// Handles the three optional transformations that are common to both the full
+    /// scan (`process_file_scan_task`) and the incremental append scan
+    /// (`process_incremental_append_task`):
+    /// - `_file` constant column (only when `RESERVED_FIELD_ID_FILE` is projected)
+    /// - `_pos` virtual column (only when `RESERVED_FIELD_ID_POS` is projected)
+    /// - identity-transform partition columns (only when partition metadata is present)
+    fn build_record_batch_transformer(
+        schema: SchemaRef,
+        project_field_ids: &[i32],
+        data_file_path: &str,
+        partition_spec: Option<Arc<PartitionSpec>>,
+        partition: Option<Struct>,
+    ) -> Result<RecordBatchTransformer> {
+        let mut builder = RecordBatchTransformerBuilder::new(schema, project_field_ids);
+
+        if project_field_ids.contains(&RESERVED_FIELD_ID_FILE) {
+            builder = builder.with_constant(RESERVED_FIELD_ID_FILE, Datum::string(data_file_path));
+        }
+
+        if project_field_ids.contains(&RESERVED_FIELD_ID_POS) {
+            builder = builder.with_virtual_field(Arc::clone(row_pos_field()))?;
+        }
+
+        if let (Some(spec), Some(data)) = (partition_spec, partition) {
+            builder = builder.with_partition(spec, data)?;
+        }
+
+        Ok(builder.build())
+    }
+
+    /// Centralises the final "commit" step shared by all Parquet reading paths.
+    /// Applies projection to `builder`, constructs a `RecordBatchTransformer`, builds the
+    /// Parquet stream, and wraps it so every batch is passed through the transformer.
+    ///
+    /// This is the shared finalization step used by every data-file reading path.
+    pub(crate) fn build_projected_record_batch_stream(
+        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        project_field_ids: &[i32],
+        schema: SchemaRef,
+        has_missing_field_ids: bool,
+        data_file_path: &str,
+        partition_spec: Option<Arc<PartitionSpec>>,
+        partition: Option<Struct>,
+    ) -> Result<ArrowRecordBatchStream> {
+        let builder =
+            Self::apply_projection(builder, project_field_ids, &schema, has_missing_field_ids)?;
+
+        let mut record_batch_transformer = Self::build_record_batch_transformer(
+            schema,
+            project_field_ids,
+            data_file_path,
+            partition_spec,
+            partition,
+        )?;
+
+        let record_batch_stream = builder.build()?.map(move |batch| match batch {
+            Ok(batch) => record_batch_transformer.process_record_batch(batch),
+            Err(err) => Err(err.into()),
+        });
+
+        Ok(Box::pin(record_batch_stream) as ArrowRecordBatchStream)
     }
 }
 

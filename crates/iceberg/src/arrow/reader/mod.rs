@@ -17,9 +17,15 @@
 
 //! Parquet file data reader
 
+use arrow_array::RecordBatch;
+use futures::{SinkExt, Stream, StreamExt};
+
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
+use crate::error::Result;
 use crate::io::FileIO;
+use crate::scan::ArrowRecordBatchStream;
 use crate::util::available_parallelism;
+use crate::{Error, ErrorKind};
 
 /// Default gap between byte ranges below which they are coalesced into a
 /// single request. Matches object_store's `OBJECT_STORE_COALESCE_DEFAULT`.
@@ -141,14 +147,47 @@ impl ArrowReaderBuilder {
 /// Reads data from Parquet files
 #[derive(Clone)]
 pub struct ArrowReader {
-    batch_size: Option<usize>,
-    file_io: FileIO,
+    pub(crate) batch_size: Option<usize>,
+    pub(crate) file_io: FileIO,
     delete_file_loader: CachingDeleteFileLoader,
 
     /// the maximum number of data files that can be fetched at the same time
-    concurrency_limit_data_files: usize,
+    pub(crate) concurrency_limit_data_files: usize,
 
-    row_group_filtering_enabled: bool,
-    row_selection_enabled: bool,
-    parquet_read_options: ParquetReadOptions,
+    pub(crate) row_group_filtering_enabled: bool,
+    pub(crate) row_selection_enabled: bool,
+    pub(crate) parquet_read_options: ParquetReadOptions,
+}
+
+/// Trait indicating that the implementing type streams into a stream of type `S` using
+/// a reader of type `R`.
+pub trait StreamsInto<R, S = ArrowRecordBatchStream> {
+    /// Stream from the reader and produce a stream of type `S`.
+    fn stream(self, reader: R) -> Result<S>;
+}
+
+/// Helper function to process a stream of record batches and send through a channel.
+/// Handles the Result<Stream> pattern, so callers don't need to match on the stream result.
+/// This pattern is used in both reader.rs and incremental.rs.
+pub(crate) async fn process_record_batch_stream<E, S, T>(
+    record_batch_stream: Result<S>,
+    mut tx: T,
+    error_context: &str,
+) where
+    E: std::error::Error + Send + Sync + 'static,
+    S: Stream<Item = std::result::Result<RecordBatch, E>> + Send + Unpin + 'static,
+    T: SinkExt<Result<RecordBatch>> + Unpin + Send + 'static,
+{
+    match record_batch_stream {
+        Ok(mut stream) => {
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result
+                    .map_err(|e| Error::new(ErrorKind::Unexpected, error_context).with_source(e));
+                let _ = tx.send(batch).await;
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e)).await;
+        }
+    }
 }
