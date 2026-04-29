@@ -121,12 +121,16 @@ pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Res
 ///
 /// The path is expected to include the scheme in a format like:
 /// `abfss://<myfs>@<myaccount>.dfs.core.windows.net/mydir/myfile.parquet`.
+///
+/// When `configured_scheme` is `None`, scheme validation is skipped (used by
+/// the resolving storage, which auto-detects the scheme from the path).
 pub(crate) fn azdls_create_operator<'a>(
     absolute_path: &'a str,
     config: &AzdlsConfig,
+    configured_scheme: Option<&AzureStorageScheme>,
 ) -> Result<(opendal::Operator, &'a str)> {
     let path = absolute_path.parse::<AzureStoragePath>()?;
-    match_path_with_config(&path, config)?;
+    match_path_with_config(&path, config, configured_scheme)?;
 
     let op = azdls_config_build(config, &path)?;
 
@@ -192,7 +196,22 @@ impl FromStr for AzureStorageScheme {
 }
 
 /// Validates whether the given path matches what's configured for the backend.
-pub(crate) fn match_path_with_config(path: &AzureStoragePath, config: &AzdlsConfig) -> Result<()> {
+///
+/// When `configured_scheme` is `None`, scheme validation is skipped.
+pub(crate) fn match_path_with_config(
+    path: &AzureStoragePath,
+    config: &AzdlsConfig,
+    configured_scheme: Option<&AzureStorageScheme>,
+) -> Result<()> {
+    if let Some(configured_scheme) = configured_scheme {
+        ensure_data_valid!(
+            &path.scheme == configured_scheme,
+            "Storage::Azdls: Scheme mismatch: configured {}, passed {}",
+            configured_scheme,
+            path.scheme
+        );
+    }
+
     if let Some(ref configured_account_name) = config.account_name {
         ensure_data_valid!(
             &path.account_name == configured_account_name,
@@ -506,6 +525,7 @@ mod tests {
                         endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfss,
                 ),
                 Some(("myfs", "/path/to/file.parquet")),
             ),
@@ -518,6 +538,7 @@ mod tests {
                         endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfss,
                 ),
                 None,
             ),
@@ -531,6 +552,7 @@ mod tests {
                         endpoint: Some("http://myaccount.dfs.core.windows.net".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfss,
                 ),
                 None,
             ),
@@ -543,6 +565,7 @@ mod tests {
                         endpoint: Some("https://myaccount.dfs.core.chinacloudapi.cn".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfss,
                 ),
                 None,
             ),
@@ -556,20 +579,20 @@ mod tests {
                         endpoint: None,
                         ..Default::default()
                     },
+                    AzureStorageScheme::Abfs,
                 ),
                 Some(("myfs", "/path/to/file.parquet")),
             ),
             (
-                "scheme differs from a previously-configured one is accepted",
+                "scheme differs from configured scheme",
                 (
-                    // No configured scheme exists anymore; both abfss and wasbs
-                    // should be accepted by the same storage.
                     "wasbs://myfs@myaccount.blob.core.windows.net/path/to/file.parquet",
                     AzdlsConfig {
                         account_name: Some("myaccount".to_string()),
                         endpoint: Some("https://myaccount.blob.core.windows.net".to_string()),
                         ..Default::default()
                     },
+                    AzureStorageScheme::Wasbs,
                 ),
                 Some(("myfs", "/path/to/file.parquet")),
             ),
@@ -590,7 +613,7 @@ mod tests {
         ];
 
         for (name, input, expected) in test_cases {
-            let result = azdls_create_operator(input.0, &input.1);
+            let result = azdls_create_operator(input.0, &input.1, Some(&input.2));
             match expected {
                 Some((expected_filesystem, expected_path)) => {
                     assert!(result.is_ok(), "Test case {name} failed: {result:?}");

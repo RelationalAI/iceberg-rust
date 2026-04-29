@@ -114,6 +114,7 @@ fn build_storage_for_scheme(
         Scheme::Azdls => {
             let config = crate::azdls::azdls_config_parse(props.clone())?;
             Ok(OpenDalStorage::Azdls {
+                configured_scheme: None,
                 config: Arc::new(config),
             })
         }
