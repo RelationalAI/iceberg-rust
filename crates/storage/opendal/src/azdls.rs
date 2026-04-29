@@ -597,6 +597,19 @@ mod tests {
                 Some(("myfs", "/path/to/file.parquet")),
             ),
             (
+                "different scheme is rejected",
+                (
+                    "wasbs://myfs@myaccount.dfs.core.windows.net/path/to/file.parquet",
+                    AzdlsConfig {
+                        account_name: Some("myaccount".to_string()),
+                        endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
+                        ..Default::default()
+                    },
+                    AzureStorageScheme::Abfss,
+                ),
+                None,
+            ),
+            (
                 "azurite endpoint with explicit configuration",
                 (
                     "wasb://testfs@devstoreaccount1.blob.core.windows.net/path/to/data.parquet",
