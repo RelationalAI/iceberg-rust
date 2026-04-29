@@ -1,0 +1,1330 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+//! The main `ArrowReader` pipeline: reading a stream of `FileScanTask`s,
+//! opening Parquet files and resolving schemas, then wiring projection,
+//! predicates, row-group / row selection, and delete handling into a stream
+//! of transformed Arrow `RecordBatch`es.
+
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+
+use arrow_array::RecordBatch;
+use futures::channel::mpsc::channel;
+use futures::{StreamExt, TryStreamExt};
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, ParquetRecordBatchStreamBuilder};
+
+use super::{
+    ArrowFileReader, ArrowReader, ParquetReadOptions, add_fallback_field_ids_to_arrow_schema,
+    apply_name_mapping_to_arrow_schema, process_record_batch_stream,
+};
+use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
+use crate::arrow::int96::coerce_int96_timestamps;
+use crate::arrow::record_batch_transformer::{
+    RecordBatchTransformer, RecordBatchTransformerBuilder,
+};
+use crate::arrow::scan_metrics::{CountingFileRead, ScanMetrics, ScanResult};
+use crate::delete_vector::DeleteVector;
+use crate::error::Result;
+use crate::io::{FileIO, FileMetadata, FileRead};
+use crate::metadata_columns::{
+    RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS, is_metadata_field, row_pos_field,
+};
+use crate::runtime::spawn;
+use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
+use crate::spec::{Datum, NameMapping, PartitionSpec, SchemaRef, Struct};
+use crate::{Error, ErrorKind};
+
+impl ArrowReader {
+    /// Take a stream of FileScanTasks and reads all the files.
+    /// Returns a [`ScanResult`] containing the record batch stream and scan metrics.
+    pub fn read(self, tasks: FileScanTaskStream) -> Result<ScanResult> {
+        let concurrency_limit_data_files = self.concurrency_limit_data_files;
+        let scan_metrics = ScanMetrics::new();
+
+        let task_reader = FileScanTaskReader {
+            batch_size: self.batch_size,
+            file_io: self.file_io,
+            delete_file_loader: self
+                .delete_file_loader
+                .with_scan_metrics(scan_metrics.clone()),
+            row_group_filtering_enabled: self.row_group_filtering_enabled,
+            row_selection_enabled: self.row_selection_enabled,
+            parquet_read_options: self.parquet_read_options,
+            scan_metrics: scan_metrics.clone(),
+        };
+
+        // Fast-path for single concurrency to avoid overhead of try_flatten_unordered
+        let stream: ArrowRecordBatchStream = if concurrency_limit_data_files == 1 {
+            Box::pin(
+                tasks
+                    .and_then(move |task| task_reader.clone().process(task))
+                    .map_err(|err| {
+                        Error::new(ErrorKind::Unexpected, "file scan task generate failed")
+                            .with_source(err)
+                    })
+                    .try_flatten(),
+            )
+        } else {
+            // Multi-concurrency path: spawn each file's IO-heavy processing as an independent
+            // tokio task for true parallelism, streaming results through a channel.
+            let (tx, rx) = channel::<Result<RecordBatch>>(concurrency_limit_data_files);
+
+            // Outer spawn: runs the task coordination loop without blocking the caller.
+            spawn(async move {
+                let _ = tasks
+                    .try_for_each_concurrent(concurrency_limit_data_files, |task| {
+                        let task_reader = task_reader.clone();
+                        let tx = tx.clone();
+
+                        async move {
+                            // Inner spawn: each file's IO operations run on their own tokio task.
+                            spawn(async move {
+                                let record_batch_stream = task_reader.process(task).await;
+                                process_record_batch_stream(
+                                    record_batch_stream,
+                                    tx,
+                                    "failed to read record batch",
+                                )
+                                .await;
+                            })
+                            .await;
+
+                            Ok(())
+                        }
+                    })
+                    .await;
+            });
+
+            Box::pin(rx) as ArrowRecordBatchStream
+        };
+
+        Ok(ScanResult::new(stream, scan_metrics))
+    }
+}
+
+/// Per-scan state for processing [`FileScanTask`]s. Created once per
+/// [`ArrowReader::read`] call and cloned per task.
+#[derive(Clone)]
+struct FileScanTaskReader {
+    batch_size: Option<usize>,
+    file_io: FileIO,
+    delete_file_loader: CachingDeleteFileLoader,
+    row_group_filtering_enabled: bool,
+    row_selection_enabled: bool,
+    parquet_read_options: ParquetReadOptions,
+    scan_metrics: ScanMetrics,
+}
+
+impl FileScanTaskReader {
+    async fn process(self, task: FileScanTask) -> Result<ArrowRecordBatchStream> {
+        let should_load_page_index =
+            (self.row_selection_enabled && task.predicate.is_some()) || !task.deletes.is_empty();
+        let mut parquet_read_options = self.parquet_read_options;
+        parquet_read_options.preload_page_index = should_load_page_index;
+
+        // Concurrently open the Parquet file and start loading delete files.
+        let open_fut = ArrowReader::open_parquet_stream_builder(
+            &task.data_file_path,
+            task.file_size_in_bytes,
+            self.file_io.clone(),
+            parquet_read_options,
+            ArrowReader::build_virtual_columns(&task.project_field_ids),
+            self.batch_size,
+            task.name_mapping.as_deref(),
+            Some(Arc::clone(self.scan_metrics.bytes_read_counter())),
+            Some(&task.schema),
+        );
+        let delete_filter_rx = self
+            .delete_file_loader
+            .load_deletes(&task.deletes, Arc::clone(&task.schema));
+
+        let (open_result, delete_filter) =
+            futures::join!(open_fut, async { delete_filter_rx.await.unwrap() });
+
+        let (builder, has_missing_field_ids) = open_result?;
+        let delete_filter = delete_filter?;
+
+        let delete_predicate = delete_filter.build_equality_delete_predicate(&task).await?;
+
+        // In addition to the optional predicate supplied in the `FileScanTask`,
+        // we also have an optional predicate resulting from equality delete files.
+        // If both are present, we logical-AND them together to form a single filter
+        // predicate that we can pass to the `RecordBatchStreamBuilder`.
+        let final_predicate = match (&task.predicate, delete_predicate) {
+            (None, None) => None,
+            (Some(predicate), None) => Some(predicate.clone()),
+            (None, Some(ref predicate)) => Some(predicate.clone()),
+            (Some(filter_predicate), Some(delete_predicate)) => {
+                Some(filter_predicate.clone().and(delete_predicate))
+            }
+        };
+
+        let positional_deletes = delete_filter.get_delete_vector(&task);
+
+        let builder = ArrowReader::apply_parquet_filters(
+            builder,
+            task.start,
+            task.length,
+            &task.schema,
+            final_predicate.as_ref(),
+            positional_deletes.as_deref(),
+            self.row_group_filtering_enabled,
+            self.row_selection_enabled,
+            false, // use_predicate_projection: projection applied separately via build_projected_record_batch_stream
+            has_missing_field_ids,
+        )?;
+
+        ArrowReader::build_projected_record_batch_stream(
+            builder,
+            &task.project_field_ids,
+            task.schema_ref(),
+            has_missing_field_ids,
+            &task.data_file_path,
+            task.partition_spec,
+            task.partition,
+        )
+    }
+}
+
+impl ArrowReader {
+    /// Opens a Parquet file and loads its metadata, wrapping the reader with
+    /// [`CountingFileRead`] so all I/O is accumulated into `bytes_read`.
+    pub(crate) async fn open_parquet_file(
+        data_file_path: &str,
+        file_io: &FileIO,
+        file_size_in_bytes: u64,
+        parquet_read_options: ParquetReadOptions,
+        bytes_read: &Arc<AtomicU64>,
+    ) -> Result<(ArrowFileReader, ArrowReaderMetadata)> {
+        let parquet_file = file_io.new_input(data_file_path)?;
+        let counting_reader =
+            CountingFileRead::new(parquet_file.reader().await?, Arc::clone(bytes_read));
+        Self::build_parquet_reader(
+            Box::new(counting_reader),
+            file_size_in_bytes,
+            parquet_read_options,
+        )
+        .await
+    }
+
+    async fn build_parquet_reader(
+        parquet_reader: Box<dyn FileRead>,
+        file_size_in_bytes: u64,
+        parquet_read_options: ParquetReadOptions,
+    ) -> Result<(ArrowFileReader, ArrowReaderMetadata)> {
+        let mut reader = ArrowFileReader::new(
+            FileMetadata {
+                size: file_size_in_bytes,
+            },
+            parquet_reader,
+        )
+        .with_parquet_read_options(parquet_read_options);
+
+        let arrow_metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default())
+            .await
+            .map_err(|e| {
+                Error::new(ErrorKind::Unexpected, "Failed to load Parquet metadata").with_source(e)
+            })?;
+
+        Ok((reader, arrow_metadata))
+    }
+
+    /// Opens a Parquet file, resolves its schema (name-mapping / field-ID fallback), and
+    /// applies the batch size. Returns `(builder, has_missing_field_ids)`.
+    ///
+    /// This is the async phase shared by every reading path. Callers that have background
+    /// work to overlap (e.g. delete-file loading) can run this concurrently with that work
+    /// using [`futures::join!`], then pass the result to [`Self::apply_parquet_filters`].
+    ///
+    /// Implements the three-branch schema resolution strategy matching Java's `ReadConf` constructor:
+    /// - Branch 1: file has embedded field IDs → trust them, use as-is
+    /// - Branch 2: name_mapping present → apply name mapping to assign correct Iceberg field IDs
+    /// - Branch 3: no name mapping → assign fallback position-based IDs
+    ///
+    /// When `iceberg_schema` is `Some`, INT96 timestamp columns are coerced to the resolution
+    /// specified by the Iceberg schema before building the stream reader.
+    ///
+    /// When `bytes_read` is `Some`, wraps the file reader with [`CountingFileRead`] so all
+    /// I/O bytes are accumulated into the provided counter.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn open_parquet_stream_builder(
+        data_file_path: &str,
+        file_size_in_bytes: u64,
+        file_io: FileIO,
+        parquet_read_options: ParquetReadOptions,
+        virtual_columns: Vec<Arc<arrow_schema::Field>>,
+        batch_size: Option<usize>,
+        name_mapping: Option<&NameMapping>,
+        bytes_read: Option<Arc<AtomicU64>>,
+        iceberg_schema: Option<&crate::spec::Schema>,
+    ) -> Result<(ParquetRecordBatchStreamBuilder<ArrowFileReader>, bool)> {
+        let parquet_file = file_io.new_input(data_file_path)?;
+        let raw_reader = parquet_file.reader().await?;
+        let boxed_reader: Box<dyn FileRead> = if let Some(counter) = bytes_read {
+            Box::new(CountingFileRead::new(raw_reader, counter))
+        } else {
+            Box::new(raw_reader)
+        };
+        let (file_reader, arrow_metadata) =
+            Self::build_parquet_reader(boxed_reader, file_size_in_bytes, parquet_read_options)
+                .await?;
+
+        // Check if Parquet file has embedded field IDs.
+        // Corresponds to Java's ParquetSchemaUtil.hasIds()
+        let has_missing_field_ids = arrow_metadata
+            .schema()
+            .fields()
+            .iter()
+            .next()
+            .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
+
+        // Three-branch schema resolution strategy matching Java's ReadConf constructor.
+        //
+        // When Parquet files lack field IDs (e.g., Hive/Spark migrations via add_files),
+        // we must assign field IDs BEFORE reading data to enable correct column projection.
+        let arrow_metadata = if has_missing_field_ids {
+            // Parquet file lacks field IDs - must assign them before reading.
+            let arrow_schema = if let Some(nm) = name_mapping {
+                // Branch 2: Apply name mapping to assign correct Iceberg field IDs.
+                // Corresponds to Java's ParquetSchemaUtil.applyNameMapping()
+                apply_name_mapping_to_arrow_schema(Arc::clone(arrow_metadata.schema()), nm)?
+            } else {
+                // Branch 3: No name mapping - use position-based fallback IDs.
+                // Corresponds to Java's ParquetSchemaUtil.addFallbackIds()
+                add_fallback_field_ids_to_arrow_schema(arrow_metadata.schema())
+            };
+            let mut options = ArrowReaderOptions::new().with_schema(arrow_schema);
+            if !virtual_columns.is_empty() {
+                options = options.with_virtual_columns(virtual_columns)?;
+            }
+            ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options).map_err(
+                |e| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "Failed to create ArrowReaderMetadata with field ID schema",
+                    )
+                    .with_source(e)
+                },
+            )?
+        } else {
+            // Branch 1: File has embedded field IDs - trust them.
+            if !virtual_columns.is_empty() {
+                let options = ArrowReaderOptions::new().with_virtual_columns(virtual_columns)?;
+                ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options)
+                    .map_err(|e| {
+                        Error::new(
+                            ErrorKind::Unexpected,
+                            "Failed to create ArrowReaderMetadata with virtual columns",
+                        )
+                        .with_source(e)
+                    })?
+            } else {
+                arrow_metadata
+            }
+        };
+
+        // Coerce INT96 timestamp columns to the resolution specified by the Iceberg schema.
+        // This must happen before building the stream reader to avoid i64 overflow in arrow-rs.
+        let arrow_metadata = if let Some(schema) = iceberg_schema {
+            if let Some(coerced_schema) = coerce_int96_timestamps(arrow_metadata.schema(), schema) {
+                let options = ArrowReaderOptions::new().with_schema(Arc::clone(&coerced_schema));
+                ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options)
+                    .map_err(|e| {
+                        Error::new(
+                            ErrorKind::Unexpected,
+                            format!(
+                                "Failed to create ArrowReaderMetadata with INT96-coerced schema: {coerced_schema}"
+                            ),
+                        )
+                        .with_source(e)
+                    })?
+            } else {
+                arrow_metadata
+            }
+        } else {
+            arrow_metadata
+        };
+
+        let mut builder =
+            ParquetRecordBatchStreamBuilder::new_with_metadata(file_reader, arrow_metadata);
+
+        if let Some(batch_size) = batch_size {
+            builder = builder.with_batch_size(batch_size);
+        }
+
+        Ok((builder, has_missing_field_ids))
+    }
+
+    /// Applies all row-level and row-group-level filters to a builder returned by
+    /// [`Self::open_parquet_stream_builder`].
+    ///
+    /// Handles byte-range row group pruning, predicate row filtering (with optional
+    /// projection), and positional-delete row selection.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_parquet_filters(
+        mut builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        start: u64,
+        length: u64,
+        schema: &crate::spec::Schema,
+        bound_predicate: Option<&crate::expr::BoundPredicate>,
+        positional_deletes: Option<&Mutex<DeleteVector>>,
+        row_group_filtering_enabled: bool,
+        row_selection_enabled: bool,
+        use_predicate_projection: bool,
+        has_missing_field_ids: bool,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        let mut selected_row_group_indices = None;
+        let mut row_selection = None;
+
+        if start != 0 || length != 0 {
+            selected_row_group_indices = Some(Self::filter_row_groups_by_byte_range(
+                builder.metadata(),
+                start,
+                length,
+            )?);
+        }
+
+        if let Some(predicate) = bound_predicate {
+            let (iceberg_field_ids, field_id_map) =
+                Self::build_field_id_set_and_map(builder.parquet_schema(), predicate)?;
+
+            if use_predicate_projection {
+                let predicate_field_ids: Vec<i32> = iceberg_field_ids.iter().copied().collect();
+                builder = Self::apply_projection(
+                    builder,
+                    &predicate_field_ids,
+                    schema,
+                    has_missing_field_ids,
+                )?;
+            }
+
+            let row_filter = Self::get_row_filter(
+                predicate,
+                builder.parquet_schema(),
+                &iceberg_field_ids,
+                &field_id_map,
+            )?;
+            builder = builder.with_row_filter(row_filter);
+
+            if row_group_filtering_enabled {
+                let predicate_filtered = Self::get_selected_row_group_indices(
+                    predicate,
+                    builder.metadata(),
+                    &field_id_map,
+                    schema,
+                )?;
+                selected_row_group_indices = Some(match selected_row_group_indices.take() {
+                    Some(existing) => existing
+                        .into_iter()
+                        .filter(|idx| predicate_filtered.contains(idx))
+                        .collect(),
+                    None => predicate_filtered,
+                });
+            }
+
+            if row_selection_enabled {
+                row_selection = Some(Self::get_row_selection_for_filter_predicate(
+                    predicate,
+                    builder.metadata(),
+                    &selected_row_group_indices,
+                    &field_id_map,
+                    schema,
+                )?);
+            }
+        }
+
+        if let Some(positional_delete_indexes) = positional_deletes {
+            let delete_row_selection = {
+                let guard = positional_delete_indexes.lock().unwrap();
+                Self::build_deletes_row_selection(
+                    builder.metadata().row_groups(),
+                    &selected_row_group_indices,
+                    &guard,
+                )
+            }?;
+            row_selection = Some(match row_selection.take() {
+                None => delete_row_selection,
+                Some(prev) => prev.intersection(&delete_row_selection),
+            });
+        }
+
+        if let Some(sel) = row_selection {
+            builder = builder.with_row_selection(sel);
+        }
+        if let Some(groups) = selected_row_group_indices {
+            builder = builder.with_row_groups(groups);
+        }
+
+        Ok(builder)
+    }
+
+    /// Applies a projection mask derived from `field_ids` to a builder.
+    ///
+    /// Wraps `get_arrow_projection_mask` + `with_projection` into a single call.
+    fn apply_projection(
+        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        field_ids: &[i32],
+        schema: &crate::spec::Schema,
+        has_missing_field_ids: bool,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader>> {
+        // Metadata fields (e.g. _file, _pos) are virtual — they don't exist as Parquet columns.
+        // Filter them out so get_arrow_projection_mask only sees real schema field IDs.
+        let project_field_ids_without_metadata: Vec<i32> = field_ids
+            .iter()
+            .filter(|&&id| !is_metadata_field(id))
+            .copied()
+            .collect();
+        let mask = Self::get_arrow_projection_mask(
+            &project_field_ids_without_metadata,
+            schema,
+            builder.parquet_schema(),
+            builder.schema(),
+            has_missing_field_ids,
+        )?;
+        Ok(builder.with_projection(mask))
+    }
+
+    /// Returns the list of virtual columns to request from the Parquet reader for the
+    /// given projection. Currently, only `_pos` is a virtual column (produced by the
+    /// Parquet reader itself rather than read from file data).
+    pub(crate) fn build_virtual_columns(
+        project_field_ids: &[i32],
+    ) -> Vec<Arc<arrow_schema::Field>> {
+        let mut virtual_columns = Vec::new();
+        if project_field_ids.contains(&RESERVED_FIELD_ID_POS) {
+            virtual_columns.push(Arc::clone(row_pos_field()));
+        }
+        virtual_columns
+    }
+
+    /// Builds a [`RecordBatchTransformer`] for a data file scan task.
+    ///
+    /// Handles the three optional transformations that are common to both the full
+    /// scan (`process_file_scan_task`) and the incremental append scan
+    /// (`process_incremental_append_task`):
+    /// - `_file` constant column (only when `RESERVED_FIELD_ID_FILE` is projected)
+    /// - `_pos` virtual column (only when `RESERVED_FIELD_ID_POS` is projected)
+    /// - identity-transform partition columns (only when partition metadata is present)
+    fn build_record_batch_transformer(
+        schema: SchemaRef,
+        project_field_ids: &[i32],
+        data_file_path: &str,
+        partition_spec: Option<Arc<PartitionSpec>>,
+        partition: Option<Struct>,
+    ) -> Result<RecordBatchTransformer> {
+        let mut builder = RecordBatchTransformerBuilder::new(schema, project_field_ids);
+
+        if project_field_ids.contains(&RESERVED_FIELD_ID_FILE) {
+            builder = builder.with_constant(RESERVED_FIELD_ID_FILE, Datum::string(data_file_path));
+        }
+
+        if project_field_ids.contains(&RESERVED_FIELD_ID_POS) {
+            builder = builder.with_virtual_field(Arc::clone(row_pos_field()))?;
+        }
+
+        if let (Some(spec), Some(data)) = (partition_spec, partition) {
+            builder = builder.with_partition(spec, data)?;
+        }
+
+        Ok(builder.build())
+    }
+
+    /// Centralises the final "commit" step shared by all Parquet reading paths.
+    /// Applies projection to `builder`, constructs a `RecordBatchTransformer`, builds the
+    /// Parquet stream, and wraps it so every batch is passed through the transformer.
+    ///
+    /// This is the shared finalization step used by every data-file reading path.
+    pub(crate) fn build_projected_record_batch_stream(
+        builder: ParquetRecordBatchStreamBuilder<ArrowFileReader>,
+        project_field_ids: &[i32],
+        schema: SchemaRef,
+        has_missing_field_ids: bool,
+        data_file_path: &str,
+        partition_spec: Option<Arc<PartitionSpec>>,
+        partition: Option<Struct>,
+    ) -> Result<ArrowRecordBatchStream> {
+        let builder =
+            Self::apply_projection(builder, project_field_ids, &schema, has_missing_field_ids)?;
+
+        let mut record_batch_transformer = Self::build_record_batch_transformer(
+            schema,
+            project_field_ids,
+            data_file_path,
+            partition_spec,
+            partition,
+        )?;
+
+        let record_batch_stream = builder.build()?.map(move |batch| match batch {
+            Ok(batch) => record_batch_transformer.process_record_batch(batch),
+            Err(err) => Err(err.into()),
+        });
+
+        Ok(Box::pin(record_batch_stream) as ArrowRecordBatchStream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::sync::Arc;
+
+    use arrow_array::cast::AsArray;
+    use arrow_array::{Array, ArrayRef, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+    use futures::TryStreamExt;
+    use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
+    use parquet::basic::Compression;
+    use parquet::file::properties::WriterProperties;
+    use tempfile::TempDir;
+
+    use crate::arrow::ArrowReaderBuilder;
+    use crate::io::FileIO;
+    use crate::scan::{FileScanTask, FileScanTaskStream};
+    use crate::spec::{DataFileFormat, NestedField, PrimitiveType, Schema, SchemaRef, Type};
+
+    // INT96 encoding: [nanos_low_u32, nanos_high_u32, julian_day_u32]
+    // Julian day 2_440_588 = Unix epoch (1970-01-01)
+    const UNIX_EPOCH_JULIAN: i64 = 2_440_588;
+    const MICROS_PER_DAY: i64 = 86_400_000_000;
+    // Noon on 3333-01-01 (Julian day 2_953_529) — outside the i64 nanosecond range (~1677-2262).
+    const INT96_TEST_NANOS_WITHIN_DAY: u64 = 43_200_000_000_000;
+    const INT96_TEST_JULIAN_DAY: u32 = 2_953_529;
+
+    fn make_int96_test_value() -> (parquet::data_type::Int96, i64) {
+        let mut val = parquet::data_type::Int96::new();
+        val.set_data(
+            (INT96_TEST_NANOS_WITHIN_DAY & 0xFFFFFFFF) as u32,
+            (INT96_TEST_NANOS_WITHIN_DAY >> 32) as u32,
+            INT96_TEST_JULIAN_DAY,
+        );
+        let expected_micros = (INT96_TEST_JULIAN_DAY as i64 - UNIX_EPOCH_JULIAN) * MICROS_PER_DAY
+            + (INT96_TEST_NANOS_WITHIN_DAY / 1_000) as i64;
+        (val, expected_micros)
+    }
+
+    async fn read_int96_batches(
+        file_path: &str,
+        schema: SchemaRef,
+        project_field_ids: Vec<i32>,
+    ) -> Vec<RecordBatch> {
+        let file_io = FileIO::new_with_fs();
+        let reader = ArrowReaderBuilder::new(file_io).build();
+
+        let file_size = std::fs::metadata(file_path).unwrap().len();
+        let task = FileScanTask {
+            file_size_in_bytes: file_size,
+            start: 0,
+            length: file_size,
+            record_count: None,
+            data_file_path: file_path.to_string(),
+            data_file_format: DataFileFormat::Parquet,
+            schema,
+            project_field_ids,
+            predicate: None,
+            deletes: vec![],
+            partition: None,
+            partition_spec: None,
+            name_mapping: None,
+            case_sensitive: false,
+        };
+
+        let tasks = Box::pin(futures::stream::iter(vec![Ok(task)])) as FileScanTaskStream;
+        reader
+            .read(tasks)
+            .unwrap()
+            .stream()
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    // ArrowWriter cannot write INT96, so we use SerializedFileWriter directly.
+    fn write_int96_parquet_file(
+        table_location: &str,
+        filename: &str,
+        with_field_ids: bool,
+    ) -> (String, Vec<i64>) {
+        use parquet::basic::{Repetition, Type as PhysicalType};
+        use parquet::data_type::{Int32Type, Int96, Int96Type};
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::types::Type as SchemaType;
+
+        let file_path = format!("{table_location}/{filename}");
+
+        let mut ts_builder = SchemaType::primitive_type_builder("ts", PhysicalType::INT96)
+            .with_repetition(Repetition::OPTIONAL);
+        let mut id_builder = SchemaType::primitive_type_builder("id", PhysicalType::INT32)
+            .with_repetition(Repetition::REQUIRED);
+
+        if with_field_ids {
+            ts_builder = ts_builder.with_id(Some(1));
+            id_builder = id_builder.with_id(Some(2));
+        }
+
+        let schema = SchemaType::group_type_builder("schema")
+            .with_fields(vec![
+                Arc::new(ts_builder.build().unwrap()),
+                Arc::new(id_builder.build().unwrap()),
+            ])
+            .build()
+            .unwrap();
+
+        // Dates outside the i64 nanosecond range (~1677-2262) overflow without coercion.
+        const NOON_NANOS: u64 = INT96_TEST_NANOS_WITHIN_DAY;
+        const JULIAN_3333: u32 = INT96_TEST_JULIAN_DAY;
+        const JULIAN_2100: u32 = 2_488_070;
+
+        let test_data: Vec<(u32, u32, u32, i64)> = vec![
+            // 3333-01-01 00:00:00
+            (
+                0,
+                0,
+                JULIAN_3333,
+                (JULIAN_3333 as i64 - UNIX_EPOCH_JULIAN) * MICROS_PER_DAY,
+            ),
+            // 3333-01-01 12:00:00
+            (
+                (NOON_NANOS & 0xFFFFFFFF) as u32,
+                (NOON_NANOS >> 32) as u32,
+                JULIAN_3333,
+                (JULIAN_3333 as i64 - UNIX_EPOCH_JULIAN) * MICROS_PER_DAY
+                    + (NOON_NANOS / 1_000) as i64,
+            ),
+            // 2100-01-01 00:00:00
+            (
+                0,
+                0,
+                JULIAN_2100,
+                (JULIAN_2100 as i64 - UNIX_EPOCH_JULIAN) * MICROS_PER_DAY,
+            ),
+        ];
+
+        let int96_values: Vec<Int96> = test_data
+            .iter()
+            .map(|(lo, hi, day, _)| {
+                let mut v = Int96::new();
+                v.set_data(*lo, *hi, *day);
+                v
+            })
+            .collect();
+
+        let id_values: Vec<i32> = (0..test_data.len() as i32).collect();
+        let expected_micros: Vec<i64> = test_data.iter().map(|(_, _, _, m)| *m).collect();
+
+        let file = File::create(&file_path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, Arc::new(schema), Default::default()).unwrap();
+
+        let mut row_group = writer.next_row_group().unwrap();
+        {
+            // def=1: ts is OPTIONAL and present. No repetition levels (top-level columns).
+            let mut col = row_group.next_column().unwrap().unwrap();
+            col.typed::<Int96Type>()
+                .write_batch(&int96_values, Some(&vec![1; test_data.len()]), None)
+                .unwrap();
+            col.close().unwrap();
+        }
+        {
+            let mut col = row_group.next_column().unwrap().unwrap();
+            col.typed::<Int32Type>()
+                .write_batch(&id_values, None, None)
+                .unwrap();
+            col.close().unwrap();
+        }
+        row_group.close().unwrap();
+        writer.close().unwrap();
+
+        (file_path, expected_micros)
+    }
+
+    async fn assert_int96_read_matches(
+        file_path: &str,
+        schema: SchemaRef,
+        project_field_ids: Vec<i32>,
+        expected_micros: &[i64],
+    ) {
+        use arrow_array::TimestampMicrosecondArray;
+
+        let batches = read_int96_batches(file_path, schema, project_field_ids).await;
+
+        assert_eq!(batches.len(), 1);
+        let ts_array = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("Expected TimestampMicrosecondArray");
+
+        for (i, expected) in expected_micros.iter().enumerate() {
+            assert_eq!(
+                ts_array.value(i),
+                *expected,
+                "Row {i}: got {}, expected {expected}",
+                ts_array.value(i)
+            );
+        }
+    }
+
+    /// Test that concurrency=1 reads all files correctly and in deterministic order.
+    /// This verifies the fast-path optimization for single concurrency.
+    #[tokio::test]
+    async fn test_read_with_concurrency_one() {
+        use arrow_array::Int32Array;
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(2, "file_num", Type::Primitive(PrimitiveType::Int))
+                        .into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "1".to_string(),
+            )])),
+            Field::new("file_num", DataType::Int32, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "2".to_string(),
+            )])),
+        ]));
+
+        let tmp_dir = TempDir::new().unwrap();
+        let table_location = tmp_dir.path().to_str().unwrap().to_string();
+        let file_io = FileIO::new_with_fs();
+
+        // Create 3 parquet files with different data
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        for file_num in 0..3 {
+            let id_data = Arc::new(Int32Array::from_iter_values(
+                file_num * 10..(file_num + 1) * 10,
+            )) as ArrayRef;
+            let file_num_data = Arc::new(Int32Array::from(vec![file_num; 10])) as ArrayRef;
+
+            let to_write =
+                RecordBatch::try_new(arrow_schema.clone(), vec![id_data, file_num_data]).unwrap();
+
+            let file = File::create(format!("{table_location}/file_{file_num}.parquet")).unwrap();
+            let mut writer =
+                ArrowWriter::try_new(file, to_write.schema(), Some(props.clone())).unwrap();
+            writer.write(&to_write).expect("Writing batch");
+            writer.close().unwrap();
+        }
+
+        // Read with concurrency=1 (fast-path)
+        let reader = ArrowReaderBuilder::new(file_io)
+            .with_data_file_concurrency_limit(1)
+            .build();
+
+        // Create tasks in a specific order: file_0, file_1, file_2
+        let tasks = vec![
+            Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/file_0.parquet"))
+                    .unwrap()
+                    .len(),
+                start: 0,
+                length: 0,
+                record_count: None,
+                data_file_path: format!("{table_location}/file_0.parquet"),
+                data_file_format: DataFileFormat::Parquet,
+                schema: schema.clone(),
+                project_field_ids: vec![1, 2],
+                predicate: None,
+                deletes: vec![],
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            }),
+            Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/file_1.parquet"))
+                    .unwrap()
+                    .len(),
+                start: 0,
+                length: 0,
+                record_count: None,
+                data_file_path: format!("{table_location}/file_1.parquet"),
+                data_file_format: DataFileFormat::Parquet,
+                schema: schema.clone(),
+                project_field_ids: vec![1, 2],
+                predicate: None,
+                deletes: vec![],
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            }),
+            Ok(FileScanTask {
+                file_size_in_bytes: std::fs::metadata(format!("{table_location}/file_2.parquet"))
+                    .unwrap()
+                    .len(),
+                start: 0,
+                length: 0,
+                record_count: None,
+                data_file_path: format!("{table_location}/file_2.parquet"),
+                data_file_format: DataFileFormat::Parquet,
+                schema: schema.clone(),
+                project_field_ids: vec![1, 2],
+                predicate: None,
+                deletes: vec![],
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            }),
+        ];
+
+        let tasks_stream = Box::pin(futures::stream::iter(tasks)) as FileScanTaskStream;
+
+        let result = reader
+            .read(tasks_stream)
+            .unwrap()
+            .stream()
+            .try_collect::<Vec<RecordBatch>>()
+            .await
+            .unwrap();
+
+        // Verify we got all 30 rows (10 from each file)
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 30, "Should have 30 total rows");
+
+        // Collect all ids and file_nums to verify data
+        let mut all_ids = Vec::new();
+        let mut all_file_nums = Vec::new();
+
+        for batch in &result {
+            let id_col = batch
+                .column(0)
+                .as_primitive::<arrow_array::types::Int32Type>();
+            let file_num_col = batch
+                .column(1)
+                .as_primitive::<arrow_array::types::Int32Type>();
+
+            for i in 0..batch.num_rows() {
+                all_ids.push(id_col.value(i));
+                all_file_nums.push(file_num_col.value(i));
+            }
+        }
+
+        assert_eq!(all_ids.len(), 30);
+        assert_eq!(all_file_nums.len(), 30);
+
+        // With concurrency=1 and sequential processing, files should be processed in order
+        // file_0: ids 0-9, file_num=0
+        // file_1: ids 10-19, file_num=1
+        // file_2: ids 20-29, file_num=2
+        for i in 0..10 {
+            assert_eq!(all_file_nums[i], 0, "First 10 rows should be from file_0");
+            assert_eq!(all_ids[i], i as i32, "IDs should be 0-9");
+        }
+        for i in 10..20 {
+            assert_eq!(all_file_nums[i], 1, "Next 10 rows should be from file_1");
+            assert_eq!(all_ids[i], i as i32, "IDs should be 10-19");
+        }
+        for i in 20..30 {
+            assert_eq!(all_file_nums[i], 2, "Last 10 rows should be from file_2");
+            assert_eq!(all_ids[i], i as i32, "IDs should be 20-29");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_int96_timestamps_with_field_ids() {
+        let schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::optional(1, "ts", Type::Primitive(PrimitiveType::Timestamp))
+                        .into(),
+                    NestedField::required(2, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        let tmp_dir = TempDir::new().unwrap();
+        let table_location = tmp_dir.path().to_str().unwrap().to_string();
+        let (file_path, expected_micros) =
+            write_int96_parquet_file(&table_location, "with_ids.parquet", true);
+
+        assert_int96_read_matches(&file_path, schema, vec![1, 2], &expected_micros).await;
+    }
+
+    #[tokio::test]
+    async fn test_read_int96_timestamps_without_field_ids() {
+        let schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::optional(1, "ts", Type::Primitive(PrimitiveType::Timestamp))
+                        .into(),
+                    NestedField::required(2, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        let tmp_dir = TempDir::new().unwrap();
+        let table_location = tmp_dir.path().to_str().unwrap().to_string();
+        let (file_path, expected_micros) =
+            write_int96_parquet_file(&table_location, "no_ids.parquet", false);
+
+        assert_int96_read_matches(&file_path, schema, vec![1, 2], &expected_micros).await;
+    }
+
+    #[tokio::test]
+    async fn test_read_int96_timestamps_in_struct() {
+        use arrow_array::{StructArray, TimestampMicrosecondArray};
+        use parquet::basic::{Repetition, Type as PhysicalType};
+        use parquet::data_type::Int96Type;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::types::Type as SchemaType;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let table_location = tmp_dir.path().to_str().unwrap().to_string();
+        let file_path = format!("{table_location}/struct_int96.parquet");
+
+        let ts_type = SchemaType::primitive_type_builder("ts", PhysicalType::INT96)
+            .with_repetition(Repetition::OPTIONAL)
+            .with_id(Some(2))
+            .build()
+            .unwrap();
+
+        let struct_type = SchemaType::group_type_builder("data")
+            .with_repetition(Repetition::REQUIRED)
+            .with_id(Some(1))
+            .with_fields(vec![Arc::new(ts_type)])
+            .build()
+            .unwrap();
+
+        let parquet_schema = SchemaType::group_type_builder("schema")
+            .with_fields(vec![Arc::new(struct_type)])
+            .build()
+            .unwrap();
+
+        let (int96_val, expected_micros) = make_int96_test_value();
+
+        let file = File::create(&file_path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, Arc::new(parquet_schema), Default::default()).unwrap();
+
+        // def=1: struct is REQUIRED so no level, ts is OPTIONAL and present (1).
+        // No repetition levels needed (no repeated groups).
+        let mut row_group = writer.next_row_group().unwrap();
+        {
+            let mut col = row_group.next_column().unwrap().unwrap();
+            col.typed::<Int96Type>()
+                .write_batch(&[int96_val], Some(&[1]), None)
+                .unwrap();
+            col.close().unwrap();
+        }
+        row_group.close().unwrap();
+        writer.close().unwrap();
+
+        let iceberg_schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::required(
+                        1,
+                        "data",
+                        Type::Struct(crate::spec::StructType::new(vec![
+                            NestedField::optional(
+                                2,
+                                "ts",
+                                Type::Primitive(PrimitiveType::Timestamp),
+                            )
+                            .into(),
+                        ])),
+                    )
+                    .into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        let batches = read_int96_batches(&file_path, iceberg_schema, vec![1]).await;
+
+        assert_eq!(batches.len(), 1);
+        let struct_array = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("Expected StructArray");
+        let ts_array = struct_array
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("Expected TimestampMicrosecondArray inside struct");
+
+        assert_eq!(
+            ts_array.value(0),
+            expected_micros,
+            "INT96 in struct: got {}, expected {expected_micros}",
+            ts_array.value(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_int96_timestamps_in_list() {
+        use arrow_array::{ListArray, TimestampMicrosecondArray};
+        use parquet::basic::{Repetition, Type as PhysicalType};
+        use parquet::data_type::Int96Type;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::types::Type as SchemaType;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let table_location = tmp_dir.path().to_str().unwrap().to_string();
+        let file_path = format!("{table_location}/list_int96.parquet");
+
+        // 3-level LIST encoding:
+        //   optional group timestamps (LIST) {
+        //     repeated group list {
+        //       optional int96 element;
+        //     }
+        //   }
+        let element_type = SchemaType::primitive_type_builder("element", PhysicalType::INT96)
+            .with_repetition(Repetition::OPTIONAL)
+            .with_id(Some(2))
+            .build()
+            .unwrap();
+
+        let list_group = SchemaType::group_type_builder("list")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(element_type)])
+            .build()
+            .unwrap();
+
+        let list_type = SchemaType::group_type_builder("timestamps")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_id(Some(1))
+            .with_logical_type(Some(parquet::basic::LogicalType::List))
+            .with_fields(vec![Arc::new(list_group)])
+            .build()
+            .unwrap();
+
+        let parquet_schema = SchemaType::group_type_builder("schema")
+            .with_fields(vec![Arc::new(list_type)])
+            .build()
+            .unwrap();
+
+        let (int96_val, expected_micros) = make_int96_test_value();
+
+        let file = File::create(&file_path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, Arc::new(parquet_schema), Default::default()).unwrap();
+
+        // Write a single row with a list containing one INT96 element.
+        // def=3: list present (1) + repeated group (2) + element present (3)
+        // rep=0: start of a new list
+        let mut row_group = writer.next_row_group().unwrap();
+        {
+            let mut col = row_group.next_column().unwrap().unwrap();
+            col.typed::<Int96Type>()
+                .write_batch(&[int96_val], Some(&[3]), Some(&[0]))
+                .unwrap();
+            col.close().unwrap();
+        }
+        row_group.close().unwrap();
+        writer.close().unwrap();
+
+        let iceberg_schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::optional(
+                        1,
+                        "timestamps",
+                        Type::List(crate::spec::ListType {
+                            element_field: NestedField::optional(
+                                2,
+                                "element",
+                                Type::Primitive(PrimitiveType::Timestamp),
+                            )
+                            .into(),
+                        }),
+                    )
+                    .into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        let batches = read_int96_batches(&file_path, iceberg_schema, vec![1]).await;
+
+        assert_eq!(batches.len(), 1);
+        let list_array = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("Expected ListArray");
+        let ts_array = list_array
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("Expected TimestampMicrosecondArray inside list");
+
+        assert_eq!(
+            ts_array.value(0),
+            expected_micros,
+            "INT96 in list: got {}, expected {expected_micros}",
+            ts_array.value(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_int96_timestamps_in_map() {
+        use arrow_array::{MapArray, TimestampMicrosecondArray};
+        use parquet::basic::{Repetition, Type as PhysicalType};
+        use parquet::data_type::{ByteArrayType, Int96Type};
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::types::Type as SchemaType;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let table_location = tmp_dir.path().to_str().unwrap().to_string();
+        let file_path = format!("{table_location}/map_int96.parquet");
+
+        // MAP encoding:
+        //   optional group ts_map (MAP) {
+        //     repeated group key_value {
+        //       required binary key (UTF8);
+        //       optional int96 value;
+        //     }
+        //   }
+        let key_type = SchemaType::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .with_logical_type(Some(parquet::basic::LogicalType::String))
+            .with_id(Some(2))
+            .build()
+            .unwrap();
+
+        let value_type = SchemaType::primitive_type_builder("value", PhysicalType::INT96)
+            .with_repetition(Repetition::OPTIONAL)
+            .with_id(Some(3))
+            .build()
+            .unwrap();
+
+        let key_value_group = SchemaType::group_type_builder("key_value")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(key_type), Arc::new(value_type)])
+            .build()
+            .unwrap();
+
+        let map_type = SchemaType::group_type_builder("ts_map")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_id(Some(1))
+            .with_logical_type(Some(parquet::basic::LogicalType::Map))
+            .with_fields(vec![Arc::new(key_value_group)])
+            .build()
+            .unwrap();
+
+        let parquet_schema = SchemaType::group_type_builder("schema")
+            .with_fields(vec![Arc::new(map_type)])
+            .build()
+            .unwrap();
+
+        let (int96_val, expected_micros) = make_int96_test_value();
+
+        let file = File::create(&file_path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, Arc::new(parquet_schema), Default::default()).unwrap();
+
+        // Write a single row with a map containing one key-value pair.
+        // rep=0 for both columns: start of a new map.
+        // key def=2: map present (1) + key_value entry present (2), key is REQUIRED.
+        // value def=3: map present (1) + key_value entry present (2) + value present (3).
+        let mut row_group = writer.next_row_group().unwrap();
+        {
+            let mut col = row_group.next_column().unwrap().unwrap();
+            col.typed::<ByteArrayType>()
+                .write_batch(
+                    &[parquet::data_type::ByteArray::from("event_time")],
+                    Some(&[2]),
+                    Some(&[0]),
+                )
+                .unwrap();
+            col.close().unwrap();
+        }
+        {
+            let mut col = row_group.next_column().unwrap().unwrap();
+            col.typed::<Int96Type>()
+                .write_batch(&[int96_val], Some(&[3]), Some(&[0]))
+                .unwrap();
+            col.close().unwrap();
+        }
+        row_group.close().unwrap();
+        writer.close().unwrap();
+
+        let iceberg_schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::optional(
+                        1,
+                        "ts_map",
+                        Type::Map(crate::spec::MapType {
+                            key_field: NestedField::required(
+                                2,
+                                "key",
+                                Type::Primitive(PrimitiveType::String),
+                            )
+                            .into(),
+                            value_field: NestedField::optional(
+                                3,
+                                "value",
+                                Type::Primitive(PrimitiveType::Timestamp),
+                            )
+                            .into(),
+                        }),
+                    )
+                    .into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        let batches = read_int96_batches(&file_path, iceberg_schema, vec![1]).await;
+
+        assert_eq!(batches.len(), 1);
+        let map_array = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<MapArray>()
+            .expect("Expected MapArray");
+        let ts_array = map_array
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("Expected TimestampMicrosecondArray as map values");
+
+        assert_eq!(
+            ts_array.value(0),
+            expected_micros,
+            "INT96 in map: got {}, expected {expected_micros}",
+            ts_array.value(0)
+        );
+    }
+}

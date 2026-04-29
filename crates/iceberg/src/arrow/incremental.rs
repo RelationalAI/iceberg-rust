@@ -25,6 +25,7 @@ use futures::stream::select;
 use futures::{Stream, StreamExt, TryStreamExt};
 
 use crate::arrow::reader::{ParquetReadOptions, process_record_batch_stream};
+use crate::arrow::scan_metrics::ScanMetrics;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Bind;
@@ -49,18 +50,34 @@ pub enum IncrementalBatchType {
     Delete,
 }
 
-/// The stream of incremental Arrow `RecordBatch`es with batch type.
-pub type CombinedIncrementalBatchRecordStream =
+/// Inner stream type for [`CombinedIncrementalScanResult`].
+pub type CombinedIncrementalBatchStream =
     Pin<Box<dyn Stream<Item = Result<(IncrementalBatchType, RecordBatch)>> + Send + 'static>>;
 
-/// Stream type for obtaining a separate stream of appended and deleted record batches.
-pub type UnzippedIncrementalBatchRecordStream = (ArrowRecordBatchStream, ArrowRecordBatchStream);
+/// The stream of incremental Arrow `RecordBatch`es with batch type, together with scan metrics.
+pub struct CombinedIncrementalScanResult {
+    /// Combined stream of appended and deleted record batches, each tagged with its type.
+    pub stream: CombinedIncrementalBatchStream,
+    /// Metrics collected during the incremental scan (e.g. bytes read from storage).
+    pub metrics: ScanMetrics,
+}
+
+/// Separate streams for appended and deleted record batches, together with scan metrics.
+pub struct UnzippedIncrementalScanResult {
+    /// Stream of appended record batches.
+    pub appends: ArrowRecordBatchStream,
+    /// Stream of deleted record batches.
+    pub deletes: ArrowRecordBatchStream,
+    /// Metrics collected during the incremental scan (e.g. bytes read from storage).
+    pub metrics: ScanMetrics,
+}
 
 async fn process_incremental_append_task(
     task: AppendedFileScanTask,
     batch_size: Option<usize>,
     file_io: FileIO,
     parquet_read_options: ParquetReadOptions,
+    scan_metrics: ScanMetrics,
 ) -> Result<ArrowRecordBatchStream> {
     let AppendedFileScanTask {
         base,
@@ -80,6 +97,8 @@ async fn process_incremental_append_task(
         ArrowReader::build_virtual_columns(&base.project_field_ids),
         batch_size,
         None, // name_mapping not yet supported in incremental scan
+        Some(Arc::clone(scan_metrics.bytes_read_counter())),
+        Some(&base.schema),
     )
     .await?;
 
@@ -184,6 +203,7 @@ async fn process_equality_delete_task(
     batch_size: Option<usize>,
     file_io: FileIO,
     parquet_read_options: ParquetReadOptions,
+    scan_metrics: ScanMetrics,
 ) -> Result<ArrowRecordBatchStream> {
     let file_path = task.data_file_path().to_string();
 
@@ -205,6 +225,8 @@ async fn process_equality_delete_task(
         vec![Arc::clone(row_pos_field())],
         batch_size,
         None, // name_mapping not yet supported in incremental scan
+        Some(Arc::clone(scan_metrics.bytes_read_counter())),
+        Some(&task.base.schema),
     )
     .await?;
 
@@ -281,28 +303,32 @@ async fn process_equality_delete_task(
     Ok(Box::pin(stream) as ArrowRecordBatchStream)
 }
 
-impl StreamsInto<ArrowReader, CombinedIncrementalBatchRecordStream>
-    for IncrementalFileScanTaskStreams
-{
+impl StreamsInto<ArrowReader, CombinedIncrementalScanResult> for IncrementalFileScanTaskStreams {
     /// Takes separate streams of appended and deleted file scan tasks and reads all the files.
-    /// Returns a combined stream of Arrow `RecordBatch`es containing the data from the files.
-    fn stream(self, reader: ArrowReader) -> Result<CombinedIncrementalBatchRecordStream> {
-        let (appends, deletes) =
-            StreamsInto::<ArrowReader, UnzippedIncrementalBatchRecordStream>::stream(self, reader)?;
+    /// Returns a [`CombinedIncrementalScanResult`] containing a combined stream of Arrow
+    /// `RecordBatch`es and scan metrics.
+    fn stream(self, reader: ArrowReader) -> Result<CombinedIncrementalScanResult> {
+        let UnzippedIncrementalScanResult {
+            appends,
+            deletes,
+            metrics,
+        } = StreamsInto::<ArrowReader, UnzippedIncrementalScanResult>::stream(self, reader)?;
 
         let left = appends.map(|res| res.map(|batch| (IncrementalBatchType::Append, batch)));
         let right = deletes.map(|res| res.map(|batch| (IncrementalBatchType::Delete, batch)));
 
-        Ok(Box::pin(select(left, right)) as CombinedIncrementalBatchRecordStream)
+        Ok(CombinedIncrementalScanResult {
+            stream: Box::pin(select(left, right)),
+            metrics,
+        })
     }
 }
 
-impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
-    for IncrementalFileScanTaskStreams
-{
+impl StreamsInto<ArrowReader, UnzippedIncrementalScanResult> for IncrementalFileScanTaskStreams {
     /// Takes separate streams of appended and deleted file scan tasks and reads all the files.
-    /// Returns two separate streams of Arrow `RecordBatch`es containing appended data and deleted records.
-    fn stream(self, reader: ArrowReader) -> Result<UnzippedIncrementalBatchRecordStream> {
+    /// Returns an [`UnzippedIncrementalScanResult`] containing separate streams of appended and
+    /// deleted record batches together with scan metrics.
+    fn stream(self, reader: ArrowReader) -> Result<UnzippedIncrementalScanResult> {
         let (appends_tx, appends_rx) =
             channel::<Result<RecordBatch>>(reader.concurrency_limit_data_files);
         let (deletes_tx, deletes_rx) =
@@ -310,16 +336,19 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
 
         let batch_size = reader.batch_size;
         let parquet_read_options = reader.parquet_read_options;
+        let scan_metrics = ScanMetrics::new();
 
         let (append_stream, delete_stream) = self;
 
         // Process append tasks
         let file_io_append = reader.file_io.clone();
+        let scan_metrics_append = scan_metrics.clone();
         spawn(async move {
             let _ = append_stream
                 .try_for_each_concurrent(reader.concurrency_limit_data_files, |append_task| {
                     let file_io = file_io_append.clone();
                     let appends_tx = appends_tx.clone();
+                    let scan_metrics = scan_metrics_append.clone();
                     async move {
                         // Inner spawn: each file's IO runs on its own tokio task for true
                         // parallelism. Awaiting it keeps the concurrency slot occupied until
@@ -335,6 +364,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                 batch_size,
                                 file_io,
                                 append_read_options,
+                                scan_metrics,
                             )
                             .await;
 
@@ -355,11 +385,13 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
 
         // Process delete tasks
         let file_io_delete = reader.file_io.clone();
+        let scan_metrics_delete = scan_metrics.clone();
         spawn(async move {
             let _ = delete_stream
                 .try_for_each_concurrent(reader.concurrency_limit_data_files, |delete_task| {
                     let deletes_tx = deletes_tx.clone();
                     let file_io = file_io_delete.clone();
+                    let scan_metrics = scan_metrics_delete.clone();
                     async move {
                         // Inner spawn: same pattern as full-scan reader — spawn for parallelism,
                         // await to keep the concurrency slot occupied until the task completes.
@@ -406,6 +438,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                                         batch_size,
                                         file_io.clone(),
                                         eq_read_options,
+                                        scan_metrics,
                                     )
                                     .await;
 
@@ -426,9 +459,10 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalBatchRecordStream>
                 .await;
         });
 
-        Ok((
-            Box::pin(appends_rx) as ArrowRecordBatchStream,
-            Box::pin(deletes_rx) as ArrowRecordBatchStream,
-        ))
+        Ok(UnzippedIncrementalScanResult {
+            appends: Box::pin(appends_rx) as ArrowRecordBatchStream,
+            deletes: Box::pin(deletes_rx) as ArrowRecordBatchStream,
+            metrics: scan_metrics,
+        })
     }
 }
