@@ -23,13 +23,15 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
+use arrow_array::RecordBatch;
+use futures::channel::mpsc::channel;
 use futures::{StreamExt, TryStreamExt};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, ParquetRecordBatchStreamBuilder};
 
 use super::{
     ArrowFileReader, ArrowReader, ParquetReadOptions, add_fallback_field_ids_to_arrow_schema,
-    apply_name_mapping_to_arrow_schema,
+    apply_name_mapping_to_arrow_schema, process_record_batch_stream,
 };
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::int96::coerce_int96_timestamps;
@@ -43,6 +45,7 @@ use crate::io::{FileIO, FileMetadata, FileRead};
 use crate::metadata_columns::{
     RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS, is_metadata_field, row_pos_field,
 };
+use crate::runtime::spawn;
 use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
 use crate::spec::{Datum, NameMapping, PartitionSpec, SchemaRef, Struct};
 use crate::{Error, ErrorKind};
@@ -78,16 +81,37 @@ impl ArrowReader {
                     .try_flatten(),
             )
         } else {
-            Box::pin(
-                tasks
-                    .map_ok(move |task| task_reader.clone().process(task))
-                    .map_err(|err| {
-                        Error::new(ErrorKind::Unexpected, "file scan task generate failed")
-                            .with_source(err)
+            // Multi-concurrency path: spawn each file's IO-heavy processing as an independent
+            // tokio task for true parallelism, streaming results through a channel.
+            let (tx, rx) = channel::<Result<RecordBatch>>(concurrency_limit_data_files);
+
+            // Outer spawn: runs the task coordination loop without blocking the caller.
+            spawn(async move {
+                let _ = tasks
+                    .try_for_each_concurrent(concurrency_limit_data_files, |task| {
+                        let task_reader = task_reader.clone();
+                        let tx = tx.clone();
+
+                        async move {
+                            // Inner spawn: each file's IO operations run on their own tokio task.
+                            spawn(async move {
+                                let record_batch_stream = task_reader.process(task).await;
+                                process_record_batch_stream(
+                                    record_batch_stream,
+                                    tx,
+                                    "failed to read record batch",
+                                )
+                                .await;
+                            })
+                            .await;
+
+                            Ok(())
+                        }
                     })
-                    .try_buffer_unordered(concurrency_limit_data_files)
-                    .try_flatten_unordered(concurrency_limit_data_files),
-            )
+                    .await;
+            });
+
+            Box::pin(rx) as ArrowRecordBatchStream
         };
 
         Ok(ScanResult::new(stream, scan_metrics))
