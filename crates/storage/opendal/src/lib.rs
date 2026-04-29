@@ -119,10 +119,7 @@ pub enum OpenDalStorageFactory {
     Oss,
     /// Azure Data Lake Storage factory.
     #[cfg(feature = "opendal-azdls")]
-    Azdls {
-        /// The configured Azure storage scheme.
-        configured_scheme: AzureStorageScheme,
-    },
+    Azdls,
 }
 
 #[typetag::serde(name = "OpenDalStorageFactory")]
@@ -152,12 +149,9 @@ impl StorageFactory for OpenDalStorageFactory {
                 config: oss_config_parse(config.props().clone())?.into(),
             })),
             #[cfg(feature = "opendal-azdls")]
-            OpenDalStorageFactory::Azdls { configured_scheme } => {
-                Ok(Arc::new(OpenDalStorage::Azdls {
-                    configured_scheme: Some(configured_scheme.clone()),
-                    config: azdls_config_parse(config.props().clone())?.into(),
-                }))
-            }
+            OpenDalStorageFactory::Azdls => Ok(Arc::new(OpenDalStorage::Azdls {
+                config: azdls_config_parse(config.props().clone())?.into(),
+            })),
             #[cfg(all(
                 not(feature = "opendal-memory"),
                 not(feature = "opendal-fs"),
@@ -220,10 +214,6 @@ pub enum OpenDalStorage {
     /// `wasb[s]://<container>@<account>.blob.<endpoint-suffix>/<path>`.
     #[cfg(feature = "opendal-azdls")]
     Azdls {
-        /// The expected Azure storage scheme. When set, paths must use this
-        /// exact scheme; `None` disables scheme validation (used by the
-        /// resolving storage, which auto-detects the scheme from the path).
-        configured_scheme: Option<AzureStorageScheme>,
         /// Azure DLS configuration.
         config: Arc<AzdlsConfig>,
     },
@@ -319,10 +309,7 @@ impl OpenDalStorage {
                 }
             }
             #[cfg(feature = "opendal-azdls")]
-            OpenDalStorage::Azdls {
-                configured_scheme,
-                config,
-            } => azdls_create_operator(path, config, configured_scheme.as_ref())?,
+            OpenDalStorage::Azdls { config } => azdls_create_operator(path, config)?,
             #[cfg(all(
                 not(feature = "opendal-s3"),
                 not(feature = "opendal-fs"),
@@ -414,12 +401,9 @@ impl OpenDalStorage {
                 }
             }
             #[cfg(feature = "opendal-azdls")]
-            OpenDalStorage::Azdls {
-                configured_scheme,
-                config,
-            } => {
+            OpenDalStorage::Azdls { config } => {
                 let azure_path = path.parse::<AzureStoragePath>()?;
-                match_path_with_config(&azure_path, config, configured_scheme.as_ref())?;
+                match_path_with_config(&azure_path, config)?;
                 let relative_path_len = azure_path.path.len();
                 Ok(&path[path.len() - relative_path_len..])
             }
@@ -708,7 +692,6 @@ mod tests {
     #[test]
     fn test_relativize_path_azdls() {
         let storage = OpenDalStorage::Azdls {
-            configured_scheme: Some(AzureStorageScheme::Abfss),
             config: Arc::new(AzdlsConfig {
                 account_name: Some("myaccount".to_string()),
                 endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
