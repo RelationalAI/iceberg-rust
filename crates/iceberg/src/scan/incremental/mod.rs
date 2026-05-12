@@ -24,8 +24,7 @@ use std::sync::Arc;
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::delete_filter::{DeleteFilter, is_equality_delete};
 use crate::arrow::{
-    ArrowReaderBuilder, CombinedIncrementalBatchRecordStream, StreamsInto,
-    UnzippedIncrementalBatchRecordStream,
+    ArrowReaderBuilder, CombinedIncrementalScanResult, StreamsInto, UnzippedIncrementalScanResult,
 };
 use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
@@ -733,8 +732,8 @@ impl IncrementalTableScan {
         Ok((append_stream, delete_stream))
     }
 
-    /// Returns an [`CombinedIncrementalBatchRecordStream`] for this incremental table scan.
-    pub async fn to_arrow(&self) -> Result<CombinedIncrementalBatchRecordStream> {
+    /// Returns a [`CombinedIncrementalScanResult`] for this incremental table scan.
+    pub async fn to_arrow(&self) -> Result<CombinedIncrementalScanResult> {
         let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
             .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
             .with_row_group_filtering_enabled(true)
@@ -749,9 +748,10 @@ impl IncrementalTableScan {
         file_scan_task_stream.stream(arrow_reader)
     }
 
-    /// Returns an [`UnzippedIncrementalBatchRecordStream`] for this incremental table scan.
-    /// This stream will yield separate streams for appended and deleted record batches.
-    pub async fn to_unzipped_arrow(&self) -> Result<UnzippedIncrementalBatchRecordStream> {
+    /// Returns an [`UnzippedIncrementalScanResult`] for this incremental table scan.
+    /// This result contains separate streams for appended and deleted record batches,
+    /// together with scan metrics.
+    pub async fn to_unzipped_arrow(&self) -> Result<UnzippedIncrementalScanResult> {
         let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
             .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
             .with_row_group_filtering_enabled(true)

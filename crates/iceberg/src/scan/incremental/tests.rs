@@ -1565,7 +1565,7 @@ async fn scan_and_verify(
         .build()
         .unwrap();
 
-    let stream = incremental_scan.to_arrow().await.unwrap();
+    let stream = incremental_scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     let append_batches: Vec<_> = batches
@@ -2003,7 +2003,7 @@ async fn test_incremental_scan_builder_options() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     // Verify we have both append and delete batches
@@ -2038,7 +2038,7 @@ async fn test_incremental_scan_builder_options() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     let append_batches: Vec<_> = batches
@@ -2069,7 +2069,7 @@ async fn test_incremental_scan_builder_options() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     let append_batches: Vec<_> = batches
@@ -2097,7 +2097,7 @@ async fn test_incremental_scan_builder_options() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     let append_batches = batches
@@ -2123,7 +2123,7 @@ async fn test_incremental_scan_builder_options() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     let append_batches = batches
@@ -2145,7 +2145,7 @@ async fn test_incremental_scan_builder_options() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     let append_batches: Vec<_> = batches
@@ -2182,7 +2182,7 @@ async fn test_incremental_scan_builder_options() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     let delete_batches: Vec<_> = batches
@@ -2772,7 +2772,7 @@ async fn test_incremental_scan_includes_root_when_from_is_none() {
     // Test 2: Scan using table.incremental_scan(None, None) API
     // This should INCLUDE the root snapshot
     let scan = fixture.table.incremental_scan(None, None).build().unwrap();
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     // Collect all appended data
@@ -2867,7 +2867,7 @@ async fn test_incremental_scan_with_file_column() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     // Get append batches
@@ -2938,7 +2938,7 @@ async fn test_incremental_select_with_pos_column() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     // Get append batches (we're only appending in this test)
@@ -2997,7 +2997,7 @@ async fn test_incremental_select_with_pos_column() {
             .build()
             .unwrap();
 
-        let stream = scan.to_arrow().await.unwrap();
+        let stream = scan.to_arrow().await.unwrap().stream;
         let batches: Vec<_> = stream.try_collect().await.unwrap();
 
         // Get append batches
@@ -3073,7 +3073,7 @@ async fn test_incremental_select_with_pos_and_file_columns() {
         .build()
         .unwrap();
 
-    let stream = scan.to_arrow().await.unwrap();
+    let stream = scan.to_arrow().await.unwrap().stream;
     let batches: Vec<_> = stream.try_collect().await.unwrap();
 
     // Get append batches
@@ -3169,7 +3169,8 @@ async fn test_incremental_scan_with_no_deletes() {
         .unwrap();
 
     // Convert to arrow streams (unzipped into separate append and delete streams)
-    let (append_stream, delete_stream) = scan.to_unzipped_arrow().await.unwrap();
+    let result = scan.to_unzipped_arrow().await.unwrap();
+    let (append_stream, delete_stream) = (result.appends, result.deletes);
 
     // IMPORTANT: Try to collect from delete stream FIRST (without consuming append stream)
     // This is the scenario that previously caused a deadlock because the delete stream
@@ -3233,7 +3234,8 @@ async fn test_incremental_scan_deadlock_with_deletes_and_appends() {
         .unwrap();
 
     // Convert to unzipped streams
-    let (append_stream, delete_stream) = scan.to_unzipped_arrow().await.unwrap();
+    let result = scan.to_unzipped_arrow().await.unwrap();
+    let (append_stream, delete_stream) = (result.appends, result.deletes);
 
     // Read deletes first (this is important for triggering the deadlock)
     eprintln!("Starting to read delete stream...");
