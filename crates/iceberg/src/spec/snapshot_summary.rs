@@ -352,8 +352,7 @@ pub(crate) fn update_snapshot_summaries(
                 .map_err(|err| {
                     Error::new(ErrorKind::Unexpected, "Failed to truncate table summary.")
                         .with_source(err)
-                })
-                .unwrap()
+                })?
         }
         _ => summary,
     };
