@@ -348,12 +348,10 @@ pub(crate) fn update_snapshot_summaries(
 
     let mut summary = match previous_summary {
         Some(prev_summary) if truncate_full_table && summary.operation == Operation::Overwrite => {
-            truncate_table_summary(summary, prev_summary)
-                .map_err(|err| {
-                    Error::new(ErrorKind::Unexpected, "Failed to truncate table summary.")
-                        .with_source(err)
-                })
-                .unwrap()
+            truncate_table_summary(summary, prev_summary).map_err(|err| {
+                Error::new(ErrorKind::Unexpected, "Failed to truncate table summary.")
+                    .with_source(err)
+            })?
         }
         _ => summary,
     };
