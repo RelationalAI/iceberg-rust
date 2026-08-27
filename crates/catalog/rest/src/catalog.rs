@@ -607,6 +607,38 @@ impl RestCatalog {
     pub async fn regenerate_token(&self) -> Result<()> {
         self.inner.regenerate_token().await
     }
+
+    /// Load vended credentials for a table from the catalog.
+    pub async fn load_table_credentials(
+        &self,
+        table_ident: &TableIdent,
+    ) -> Result<LoadCredentialsResponse> {
+        self.inner.load_table_credentials(table_ident).await
+    }
+
+    /// Load a table with vended credentials from the catalog.
+    ///
+    /// This method loads the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn load_table_with_credentials(&self, table_ident: &TableIdent) -> Result<Table> {
+        self.inner.load_table_with_credentials(table_ident).await
+    }
+
+    /// Create a table with vended credentials from the catalog.
+    ///
+    /// This method creates the table and automatically fetches short-lived credentials
+    /// for accessing the table's data files. The credentials are merged into the
+    /// FileIO configuration.
+    pub async fn create_table_with_credentials(
+        &self,
+        namespace: &NamespaceIdent,
+        creation: TableCreation,
+    ) -> Result<Table> {
+        self.inner
+            .create_table_with_credentials(namespace, creation)
+            .await
+    }
 }
 
 /// Every operation forwards to its [`RestSessionCatalog`] equivalent with the
@@ -925,7 +957,7 @@ impl RestSessionCatalog {
 
     /// Invalidate the current token, so the next request generates a fresh one.
     ///
-    /// Equivalent to [`Self::invalidate_token`]: the [`AuthSession`] architecture doesn't
+    /// Equivalent to [`Self::invalidate_token`]: the [`crate::auth::AuthSession`] architecture doesn't
     /// expose a distinct "eagerly regenerate now" hook (matching upstream's `OAuth2Session`,
     /// which also only supports invalidation, not eager regeneration), so this no longer
     /// generates a new token synchronously the way it once did.

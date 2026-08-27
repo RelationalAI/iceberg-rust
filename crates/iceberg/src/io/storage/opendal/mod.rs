@@ -232,6 +232,7 @@ impl OpenDalStorage {
     /// Used by `RefreshableOpenDalStorage` to create and rebuild its inner storage on credential refresh.
     /// Note: for S3, `customized_credential_load` is always `None` here; the refreshable wrapper
     /// handles all credential rotation via `StorageCredentialsLoader`.
+    #[allow(unused_variables)]
     pub(crate) fn build_from_props(
         scheme_str: &str,
         props: HashMap<String, String>,
@@ -282,7 +283,7 @@ impl OpenDalStorage {
     ///
     /// * An [`opendal::Operator`] instance used to operate on file.
     /// * Relative path to the root uri of [`opendal::Operator`].
-    #[allow(unreachable_code, unused_variables)]
+    #[allow(unreachable_code, unused_variables, unreachable_patterns)]
     pub(crate) fn create_operator<'a>(
         &self,
         path: &'a impl AsRef<str>,
@@ -454,7 +455,7 @@ impl Storage for OpenDalStorage {
         } else {
             format!("{relative_path}/")
         };
-        Ok(op.remove_all(&path).await?)
+        Ok(op.delete_with(&path).recursive(true).await?)
     }
 
     #[allow(unreachable_code, unused_variables)]
@@ -565,7 +566,7 @@ impl StorageFactory for RefreshableStorageFactory {
 }
 
 /// A [`StorageFactory`] that routes to the appropriate [`OpenDalStorageFactory`] variant
-/// based on the URI scheme parsed from [`PROP_METADATA_LOCATION`].
+/// based on the URI scheme parsed from the metadata location property.
 ///
 /// Unlike [`OpenDalStorageFactory`] (which is pre-configured for a specific scheme),
 /// this factory determines the scheme at build time from the metadata location. This is
