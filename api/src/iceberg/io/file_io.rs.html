@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/iceberg/src/io/file_io.rs`."><title>file_io.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iceberg" data-themes="" data-resource-suffix="" data-rustdoc-version="1.93.0-nightly (f37aa9955 2025-10-26)" data-channel="nightly" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iceberg/io/</div>file_io.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/iceberg/src/io/file_io.rs`."><title>file_io.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iceberg" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0-nightly (b90dc1e59 2026-03-04)" data-channel="nightly" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">iceberg/io/</div>file_io.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
 <a href=#2 id=2 data-nosnippet>2</a>// or more contributor license agreements.  See the NOTICE file
 <a href=#3 id=3 data-nosnippet>3</a>// distributed with this work for additional information
 <a href=#4 id=4 data-nosnippet>4</a>// regarding copyright ownership.  The ASF licenses this file
@@ -277,12 +277,12 @@
 <a href=#277 id=277 data-nosnippet>277</a>    <span class="doccomment">/// Read file content with given range.
 <a href=#278 id=278 data-nosnippet>278</a>    ///
 <a href=#279 id=279 data-nosnippet>279</a>    /// TODO: we can support reading non-contiguous bytes in the future.
-<a href=#280 id=280 data-nosnippet>280</a>    </span><span class="kw">async fn </span>read(<span class="kw-2">&amp;</span><span class="self">self</span>, range: Range&lt;u64&gt;) -&gt; <span class="kw">crate</span>::Result&lt;Bytes&gt;;
+<a href=#280 id=280 data-nosnippet>280</a>    </span><span class="kw">async fn </span>read(<span class="kw-2">&amp;</span><span class="self">self</span>, range: Range&lt;u64&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;Bytes&gt;;
 <a href=#281 id=281 data-nosnippet>281</a>}
 <a href=#282 id=282 data-nosnippet>282</a>
 <a href=#283 id=283 data-nosnippet>283</a><span class="attr">#[async_trait::async_trait]
 <a href=#284 id=284 data-nosnippet>284</a></span><span class="kw">impl</span>&lt;T: AsRef&lt;<span class="kw">dyn </span>FileRead&gt; + Send + Sync + Unpin + <span class="lifetime">'static</span>&gt; FileRead <span class="kw">for </span>T {
-<a href=#285 id=285 data-nosnippet>285</a>    <span class="kw">async fn </span>read(<span class="kw-2">&amp;</span><span class="self">self</span>, range: Range&lt;u64&gt;) -&gt; <span class="kw">crate</span>::Result&lt;Bytes&gt; {
+<a href=#285 id=285 data-nosnippet>285</a>    <span class="kw">async fn </span>read(<span class="kw-2">&amp;</span><span class="self">self</span>, range: Range&lt;u64&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;Bytes&gt; {
 <a href=#286 id=286 data-nosnippet>286</a>        <span class="self">self</span>.as_ref().read(range).<span class="kw">await
 <a href=#287 id=287 data-nosnippet>287</a>    </span>}
 <a href=#288 id=288 data-nosnippet>288</a>}
@@ -307,26 +307,26 @@
 <a href=#307 id=307 data-nosnippet>307</a>    }
 <a href=#308 id=308 data-nosnippet>308</a>
 <a href=#309 id=309 data-nosnippet>309</a>    <span class="doccomment">/// Check if file exists.
-<a href=#310 id=310 data-nosnippet>310</a>    </span><span class="kw">pub async fn </span>exists(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw">crate</span>::Result&lt;bool&gt; {
+<a href=#310 id=310 data-nosnippet>310</a>    </span><span class="kw">pub async fn </span>exists(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;bool&gt; {
 <a href=#311 id=311 data-nosnippet>311</a>        <span class="self">self</span>.storage.exists(<span class="kw-2">&amp;</span><span class="self">self</span>.path).<span class="kw">await
 <a href=#312 id=312 data-nosnippet>312</a>    </span>}
 <a href=#313 id=313 data-nosnippet>313</a>
 <a href=#314 id=314 data-nosnippet>314</a>    <span class="doccomment">/// Fetch and returns metadata of file.
-<a href=#315 id=315 data-nosnippet>315</a>    </span><span class="kw">pub async fn </span>metadata(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw">crate</span>::Result&lt;FileMetadata&gt; {
+<a href=#315 id=315 data-nosnippet>315</a>    </span><span class="kw">pub async fn </span>metadata(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;FileMetadata&gt; {
 <a href=#316 id=316 data-nosnippet>316</a>        <span class="self">self</span>.storage.metadata(<span class="kw-2">&amp;</span><span class="self">self</span>.path).<span class="kw">await
 <a href=#317 id=317 data-nosnippet>317</a>    </span>}
 <a href=#318 id=318 data-nosnippet>318</a>
 <a href=#319 id=319 data-nosnippet>319</a>    <span class="doccomment">/// Read and returns whole content of file.
 <a href=#320 id=320 data-nosnippet>320</a>    ///
 <a href=#321 id=321 data-nosnippet>321</a>    /// For continuous reading, use [`Self::reader`] instead.
-<a href=#322 id=322 data-nosnippet>322</a>    </span><span class="kw">pub async fn </span>read(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw">crate</span>::Result&lt;Bytes&gt; {
+<a href=#322 id=322 data-nosnippet>322</a>    </span><span class="kw">pub async fn </span>read(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;Bytes&gt; {
 <a href=#323 id=323 data-nosnippet>323</a>        <span class="self">self</span>.storage.read(<span class="kw-2">&amp;</span><span class="self">self</span>.path).<span class="kw">await
 <a href=#324 id=324 data-nosnippet>324</a>    </span>}
 <a href=#325 id=325 data-nosnippet>325</a>
 <a href=#326 id=326 data-nosnippet>326</a>    <span class="doccomment">/// Creates [`FileRead`] for continuous reading.
 <a href=#327 id=327 data-nosnippet>327</a>    ///
 <a href=#328 id=328 data-nosnippet>328</a>    /// For one-time reading, use [`Self::read`] instead.
-<a href=#329 id=329 data-nosnippet>329</a>    </span><span class="kw">pub async fn </span>reader(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw">crate</span>::Result&lt;Box&lt;<span class="kw">dyn </span>FileRead&gt;&gt; {
+<a href=#329 id=329 data-nosnippet>329</a>    </span><span class="kw">pub async fn </span>reader(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;Box&lt;<span class="kw">dyn </span>FileRead&gt;&gt; {
 <a href=#330 id=330 data-nosnippet>330</a>        <span class="self">self</span>.storage.reader(<span class="kw-2">&amp;</span><span class="self">self</span>.path).<span class="kw">await
 <a href=#331 id=331 data-nosnippet>331</a>    </span>}
 <a href=#332 id=332 data-nosnippet>332</a>}
@@ -342,12 +342,12 @@
 <a href=#342 id=342 data-nosnippet>342</a>    <span class="doccomment">/// Write bytes to file.
 <a href=#343 id=343 data-nosnippet>343</a>    ///
 <a href=#344 id=344 data-nosnippet>344</a>    /// TODO: we can support writing non-contiguous bytes in the future.
-<a href=#345 id=345 data-nosnippet>345</a>    </span><span class="kw">async fn </span>write(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bs: Bytes) -&gt; <span class="kw">crate</span>::Result&lt;()&gt;;
+<a href=#345 id=345 data-nosnippet>345</a>    </span><span class="kw">async fn </span>write(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bs: Bytes) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt;;
 <a href=#346 id=346 data-nosnippet>346</a>
 <a href=#347 id=347 data-nosnippet>347</a>    <span class="doccomment">/// Close file.
 <a href=#348 id=348 data-nosnippet>348</a>    ///
 <a href=#349 id=349 data-nosnippet>349</a>    /// Calling close on closed file will generate an error.
-<a href=#350 id=350 data-nosnippet>350</a>    </span><span class="kw">async fn </span>close(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">crate</span>::Result&lt;()&gt;;
+<a href=#350 id=350 data-nosnippet>350</a>    </span><span class="kw">async fn </span>close(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt;;
 <a href=#351 id=351 data-nosnippet>351</a>}
 <a href=#352 id=352 data-nosnippet>352</a>
 <a href=#353 id=353 data-nosnippet>353</a><span class="doccomment">/// Output file is used for writing to files..
@@ -395,7 +395,7 @@
 <a href=#395 id=395 data-nosnippet>395</a>    ///
 <a href=#396 id=396 data-nosnippet>396</a>    /// Calling `write` will overwrite the file if it exists.
 <a href=#397 id=397 data-nosnippet>397</a>    /// For continuous writing, use [`Self::writer`].
-<a href=#398 id=398 data-nosnippet>398</a>    </span><span class="kw">pub async fn </span>write(<span class="kw-2">&amp;</span><span class="self">self</span>, bs: Bytes) -&gt; <span class="kw">crate</span>::Result&lt;()&gt; {
+<a href=#398 id=398 data-nosnippet>398</a>    </span><span class="kw">pub async fn </span>write(<span class="kw-2">&amp;</span><span class="self">self</span>, bs: Bytes) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
 <a href=#399 id=399 data-nosnippet>399</a>        <span class="self">self</span>.storage.write(<span class="kw-2">&amp;</span><span class="self">self</span>.path, bs).<span class="kw">await
 <a href=#400 id=400 data-nosnippet>400</a>    </span>}
 <a href=#401 id=401 data-nosnippet>401</a>
@@ -404,7 +404,7 @@
 <a href=#404 id=404 data-nosnippet>404</a>    /// # Notes
 <a href=#405 id=405 data-nosnippet>405</a>    ///
 <a href=#406 id=406 data-nosnippet>406</a>    /// For one-time writing, use [`Self::write`] instead.
-<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">pub async fn </span>writer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw">crate</span>::Result&lt;Box&lt;<span class="kw">dyn </span>FileWrite&gt;&gt; {
+<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">pub async fn </span>writer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;Box&lt;<span class="kw">dyn </span>FileWrite&gt;&gt; {
 <a href=#408 id=408 data-nosnippet>408</a>        <span class="self">self</span>.storage.writer(<span class="kw-2">&amp;</span><span class="self">self</span>.path).<span class="kw">await
 <a href=#409 id=409 data-nosnippet>409</a>    </span>}
 <a href=#410 id=410 data-nosnippet>410</a>}
@@ -421,7 +421,7 @@
 <a href=#421 id=421 data-nosnippet>421</a>    <span class="kw">use </span>futures::io::AllowStdIo;
 <a href=#422 id=422 data-nosnippet>422</a>    <span class="kw">use </span>tempfile::TempDir;
 <a href=#423 id=423 data-nosnippet>423</a>
-<a href=#424 id=424 data-nosnippet>424</a>    <span class="kw">use super</span>::{FileIO, FileIOBuilder};
+<a href=#424 id=424 data-nosnippet>424</a>    <span class="kw">use </span>super::{FileIO, FileIOBuilder};
 <a href=#425 id=425 data-nosnippet>425</a>    <span class="kw">use </span><span class="kw">crate</span>::io::{LocalFsStorageFactory, MemoryStorageFactory};
 <a href=#426 id=426 data-nosnippet>426</a>
 <a href=#427 id=427 data-nosnippet>427</a>    <span class="kw">fn </span>create_local_file_io() -&gt; FileIO {
