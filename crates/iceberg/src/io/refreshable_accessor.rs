@@ -16,9 +16,13 @@
 // under the License.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use opendal::raw::oio::Read as OioRead;
 use opendal::raw::*;
+use opendal::{Buffer, BytesRange, Capability, OperationContext};
+use tokio::sync::RwLock as AsyncRwLock;
 
 use super::refreshable_storage::RefreshableOpenDalStorage;
 use crate::Result;
@@ -35,9 +39,23 @@ use crate::Result;
 /// `RefreshableOpenDalStorage::try_refresh_credentials`). The others will detect
 /// the version bump and simply rebuild their accessor from the already-refreshed
 /// credentials.
+///
+/// # Known limitation (opendal 0.58 `Service` trait)
+/// `read`/`write`/`list`/`delete`/`copy` are synchronous constructors in opendal's
+/// `Service` trait (they build a reader/writer/etc. without performing I/O); the
+/// actual I/O, and therefore any credential-expiry failure, happens later via the
+/// returned `oio::Read`/`oio::Write`/etc. object, which this wrapper does not
+/// control. `stat`/`create_dir`/`rename`/`presign` (still async on the trait) get
+/// credential-refresh-and-retry directly via [`RefreshableAccessor::with_credential_retry`].
+/// `read` gets the same treatment indirectly: [`RetryableReader`] wraps the reader
+/// returned by the current accessor and, on failure, refreshes credentials, asks a
+/// freshly-rebuilt accessor for a new reader, and retries once.
+/// `write`/`list`/`delete`/`copy` are not yet retry-capable: a long-lived writer,
+/// lister, deleter, or copier held across a credential expiry window will surface
+/// the raw error instead of transparently retrying.
 pub(crate) struct RefreshableAccessor {
     /// The current backend's accessor paired with the credential version it was built from.
-    inner: Mutex<(Accessor, u64)>,
+    inner: Mutex<(Servicer, u64)>,
 
     /// The full original path (e.g. "memory:/some-file") used to create the operator.
     /// Needed to rebuild the accessor after credential refresh.
@@ -49,7 +67,7 @@ pub(crate) struct RefreshableAccessor {
 
 impl RefreshableAccessor {
     pub(crate) fn new(
-        accessor: Accessor,
+        accessor: Servicer,
         credential_version: u64,
         original_path: String,
         storage: Arc<RefreshableOpenDalStorage>,
@@ -62,7 +80,7 @@ impl RefreshableAccessor {
     }
 
     /// Get the current inner accessor and its credential version.
-    fn get_accessor(&self) -> (Accessor, u64) {
+    fn get_accessor(&self) -> (Servicer, u64) {
         let guard = self.inner.lock().unwrap();
         guard.clone()
     }
@@ -71,12 +89,12 @@ impl RefreshableAccessor {
     ///
     /// Uses `original_path` (the full path passed to `refreshable_create_operator`)
     /// to call `create_operator` on the refreshed `inner_storage`.
-    fn rebuild_accessor(&self, new_version: u64) -> Result<Accessor> {
+    fn rebuild_accessor(&self, new_version: u64) -> Result<Servicer> {
         let storage_guard = self.storage.lock_inner_storage();
         let (operator, _) = storage_guard.create_operator(&self.original_path)?;
         drop(storage_guard);
 
-        let new_accessor = operator.into_inner();
+        let (_ctx, new_accessor) = operator.into_parts();
         *self.inner.lock().unwrap() = (new_accessor.clone(), new_version);
         Ok(new_accessor)
     }
@@ -92,7 +110,7 @@ impl RefreshableAccessor {
     ///    original and retry error messages.
     async fn with_credential_retry<F, Fut, T>(&self, op: F) -> opendal::Result<T>
     where
-        F: Fn(Accessor) -> Fut,
+        F: Fn(Servicer) -> Fut,
         Fut: Future<Output = opendal::Result<T>>,
     {
         let (accessor, version) = self.get_accessor();
@@ -144,77 +162,321 @@ impl RefreshableAccessor {
     }
 }
 
+/// Refreshes credentials (deduped against `version` via `RefreshableOpenDalStorage`'s
+/// double-checked locking) and builds a fresh accessor for `original_path`, without
+/// touching any particular `RefreshableAccessor`'s cached state. Used by
+/// [`RetryableReader`], which tracks its own credential-version baseline independently
+/// of the `RefreshableAccessor` that created it.
+async fn refresh_and_build_accessor(
+    storage: &RefreshableOpenDalStorage,
+    original_path: &str,
+    version: u64,
+) -> opendal::Result<(Servicer, u64)> {
+    let new_version = storage
+        .try_refresh_credentials(version)
+        .await
+        .map_err(|e| {
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                format!("Credential refresh failed: {e}"),
+            )
+        })?;
+
+    let storage_guard = storage.lock_inner_storage();
+    let (operator, _) = storage_guard.create_operator(&original_path).map_err(|e| {
+        opendal::Error::new(
+            opendal::ErrorKind::Unexpected,
+            "Failed to rebuild accessor after credential refresh",
+        )
+        .set_source(e)
+    })?;
+    drop(storage_guard);
+
+    let (_ctx, new_accessor) = operator.into_parts();
+    Ok((new_accessor, new_version))
+}
+
+/// A retry-capable `oio::Read` wrapper.
+///
+/// opendal 0.58 made `Service::read` a synchronous constructor: it hands back a
+/// reader instead of performing I/O, so `RefreshableAccessor::read` itself has
+/// nothing to retry (see the "Known limitation" section on [`RefreshableAccessor`]).
+/// This wrapper moves the same credential-refresh-and-rebuild strategy
+/// `with_credential_retry` uses down to the reader's own `open`/`read` calls, where
+/// the actual I/O -- and therefore any credential-expiry failure -- happens.
+///
+/// The current inner reader lives behind a `tokio::sync::RwLock` rather than a
+/// `Mutex` so that concurrent reads (e.g. parallel row-group fetches against the
+/// same file) share a read lock and aren't serialized on the happy path; only a
+/// failure-triggered rebuild needs the write lock, and only briefly, to swap in the
+/// freshly-built reader.
+struct RetryableReader {
+    storage: Arc<RefreshableOpenDalStorage>,
+    original_path: String,
+    ctx: OperationContext,
+    path: String,
+    args: OpRead,
+    version: AtomicU64,
+    inner: AsyncRwLock<oio::Reader>,
+}
+
+impl RetryableReader {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        storage: Arc<RefreshableOpenDalStorage>,
+        original_path: String,
+        ctx: OperationContext,
+        path: String,
+        args: OpRead,
+        version: u64,
+        inner: oio::Reader,
+    ) -> Self {
+        Self {
+            storage,
+            original_path,
+            ctx,
+            path,
+            args,
+            version: AtomicU64::new(version),
+            inner: AsyncRwLock::new(inner),
+        }
+    }
+
+    /// Refreshes credentials, builds a fresh accessor, and asks it for a new reader
+    /// bound to the same path/args -- replacing the current inner reader. If multiple
+    /// concurrent callers each observe a failure and race to rebuild, each will build
+    /// its own fresh reader, but `try_refresh_credentials`'s double-checked locking
+    /// still ensures only one of them calls the external credential loader.
+    async fn refresh_and_replace(&self) -> opendal::Result<()> {
+        let version = self.version.load(Ordering::SeqCst);
+        let (new_accessor, new_version) =
+            refresh_and_build_accessor(&self.storage, &self.original_path, version).await?;
+        let new_reader = new_accessor.read(&self.ctx, &self.path, self.args.clone())?;
+        *self.inner.write().await = new_reader;
+        self.version.store(new_version, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for RetryableReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetryableReader").finish()
+    }
+}
+
+impl OioRead for RetryableReader {
+    async fn read(&self, range: BytesRange) -> opendal::Result<(RpRead, Buffer)> {
+        let original_err = match self.inner.read().await.read(range).await {
+            Ok(ok) => return Ok(ok),
+            Err(err) => err,
+        };
+        let original_display = original_err.to_string();
+        let original_kind = original_err.kind();
+
+        self.refresh_and_replace().await.map_err(|e| {
+            opendal::Error::new(
+                original_kind,
+                format!(
+                    "Read failed and credential refresh also failed: {e}. \
+                     Original error: {original_display}"
+                ),
+            )
+        })?;
+
+        self.inner
+            .read()
+            .await
+            .read(range)
+            .await
+            .map_err(|retry_err| {
+                opendal::Error::new(
+                    retry_err.kind(),
+                    format!(
+                        "Retry after credential refresh also failed. \
+                         Original error: {original_display}"
+                    ),
+                )
+                .set_source(retry_err)
+            })
+    }
+
+    async fn open(
+        &self,
+        range: BytesRange,
+    ) -> opendal::Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        let original_err = match self.inner.read().await.open(range).await {
+            Ok(ok) => return Ok(ok),
+            Err(err) => err,
+        };
+        let original_display = original_err.to_string();
+        let original_kind = original_err.kind();
+
+        self.refresh_and_replace().await.map_err(|e| {
+            opendal::Error::new(
+                original_kind,
+                format!(
+                    "Open failed and credential refresh also failed: {e}. \
+                     Original error: {original_display}"
+                ),
+            )
+        })?;
+
+        self.inner
+            .read()
+            .await
+            .open(range)
+            .await
+            .map_err(|retry_err| {
+                opendal::Error::new(
+                    retry_err.kind(),
+                    format!(
+                        "Retry after credential refresh also failed. \
+                         Original error: {original_display}"
+                    ),
+                )
+                .set_source(retry_err)
+            })
+    }
+}
+
 impl std::fmt::Debug for RefreshableAccessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RefreshableAccessor").finish()
     }
 }
 
-impl Access for RefreshableAccessor {
+impl Service for RefreshableAccessor {
     type Reader = oio::Reader;
     type Writer = oio::Writer;
     type Lister = oio::Lister;
     type Deleter = oio::Deleter;
+    type Copier = oio::Copier;
 
-    fn info(&self) -> Arc<AccessorInfo> {
+    fn info(&self) -> ServiceInfo {
         let info_guard = self.storage.lock_cached_info();
         if let Some(info) = info_guard.as_ref() {
-            Arc::clone(info)
+            info.clone()
         } else {
             drop(info_guard);
-            AccessorInfo::default().into()
+            ServiceInfo::with_scheme("")
         }
     }
 
-    async fn stat(&self, path: &str, args: OpStat) -> opendal::Result<RpStat> {
+    fn capability(&self) -> Capability {
+        let (accessor, _) = self.get_accessor();
+        accessor.capability()
+    }
+
+    async fn stat(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpStat,
+    ) -> opendal::Result<RpStat> {
         self.with_credential_retry(|accessor| {
             let args = args.clone();
-            async move { accessor.stat(path, args).await }
+            async move { accessor.stat(ctx, path, args).await }
         })
         .await
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> opendal::Result<(RpRead, Self::Reader)> {
+    // `read` returns a retry-capable `RetryableReader` (see the "Known limitation"
+    // doc comment above and `RetryableReader`'s own doc comment). `write`/`list`/
+    // `delete`/`copy` are synchronous constructors in opendal's `Service` trait: they
+    // build a writer/lister/etc. without performing I/O, so there is no failure here
+    // to retry against; they delegate directly to the current accessor.
+    fn read(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpRead,
+    ) -> opendal::Result<Self::Reader> {
+        let (accessor, version) = self.get_accessor();
+        let inner = accessor.read(ctx, path, args.clone())?;
+        Ok(Box::new(RetryableReader::new(
+            self.storage.clone(),
+            self.original_path.clone(),
+            ctx.clone(),
+            path.to_string(),
+            args,
+            version,
+            inner,
+        )))
+    }
+
+    fn write(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpWrite,
+    ) -> opendal::Result<Self::Writer> {
+        let (accessor, _) = self.get_accessor();
+        accessor.write(ctx, path, args)
+    }
+
+    fn delete(&self, ctx: &OperationContext) -> opendal::Result<Self::Deleter> {
+        let (accessor, _) = self.get_accessor();
+        accessor.delete(ctx)
+    }
+
+    fn list(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpList,
+    ) -> opendal::Result<Self::Lister> {
+        let (accessor, _) = self.get_accessor();
+        accessor.list(ctx, path, args)
+    }
+
+    fn copy(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> opendal::Result<Self::Copier> {
+        let (accessor, _) = self.get_accessor();
+        accessor.copy(ctx, from, to, args, opts)
+    }
+
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> opendal::Result<RpCreateDir> {
         self.with_credential_retry(|accessor| {
             let args = args.clone();
-            async move { accessor.read(path, args).await }
+            async move { accessor.create_dir(ctx, path, args).await }
         })
         .await
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> opendal::Result<(RpWrite, Self::Writer)> {
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> opendal::Result<RpRename> {
         self.with_credential_retry(|accessor| {
             let args = args.clone();
-            async move { accessor.write(path, args).await }
+            async move { accessor.rename(ctx, from, to, args).await }
         })
         .await
     }
 
-    async fn delete(&self) -> opendal::Result<(RpDelete, Self::Deleter)> {
-        self.with_credential_retry(|accessor| async move { accessor.delete().await })
-            .await
-    }
-
-    async fn list(&self, path: &str, args: OpList) -> opendal::Result<(RpList, Self::Lister)> {
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> opendal::Result<RpPresign> {
         self.with_credential_retry(|accessor| {
             let args = args.clone();
-            async move { accessor.list(path, args).await }
-        })
-        .await
-    }
-
-    async fn create_dir(&self, path: &str, args: OpCreateDir) -> opendal::Result<RpCreateDir> {
-        self.with_credential_retry(|accessor| {
-            let args = args.clone();
-            async move { accessor.create_dir(path, args).await }
-        })
-        .await
-    }
-
-    async fn rename(&self, from: &str, to: &str, args: OpRename) -> opendal::Result<RpRename> {
-        self.with_credential_retry(|accessor| {
-            let args = args.clone();
-            async move { accessor.rename(from, to, args).await }
+            async move { accessor.presign(ctx, path, args).await }
         })
         .await
     }
@@ -282,18 +544,41 @@ mod tests {
             &self,
             _table_ident: &TableIdent,
             _location: &str,
-        ) -> crate::Result<StorageCredential> {
+        ) -> Result<StorageCredential> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             let mut responses = self.responses.lock().unwrap();
             Ok(responses.pop_front().unwrap_or_else(dummy_credential))
         }
     }
 
-    /// `Access` impl that always returns a configurable `opendal::ErrorKind` on `stat`.
-    /// All other methods return `Unexpected` (not expected to be called by these tests).
+    /// An `oio::Read` that always fails with a configurable error kind. Models how a
+    /// real backend like S3 behaves: the reader *constructs* successfully (no I/O at
+    /// that point), and the credential failure only surfaces once `read`/`open`
+    /// actually issues a request.
+    struct FailingReader {
+        error_kind: opendal::ErrorKind,
+    }
+
+    impl OioRead for FailingReader {
+        async fn read(&self, _range: BytesRange) -> opendal::Result<(RpRead, Buffer)> {
+            Err(opendal::Error::new(self.error_kind, "test read error"))
+        }
+
+        async fn open(
+            &self,
+            _range: BytesRange,
+        ) -> opendal::Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+            Err(opendal::Error::new(self.error_kind, "test open error"))
+        }
+    }
+
+    /// `Service` impl that always returns a configurable `opendal::ErrorKind` on `stat`,
+    /// and whose `read` constructs a `FailingReader` that fails the same way on the
+    /// actual I/O call. All other methods return `Unexpected` (not expected to be
+    /// called by these tests).
     struct FailingAccessor {
         error_kind: opendal::ErrorKind,
-        info: Arc<AccessorInfo>,
+        info: ServiceInfo,
     }
 
     impl std::fmt::Debug for FailingAccessor {
@@ -303,86 +588,112 @@ mod tests {
     }
 
     impl FailingAccessor {
-        fn new(error_kind: opendal::ErrorKind, info: Arc<AccessorInfo>) -> Self {
+        fn new(error_kind: opendal::ErrorKind, info: ServiceInfo) -> Self {
             Self { error_kind, info }
+        }
+
+        fn unexpected<T>() -> opendal::Result<T> {
+            Err(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "not implemented in test",
+            ))
         }
     }
 
-    impl Access for FailingAccessor {
+    impl Service for FailingAccessor {
         type Reader = oio::Reader;
         type Writer = oio::Writer;
         type Lister = oio::Lister;
         type Deleter = oio::Deleter;
+        type Copier = oio::Copier;
 
-        fn info(&self) -> Arc<AccessorInfo> {
-            Arc::clone(&self.info)
+        fn info(&self) -> ServiceInfo {
+            self.info.clone()
         }
 
-        async fn stat(&self, _path: &str, _args: OpStat) -> opendal::Result<RpStat> {
+        fn capability(&self) -> Capability {
+            Capability::default()
+        }
+
+        async fn stat(
+            &self,
+            _ctx: &OperationContext,
+            _path: &str,
+            _args: OpStat,
+        ) -> opendal::Result<RpStat> {
             Err(opendal::Error::new(self.error_kind, "test error"))
         }
 
-        async fn read(
+        fn read(
             &self,
+            _ctx: &OperationContext,
             _path: &str,
             _args: OpRead,
-        ) -> opendal::Result<(RpRead, Self::Reader)> {
-            Err(opendal::Error::new(
-                opendal::ErrorKind::Unexpected,
-                "not implemented in test",
-            ))
+        ) -> opendal::Result<Self::Reader> {
+            Ok(Box::new(FailingReader {
+                error_kind: self.error_kind,
+            }))
         }
 
-        async fn write(
+        fn write(
             &self,
+            _ctx: &OperationContext,
             _path: &str,
             _args: OpWrite,
-        ) -> opendal::Result<(RpWrite, Self::Writer)> {
-            Err(opendal::Error::new(
-                opendal::ErrorKind::Unexpected,
-                "not implemented in test",
-            ))
+        ) -> opendal::Result<Self::Writer> {
+            Self::unexpected()
         }
 
-        async fn delete(&self) -> opendal::Result<(RpDelete, Self::Deleter)> {
-            Err(opendal::Error::new(
-                opendal::ErrorKind::Unexpected,
-                "not implemented in test",
-            ))
+        fn delete(&self, _ctx: &OperationContext) -> opendal::Result<Self::Deleter> {
+            Self::unexpected()
         }
 
-        async fn list(
+        fn list(
             &self,
+            _ctx: &OperationContext,
             _path: &str,
             _args: OpList,
-        ) -> opendal::Result<(RpList, Self::Lister)> {
-            Err(opendal::Error::new(
-                opendal::ErrorKind::Unexpected,
-                "not implemented in test",
-            ))
+        ) -> opendal::Result<Self::Lister> {
+            Self::unexpected()
+        }
+
+        fn copy(
+            &self,
+            _ctx: &OperationContext,
+            _from: &str,
+            _to: &str,
+            _args: OpCopy,
+            _opts: OpCopier,
+        ) -> opendal::Result<Self::Copier> {
+            Self::unexpected()
         }
 
         async fn create_dir(
             &self,
+            _ctx: &OperationContext,
             _path: &str,
             _args: OpCreateDir,
         ) -> opendal::Result<RpCreateDir> {
-            Err(opendal::Error::new(
-                opendal::ErrorKind::Unexpected,
-                "not implemented in test",
-            ))
+            Self::unexpected()
         }
 
         async fn rename(
             &self,
+            _ctx: &OperationContext,
             _from: &str,
             _to: &str,
             _args: OpRename,
         ) -> opendal::Result<RpRename> {
-            Err(opendal::Error::new(
-                opendal::ErrorKind::Unexpected,
-                "not implemented in test",
-            ))
+            Self::unexpected()
+        }
+
+        async fn presign(
+            &self,
+            _ctx: &OperationContext,
+            _path: &str,
+            _args: OpPresign,
+        ) -> opendal::Result<RpPresign> {
+            Self::unexpected()
         }
     }
 
@@ -416,13 +727,14 @@ mod tests {
             let inner = storage.lock_inner_storage();
             let path = "memory:/dummy".to_string();
             let (op, _) = inner.create_operator(&path).unwrap();
-            op.into_inner().info()
+            let (_ctx, accessor) = op.into_parts();
+            accessor.info()
         };
 
-        *storage.lock_cached_info() = Some(Arc::clone(&info));
+        *storage.lock_cached_info() = Some(info.clone());
 
         let version = storage.credential_version();
-        let failing_accessor: Accessor = Arc::new(FailingAccessor::new(error_kind, info));
+        let failing_accessor: Servicer = Arc::new(FailingAccessor::new(error_kind, info));
         RefreshableAccessor::new(
             failing_accessor,
             version,
@@ -451,7 +763,54 @@ mod tests {
             opendal::ErrorKind::PermissionDenied,
         );
 
-        let result = accessor.stat("nonexistent", OpStat::new()).await;
+        let result = accessor
+            .stat(&OperationContext::new(), "nonexistent", OpStat::new())
+            .await;
+
+        // The retry should have happened — the error should be NotFound
+        // (from the memory backend), not PermissionDenied
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            opendal::ErrorKind::NotFound,
+            "Expected NotFound after retry, got {:?}",
+            err.kind()
+        );
+
+        // Only 1 loader call: the retry on PermissionDenied
+        assert_eq!(loader.call_count(), 1);
+    }
+
+    /// Same scenario as `test_retry_after_credential_refresh`, but for `read`. Unlike
+    /// `stat`, `read` is a synchronous constructor on the `Service` trait — the failure
+    /// and retry happen inside the returned `RetryableReader`'s `oio::Read::read` call,
+    /// not in `RefreshableAccessor::read` itself.
+    ///
+    /// Flow:
+    /// 1. `RefreshableAccessor::read` → `FailingAccessor::read` constructs a
+    ///    `FailingReader`, wrapped in a `RetryableReader` — no failure yet.
+    /// 2. `RetryableReader::read` → delegates to `FailingReader::read` → PermissionDenied
+    /// 3. `try_refresh_credentials` → loader call #1 → do_refresh
+    /// 4. `refresh_and_replace` rebuilds against the memory backend and asks it for a
+    ///    fresh reader, replacing the failing one
+    /// 5. Memory backend reader `read("nonexistent")` → NotFound (not PermissionDenied)
+    #[tokio::test]
+    async fn test_read_retries_after_credential_refresh() {
+        let loader = Arc::new(SequenceLoader::new(vec![dummy_credential()]));
+
+        let accessor = build_refreshable_storage_and_accessor(
+            Arc::clone(&loader) as _,
+            opendal::ErrorKind::PermissionDenied,
+        );
+
+        let reader = accessor
+            .read(&OperationContext::new(), "nonexistent", OpRead::new())
+            .expect("constructing the reader should not fail");
+
+        // A bounded range: the memory backend's `StreamReader::read` requires one
+        // (an unbounded range must go through `open` instead).
+        let result = reader.read(BytesRange::new(0, Some(1))).await;
 
         // The retry should have happened — the error should be NotFound
         // (from the memory backend), not PermissionDenied
@@ -486,7 +845,9 @@ mod tests {
             opendal::ErrorKind::Unexpected,
         );
 
-        let result = accessor.stat("nonexistent", OpStat::new()).await;
+        let result = accessor
+            .stat(&OperationContext::new(), "nonexistent", OpStat::new())
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();

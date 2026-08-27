@@ -24,7 +24,7 @@ use url::Url;
 
 use super::super::config::{
     GCS_ALLOW_ANONYMOUS, GCS_CREDENTIALS_JSON, GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA,
-    GCS_NO_AUTH, GCS_SERVICE_PATH, GCS_TOKEN,
+    GCS_NO_AUTH, GCS_SERVICE_HOST, GCS_TOKEN,
 };
 use crate::io::is_truthy;
 use crate::{Error, ErrorKind, Result};
@@ -41,12 +41,12 @@ pub(crate) fn gcs_config_parse(mut m: HashMap<String, String>) -> Result<GcsConf
         cfg.token = Some(token);
     }
 
-    if let Some(endpoint) = m.remove(GCS_SERVICE_PATH) {
+    if let Some(endpoint) = m.remove(GCS_SERVICE_HOST) {
         cfg.endpoint = Some(endpoint);
     }
 
     if m.remove(GCS_NO_AUTH).is_some() {
-        cfg.allow_anonymous = true;
+        cfg.skip_signature = true;
         cfg.disable_vm_metadata = true;
         cfg.disable_config_load = true;
     }
@@ -54,7 +54,7 @@ pub(crate) fn gcs_config_parse(mut m: HashMap<String, String>) -> Result<GcsConf
     if let Some(allow_anonymous) = m.remove(GCS_ALLOW_ANONYMOUS)
         && is_truthy(allow_anonymous.to_lowercase().as_str())
     {
-        cfg.allow_anonymous = true;
+        cfg.skip_signature = true;
     }
     if let Some(disable_ec2_metadata) = m.remove(GCS_DISABLE_VM_METADATA)
         && is_truthy(disable_ec2_metadata.to_lowercase().as_str())
@@ -82,5 +82,5 @@ pub(crate) fn gcs_config_build(cfg: &GcsConfig, path: &str) -> Result<Operator> 
 
     let mut cfg = cfg.clone();
     cfg.bucket = bucket.to_string();
-    Ok(Operator::from_config(cfg)?.finish())
+    Ok(Operator::from_config(cfg)?)
 }

@@ -27,7 +27,8 @@ use crate::io::object_cache::ObjectCache;
 use crate::scan::ExpressionEvaluatorCache;
 use crate::scan::context::{ManifestEntryContext, ManifestEntryFilterFn, ManifestFileContext};
 use crate::spec::{
-    ManifestContentType, ManifestEntryRef, ManifestFile, SchemaRef, SnapshotRef, TableMetadataRef,
+    ManifestContentType, ManifestEntryRef, ManifestFile, NameMapping, SchemaRef, SnapshotRef,
+    StructType, TableMetadataRef,
 };
 
 #[derive(Debug)]
@@ -63,6 +64,14 @@ pub(crate) struct IncrementalPlanContext {
 
     /// Whether to match column names case-sensitively.
     pub case_sensitive: bool,
+
+    /// Name mapping from table metadata (property: schema.name-mapping.default), used to
+    /// resolve field IDs from column names when Parquet files lack field IDs.
+    pub name_mapping: Option<Arc<NameMapping>>,
+
+    /// The unified partition type across all partition specs involved in the scan, computed
+    /// only when the `_partition` metadata column is projected.
+    pub unified_partition_type: Option<Arc<StructType>>,
 }
 
 impl IncrementalPlanContext {
@@ -140,10 +149,7 @@ impl IncrementalPlanContext {
 
         let mut mfcs = vec![];
         // Process delete manifests first, then data manifests
-        for manifest_file in delete_manifests
-            .into_iter()
-            .chain(data_manifests.into_iter())
-        {
+        for manifest_file in delete_manifests.into_iter().chain(data_manifests) {
             let tx = if manifest_file.content == ManifestContentType::Deletes {
                 delete_file_tx.clone()
             } else {
@@ -159,7 +165,13 @@ impl IncrementalPlanContext {
                 field_ids: self.field_ids.clone(),
                 expression_evaluator_cache: self.expression_evaluator_cache.clone(),
                 delete_file_index: delete_file_idx.clone(),
+                name_mapping: self.name_mapping.clone(),
                 case_sensitive: self.case_sensitive,
+                partition_spec: self
+                    .table_metadata
+                    .partition_spec_by_id(manifest_file.partition_spec_id)
+                    .cloned(),
+                unified_partition_type: self.unified_partition_type.clone(),
                 filter_fn: filter_fn.clone(),
             };
 

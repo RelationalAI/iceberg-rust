@@ -32,6 +32,7 @@
 
 mod azdls;
 mod gcs;
+mod hf;
 mod oss;
 mod s3;
 
@@ -39,6 +40,7 @@ use std::collections::HashMap;
 
 pub use azdls::*;
 pub use gcs::*;
+pub use hf::*;
 pub use oss::*;
 pub use s3::*;
 use serde::{Deserialize, Serialize};
@@ -56,7 +58,6 @@ pub(crate) const PROP_METADATA_LOCATION: &str = "iceberg.internal.metadata-locat
 /// This struct contains only configuration properties without specifying
 /// which storage backend to use. The storage type is determined by the
 /// explicit factory selection.
-/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StorageConfig {
     /// Configuration properties for the storage backend

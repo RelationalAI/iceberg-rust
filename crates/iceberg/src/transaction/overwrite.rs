@@ -109,7 +109,6 @@ impl TransactionAction for OverwriteAction {
         let snapshot_producer = SnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
-            self.key_metadata.clone(),
             self.snapshot_properties.clone(),
             self.added_data_files.clone(),
             self.deleted_data_files.clone(),
@@ -165,11 +164,10 @@ impl SnapshotProduceOperation for OverwriteOperation {
             return Ok(vec![]);
         };
 
-        let manifest_list = snapshot
-            .load_manifest_list(
-                snapshot_produce.table.file_io(),
-                &snapshot_produce.table.metadata_ref(),
-            )
+        let manifest_list = snapshot_produce
+            .table
+            .manifest_list_reader(snapshot)
+            .load()
             .await?;
 
         if self.deleted_file_paths.is_empty() {
@@ -195,8 +193,10 @@ impl SnapshotProduceOperation for OverwriteOperation {
                 continue;
             }
 
-            let manifest = manifest_file
-                .load_manifest(snapshot_produce.table.file_io())
+            let manifest = snapshot_produce
+                .table
+                .manifest_reader()
+                .read(manifest_file)
                 .await?;
 
             let has_deletes = manifest.entries().iter().any(|entry| {
@@ -234,26 +234,45 @@ impl OverwriteOperation {
             Uuid::now_v7(),
         );
         let output_file = table.file_io().new_output(&new_manifest_path)?;
-        let builder = ManifestWriterBuilder::new(
-            output_file,
-            Some(self.snapshot_id),
-            manifest_file.key_metadata.clone(),
-            table.metadata().current_schema().clone(),
-            table
-                .metadata()
-                .partition_spec_by_id(manifest_file.partition_spec_id)
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!(
-                            "Partition spec {} not found in table metadata",
-                            manifest_file.partition_spec_id
-                        ),
-                    )
-                })?
-                .as_ref()
-                .clone(),
-        );
+        let partition_spec = table
+            .metadata()
+            .partition_spec_by_id(manifest_file.partition_spec_id)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!(
+                        "Partition spec {} not found in table metadata",
+                        manifest_file.partition_spec_id
+                    ),
+                )
+            })?
+            .as_ref()
+            .clone();
+        let schema = table.metadata().current_schema().clone();
+
+        // Preserve the original manifest's own encryption key when rewriting it, rather
+        // than generating a new one, so the rewritten manifest stays decryptable the same
+        // way the original was.
+        let builder = match &manifest_file.key_metadata {
+            Some(key_metadata_bytes) => {
+                let key_metadata =
+                    crate::encryption::StandardKeyMetadata::decode(key_metadata_bytes)?;
+                let encrypted_output =
+                    crate::encryption::EncryptedOutputFile::new(output_file, key_metadata);
+                ManifestWriterBuilder::new_from_encrypted(
+                    encrypted_output,
+                    Some(self.snapshot_id),
+                    schema,
+                    partition_spec,
+                )?
+            }
+            None => ManifestWriterBuilder::new(
+                output_file,
+                Some(self.snapshot_id),
+                schema,
+                partition_spec,
+            ),
+        };
 
         let mut writer = match table.metadata().format_version() {
             FormatVersion::V1 => builder.build_v1(),
@@ -289,7 +308,7 @@ mod tests {
 
     use crate::spec::{
         DataContentType, DataFileBuilder, DataFileFormat, Literal, MAIN_BRANCH, ManifestStatus,
-        Operation, Struct,
+        Operation, SnapshotRef, Struct,
     };
     use crate::transaction::tests::make_v2_minimal_table;
     use crate::transaction::{Transaction, TransactionAction};
@@ -403,15 +422,16 @@ mod tests {
             requirements
         );
 
-        let new_snapshot = if let TableUpdate::AddSnapshot { snapshot } = &updates[0] {
-            snapshot
+        let new_snapshot: SnapshotRef = if let TableUpdate::AddSnapshot { snapshot } = &updates[0] {
+            SnapshotRef::new(snapshot.clone())
         } else {
             unreachable!()
         };
         assert_eq!(new_snapshot.summary().operation, Operation::Overwrite);
 
-        let manifest_list = new_snapshot
-            .load_manifest_list(table.file_io(), table.metadata())
+        let manifest_list = table
+            .manifest_list_reader(&new_snapshot)
+            .load()
             .await
             .unwrap();
         assert_eq!(1, manifest_list.entries().len());
@@ -420,8 +440,9 @@ mod tests {
             new_snapshot.sequence_number()
         );
 
-        let manifest = manifest_list.entries()[0]
-            .load_manifest(table.file_io())
+        let manifest = table
+            .manifest_reader()
+            .read(&manifest_list.entries()[0])
             .await
             .unwrap();
         assert_eq!(1, manifest.entries().len());
@@ -455,10 +476,7 @@ mod tests {
         let table = tx.commit(&catalog).await.unwrap();
 
         let snapshot = table.metadata().current_snapshot().unwrap();
-        let manifest_list = snapshot
-            .load_manifest_list(table.file_io(), table.metadata())
-            .await
-            .unwrap();
+        let manifest_list = table.manifest_list_reader(snapshot).load().await.unwrap();
         assert_eq!(1, manifest_list.entries().len());
 
         let replacement_file = test_data_file("test/replacement.parquet", spec_id);
@@ -473,16 +491,13 @@ mod tests {
         let snapshot = table.metadata().current_snapshot().unwrap();
         assert_eq!(snapshot.summary().operation, Operation::Overwrite);
 
-        let manifest_list = snapshot
-            .load_manifest_list(table.file_io(), table.metadata())
-            .await
-            .unwrap();
+        let manifest_list = table.manifest_list_reader(snapshot).load().await.unwrap();
 
         assert_eq!(2, manifest_list.entries().len());
 
         let mut all_entries = vec![];
         for manifest_file in manifest_list.entries() {
-            let manifest = manifest_file.load_manifest(table.file_io()).await.unwrap();
+            let manifest = table.manifest_reader().read(manifest_file).await.unwrap();
             for entry in manifest.entries() {
                 all_entries.push((entry.status(), entry.file_path().to_string()));
             }
@@ -530,17 +545,14 @@ mod tests {
         let table = tx.commit(&catalog).await.unwrap();
 
         let snapshot = table.metadata().current_snapshot().unwrap();
-        let manifest_list = snapshot
-            .load_manifest_list(table.file_io(), table.metadata())
-            .await
-            .unwrap();
+        let manifest_list = table.manifest_list_reader(snapshot).load().await.unwrap();
 
         // 3 manifests: rewritten (deleted entry), overwrite added, fast_append added.
         assert_eq!(3, manifest_list.entries().len());
 
         let mut all_entries = vec![];
         for manifest_file in manifest_list.entries() {
-            let manifest = manifest_file.load_manifest(table.file_io()).await.unwrap();
+            let manifest = table.manifest_reader().read(manifest_file).await.unwrap();
             for entry in manifest.entries() {
                 all_entries.push((entry.status(), entry.file_path().to_string()));
             }
@@ -582,8 +594,9 @@ mod tests {
 
         // Record the manifest paths before the overwrite.
         let pre_snapshot = table.metadata().current_snapshot().unwrap();
-        let pre_manifest_list = pre_snapshot
-            .load_manifest_list(table.file_io(), table.metadata())
+        let pre_manifest_list = table
+            .manifest_list_reader(pre_snapshot)
+            .load()
             .await
             .unwrap();
         assert_eq!(2, pre_manifest_list.entries().len());
@@ -591,7 +604,7 @@ mod tests {
         // Find which manifest contains file B (the unaffected one).
         let mut manifest_b_path = None;
         for mf in pre_manifest_list.entries() {
-            let manifest = mf.load_manifest(table.file_io()).await.unwrap();
+            let manifest = table.manifest_reader().read(mf).await.unwrap();
             if manifest
                 .entries()
                 .iter()
@@ -609,8 +622,9 @@ mod tests {
         let table = tx.commit(&catalog).await.unwrap();
 
         let post_snapshot = table.metadata().current_snapshot().unwrap();
-        let post_manifest_list = post_snapshot
-            .load_manifest_list(table.file_io(), table.metadata())
+        let post_manifest_list = table
+            .manifest_list_reader(post_snapshot)
+            .load()
             .await
             .unwrap();
 
@@ -640,7 +654,7 @@ mod tests {
         // File A should be marked deleted, file B should still be alive.
         let mut all_entries = vec![];
         for mf in post_manifest_list.entries() {
-            let manifest = mf.load_manifest(table.file_io()).await.unwrap();
+            let manifest = table.manifest_reader().read(mf).await.unwrap();
             for entry in manifest.entries() {
                 all_entries.push((entry.status(), entry.file_path().to_string()));
             }

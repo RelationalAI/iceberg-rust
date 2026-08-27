@@ -23,6 +23,7 @@ use futures::{SinkExt, Stream, StreamExt};
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::error::Result;
 use crate::io::FileIO;
+use crate::runtime::Runtime;
 use crate::scan::ArrowRecordBatchStream;
 use crate::util::available_parallelism;
 use crate::{Error, ErrorKind};
@@ -49,7 +50,9 @@ mod row_filter;
 pub use file_reader::ArrowFileReader;
 pub(crate) use options::ParquetReadOptions;
 use predicate_visitor::{CollectFieldIdVisitor, PredicateConverter};
-use projection::{add_fallback_field_ids_to_arrow_schema, apply_name_mapping_to_arrow_schema};
+use projection::{
+    add_fallback_field_ids_to_arrow_schema, apply_name_mapping_to_arrow_schema, build_field_id_map,
+};
 
 /// Builder to create ArrowReader
 pub struct ArrowReaderBuilder {
@@ -59,11 +62,12 @@ pub struct ArrowReaderBuilder {
     row_group_filtering_enabled: bool,
     row_selection_enabled: bool,
     parquet_read_options: ParquetReadOptions,
+    runtime: Runtime,
 }
 
 impl ArrowReaderBuilder {
     /// Create a new ArrowReaderBuilder
-    pub fn new(file_io: FileIO) -> Self {
+    pub fn new(file_io: FileIO, runtime: Runtime) -> Self {
         let num_cpus = available_parallelism().get();
 
         ArrowReaderBuilder {
@@ -73,6 +77,7 @@ impl ArrowReaderBuilder {
             row_group_filtering_enabled: true,
             row_selection_enabled: false,
             parquet_read_options: ParquetReadOptions::builder().build(),
+            runtime,
         }
     }
 
@@ -135,11 +140,13 @@ impl ArrowReaderBuilder {
             delete_file_loader: CachingDeleteFileLoader::new(
                 self.file_io.clone(),
                 self.concurrency_limit_data_files,
+                self.runtime.clone(),
             ),
             concurrency_limit_data_files: self.concurrency_limit_data_files,
             row_group_filtering_enabled: self.row_group_filtering_enabled,
             row_selection_enabled: self.row_selection_enabled,
             parquet_read_options: self.parquet_read_options,
+            runtime: self.runtime,
         }
     }
 }
@@ -157,6 +164,7 @@ pub struct ArrowReader {
     pub(crate) row_group_filtering_enabled: bool,
     pub(crate) row_selection_enabled: bool,
     pub(crate) parquet_read_options: ParquetReadOptions,
+    pub(crate) runtime: Runtime,
 }
 
 /// Trait indicating that the implementing type streams into a stream of type `S` using

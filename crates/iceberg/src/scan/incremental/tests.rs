@@ -15,13 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
-use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray};
+use arrow_array::types::Int32Type;
+use arrow_array::{ArrayRef, Int32Array, RecordBatch, RunArray, StringArray};
 use futures::TryStreamExt;
 use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
 use parquet::basic::Compression;
@@ -39,6 +40,7 @@ use crate::spec::{
     ManifestStatus, ManifestWriterBuilder, PartitionSpec, SchemaRef, Struct, TableMetadata,
 };
 use crate::table::Table;
+use crate::test_utils::test_runtime;
 
 /// Specifies which column to match on for equality deletes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -291,6 +293,7 @@ impl IncrementalTestFixture {
             .identifier(TableIdent::from_strs(["db", "incremental_test"]).unwrap())
             .file_io(file_io.clone())
             .metadata_location(table_metadata_location.as_os_str().to_str().unwrap())
+            .runtime(test_runtime())
             .build()
             .unwrap();
 
@@ -352,7 +355,6 @@ impl IncrementalTestFixture {
                     let mut data_writer = ManifestWriterBuilder::new(
                         self.next_manifest_file(),
                         Some(snapshot_id),
-                        None,
                         current_schema.clone(),
                         partition_spec.as_ref().clone(),
                     )
@@ -432,7 +434,6 @@ impl IncrementalTestFixture {
                         let mut delete_writer = ManifestWriterBuilder::new(
                             self.next_manifest_file(),
                             Some(snapshot_id),
-                            None,
                             current_schema.clone(),
                             partition_spec.as_ref().clone(),
                         )
@@ -483,6 +484,9 @@ impl IncrementalTestFixture {
                                 "{}/metadata/snap-{}-manifest-list.avro",
                                 self.table_location, snapshot_id
                             ))
+                            .unwrap()
+                            .writer()
+                            .await
                             .unwrap(),
                         snapshot_id,
                         parent_snapshot_id,
@@ -510,7 +514,6 @@ impl IncrementalTestFixture {
                     let mut data_writer = ManifestWriterBuilder::new(
                         self.next_manifest_file(),
                         Some(snapshot_id),
-                        None,
                         current_schema.clone(),
                         partition_spec.as_ref().clone(),
                     )
@@ -548,7 +551,6 @@ impl IncrementalTestFixture {
                     let mut delete_writer = ManifestWriterBuilder::new(
                         self.next_manifest_file(),
                         Some(snapshot_id),
-                        None,
                         current_schema.clone(),
                         partition_spec.as_ref().clone(),
                     )
@@ -619,6 +621,12 @@ impl IncrementalTestFixture {
                                             .record_count(positions.len() as u64)
                                             .partition(empty_partition.clone())
                                             .key_metadata(None)
+                                            // Matches real writers (e.g. Spark): a position
+                                            // delete file that covers a single data file sets
+                                            // `referenced_data_file`, which routes it through
+                                            // `DeleteFileIndex`'s `pos_deletes_by_path` bucket
+                                            // instead of `pos_deletes_by_partition`.
+                                            .referenced_data_file(Some(data_file_path.clone()))
                                             .build()
                                             .unwrap(),
                                     )
@@ -649,6 +657,9 @@ impl IncrementalTestFixture {
                                 "{}/metadata/snap-{}-manifest-list.avro",
                                 self.table_location, snapshot_id
                             ))
+                            .unwrap()
+                            .writer()
+                            .await
                             .unwrap(),
                         snapshot_id,
                         parent_snapshot_id,
@@ -670,14 +681,13 @@ impl IncrementalTestFixture {
                     let mut data_writer = ManifestWriterBuilder::new(
                         self.next_manifest_file(),
                         Some(snapshot_id),
-                        None,
                         current_schema.clone(),
                         partition_spec.as_ref().clone(),
                     )
                     .build_v2_data();
 
                     // Determine which files to delete
-                    let files_to_delete_set: std::collections::HashSet<String> = files_to_delete
+                    let files_to_delete_set: HashSet<String> = files_to_delete
                         .iter()
                         .map(|f| format!("{}/data/{}", &self.table_location, f))
                         .collect();
@@ -792,7 +802,6 @@ impl IncrementalTestFixture {
                         let mut delete_writer = ManifestWriterBuilder::new(
                             self.next_manifest_file(),
                             Some(snapshot_id),
-                            None,
                             current_schema.clone(),
                             partition_spec.as_ref().clone(),
                         )
@@ -875,6 +884,15 @@ impl IncrementalTestFixture {
                                                     .record_count(positions.len() as u64)
                                                     .partition(empty_partition.clone())
                                                     .key_metadata(None)
+                                                    // Matches real writers (e.g. Spark): a
+                                                    // position delete file that covers a single
+                                                    // data file sets `referenced_data_file`,
+                                                    // which routes it through
+                                                    // `DeleteFileIndex`'s `pos_deletes_by_path`
+                                                    // bucket instead of `pos_deletes_by_partition`.
+                                                    .referenced_data_file(Some(
+                                                        data_file_path.clone(),
+                                                    ))
                                                     .build()
                                                     .unwrap(),
                                             )
@@ -907,6 +925,9 @@ impl IncrementalTestFixture {
                                 "{}/metadata/snap-{}-manifest-list.avro",
                                 self.table_location, snapshot_id
                             ))
+                            .unwrap()
+                            .writer()
+                            .await
                             .unwrap(),
                         snapshot_id,
                         parent_snapshot_id,
@@ -974,23 +995,19 @@ impl IncrementalTestFixture {
         let mut data_writer = ManifestWriterBuilder::new(
             self.next_manifest_file(),
             Some(snapshot_id),
-            None,
             current_schema,
             partition_spec.clone(),
         )
         .build_v2_data();
 
         // Determine which files are being compacted
-        let files_to_compact_set: std::collections::HashSet<String> = files_to_compact
+        let files_to_compact_set: HashSet<String> = files_to_compact
             .iter()
             .map(|f| format!("{}/data/{}", &self.table_location, f))
             .collect();
 
         // Build a set of deleted positions for each file being compacted
-        let mut deleted_positions: std::collections::HashMap<
-            String,
-            std::collections::HashSet<i64>,
-        > = std::collections::HashMap::new();
+        let mut deleted_positions: HashMap<String, HashSet<i64>> = HashMap::new();
         for (_, _, _, delete_records, _) in delete_files {
             for (file_path, position) in delete_records {
                 deleted_positions
@@ -1135,6 +1152,9 @@ impl IncrementalTestFixture {
                     "{}/metadata/snap-{}-manifest-list.avro",
                     self.table_location, snapshot_id
                 ))
+                .unwrap()
+                .writer()
+                .await
                 .unwrap(),
             snapshot_id,
             parent_snapshot_id,
@@ -1166,7 +1186,6 @@ impl IncrementalTestFixture {
         let mut data_writer = ManifestWriterBuilder::new(
             self.next_manifest_file(),
             Some(snapshot_id),
-            None,
             current_schema.clone(),
             partition_spec.as_ref().clone(),
         )
@@ -1206,7 +1225,6 @@ impl IncrementalTestFixture {
         let mut delete_writer = ManifestWriterBuilder::new(
             self.next_manifest_file(),
             Some(snapshot_id),
-            None,
             current_schema.clone(),
             partition_spec.as_ref().clone(),
         )
@@ -1267,6 +1285,9 @@ impl IncrementalTestFixture {
                     "{}/metadata/snap-{}-manifest-list.avro",
                     self.table_location, snapshot_id
                 ))
+                .unwrap()
+                .writer()
+                .await
                 .unwrap(),
             snapshot_id,
             parent_snapshot_id,
@@ -1541,6 +1562,7 @@ impl IncrementalTestFixture {
             .identifier(self.table.identifier().clone())
             .file_io(self.table.file_io().clone())
             .metadata_location(format!("{}/metadata/v1.json", self.table_location).as_str())
+            .runtime(test_runtime())
             .build()
             .unwrap()
     }
@@ -1584,9 +1606,7 @@ async fn scan_and_verify(
         let append_batch =
             concat_batches(&append_batches[0].schema(), append_batches.iter()).unwrap();
 
-        let n_array = append_batch
-            .column(0)
-            .as_primitive::<arrow_array::types::Int32Type>();
+        let n_array = append_batch.column(0).as_primitive::<Int32Type>();
         let data_array = append_batch.column(1).as_string::<i32>();
 
         let mut appended_pairs: Vec<(i32, String)> = (0..append_batch.num_rows())
@@ -2159,9 +2179,7 @@ async fn test_incremental_scan_builder_options() {
         let combined_batch =
             concat_batches(&append_batches[0].schema(), append_batches.iter()).unwrap();
 
-        let n_array = combined_batch
-            .column(0)
-            .as_primitive::<arrow_array::types::Int32Type>();
+        let n_array = combined_batch.column(0).as_primitive::<Int32Type>();
 
         let mut n_values: Vec<i32> = (0..combined_batch.num_rows())
             .map(|i| n_array.value(i))
@@ -2789,7 +2807,7 @@ async fn test_incremental_scan_includes_root_when_from_is_none() {
         let n_array = batch
             .column_by_name("n")
             .unwrap()
-            .as_primitive::<arrow_array::types::Int32Type>();
+            .as_primitive::<Int32Type>();
         let data_array = batch.column_by_name("data").unwrap().as_string::<i32>();
         for i in 0..batch.num_rows() {
             results.push((n_array.value(i), data_array.value(i).to_string()));
@@ -2892,14 +2910,18 @@ async fn test_incremental_scan_with_file_column() {
         let file_column = batch.column_by_name(RESERVED_COL_NAME_FILE);
         assert!(file_column.is_some(), "_file column should exist");
 
-        // Verify _file column contains a file path (simple StringArray)
+        // Verify _file column contains a file path (Run-End Encoded constant column)
         let file_col = file_column.unwrap();
-        let string_array = file_col.as_string::<i32>();
+        let run_array = file_col
+            .as_any()
+            .downcast_ref::<RunArray<Int32Type>>()
+            .expect("_file column should be a RunArray");
+        let string_array = run_array.values().as_string::<i32>();
 
         // Verify file path ends with .parquet and contains the table location
         // All rows have the same file path in a constant column
-        for i in 0..batch.num_rows() {
-            let file_path = string_array.value(i);
+        if batch.num_rows() > 0 {
+            let file_path = string_array.value(0);
             assert!(
                 file_path.ends_with(".parquet"),
                 "File path should end with .parquet: {file_path}"
@@ -3118,11 +3140,15 @@ async fn test_incremental_select_with_pos_and_file_columns() {
             );
         }
 
-        // Verify _file column contains a valid file path
+        // Verify _file column contains a valid file path (Run-End Encoded constant column)
         let file_col = batch.column_by_name(RESERVED_COL_NAME_FILE).unwrap();
-        let string_array = file_col.as_string::<i32>();
-        for i in 0..batch.num_rows() {
-            let file_path = string_array.value(i);
+        let run_array = file_col
+            .as_any()
+            .downcast_ref::<RunArray<Int32Type>>()
+            .expect("_file column should be a RunArray");
+        let string_array = run_array.values().as_string::<i32>();
+        if batch.num_rows() > 0 {
+            let file_path = string_array.value(0);
             assert!(
                 file_path.ends_with(".parquet"),
                 "File path should end with .parquet: {file_path}"

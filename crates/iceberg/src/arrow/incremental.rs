@@ -31,7 +31,6 @@ use crate::delete_vector::DeleteVector;
 use crate::expr::Bind;
 use crate::io::FileIO;
 use crate::metadata_columns::row_pos_field;
-use crate::runtime::spawn;
 use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
     AppendedFileScanTask, DeleteScanTask, EqualityDeleteScanTask, IncrementalFileScanTaskStreams,
@@ -99,6 +98,7 @@ async fn process_incremental_append_task(
         None, // name_mapping not yet supported in incremental scan
         Some(Arc::clone(scan_metrics.bytes_read_counter())),
         Some(&base.schema),
+        base.key_metadata.as_deref(),
     )
     .await?;
 
@@ -123,6 +123,9 @@ async fn process_incremental_append_task(
         &base.data_file_path,
         base.partition_spec,
         base.partition,
+        base.first_row_id,
+        base.data_sequence_number,
+        base.unified_partition_type,
     )
 }
 
@@ -227,6 +230,7 @@ async fn process_equality_delete_task(
         None, // name_mapping not yet supported in incremental scan
         Some(Arc::clone(scan_metrics.bytes_read_counter())),
         Some(&task.base.schema),
+        task.base.key_metadata.as_deref(),
     )
     .await?;
 
@@ -337,45 +341,51 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalScanResult> for IncrementalFile
         let batch_size = reader.batch_size;
         let parquet_read_options = reader.parquet_read_options;
         let scan_metrics = ScanMetrics::new();
+        let runtime = reader.runtime.clone();
 
         let (append_stream, delete_stream) = self;
 
         // Process append tasks
         let file_io_append = reader.file_io.clone();
         let scan_metrics_append = scan_metrics.clone();
-        spawn(async move {
+        let outer_runtime = runtime.clone();
+        let rt = runtime.clone();
+        outer_runtime.io().spawn(async move {
             let _ = append_stream
                 .try_for_each_concurrent(reader.concurrency_limit_data_files, |append_task| {
                     let file_io = file_io_append.clone();
                     let appends_tx = appends_tx.clone();
                     let scan_metrics = scan_metrics_append.clone();
+                    let rt = rt.clone();
                     async move {
                         // Inner spawn: each file's IO runs on its own tokio task for true
                         // parallelism. Awaiting it keeps the concurrency slot occupied until
                         // the file is fully read, matching the full-scan reader pattern.
-                        spawn(async move {
-                            let should_load_page_index =
-                                append_task.equality_delete_predicate.is_some()
-                                    || append_task.positional_deletes.is_some();
-                            let mut append_read_options = parquet_read_options;
-                            append_read_options.preload_page_index = should_load_page_index;
-                            let record_batch_stream = process_incremental_append_task(
-                                append_task,
-                                batch_size,
-                                file_io,
-                                append_read_options,
-                                scan_metrics,
-                            )
-                            .await;
+                        let _ = rt
+                            .cpu()
+                            .spawn(async move {
+                                let should_load_page_index =
+                                    append_task.equality_delete_predicate.is_some()
+                                        || append_task.positional_deletes.is_some();
+                                let mut append_read_options = parquet_read_options;
+                                append_read_options.preload_page_index = should_load_page_index;
+                                let record_batch_stream = process_incremental_append_task(
+                                    append_task,
+                                    batch_size,
+                                    file_io,
+                                    append_read_options,
+                                    scan_metrics,
+                                )
+                                .await;
 
-                            process_record_batch_stream(
-                                record_batch_stream,
-                                appends_tx,
-                                "failed to read appended record batch",
-                            )
+                                process_record_batch_stream(
+                                    record_batch_stream,
+                                    appends_tx,
+                                    "failed to read appended record batch",
+                                )
+                                .await;
+                            })
                             .await;
-                        })
-                        .await;
 
                         Ok(())
                     }
@@ -386,72 +396,79 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalScanResult> for IncrementalFile
         // Process delete tasks
         let file_io_delete = reader.file_io.clone();
         let scan_metrics_delete = scan_metrics.clone();
-        spawn(async move {
+        let outer_runtime = runtime.clone();
+        let rt = runtime.clone();
+        outer_runtime.io().spawn(async move {
             let _ = delete_stream
                 .try_for_each_concurrent(reader.concurrency_limit_data_files, |delete_task| {
                     let deletes_tx = deletes_tx.clone();
                     let file_io = file_io_delete.clone();
                     let scan_metrics = scan_metrics_delete.clone();
+                    let rt = rt.clone();
                     async move {
                         // Inner spawn: same pattern as full-scan reader — spawn for parallelism,
                         // await to keep the concurrency slot occupied until the task completes.
-                        spawn(async move {
-                            match delete_task {
-                                DeleteScanTask::DeletedFile(deleted_file_task) => {
-                                    let file_path = deleted_file_task.data_file_path().to_string();
-                                    let total_records =
-                                        deleted_file_task.base.record_count.unwrap_or(0);
+                        let _ = rt
+                            .cpu()
+                            .spawn(async move {
+                                match delete_task {
+                                    DeleteScanTask::DeletedFile(deleted_file_task) => {
+                                        let file_path =
+                                            deleted_file_task.data_file_path().to_string();
+                                        let total_records =
+                                            deleted_file_task.base.record_count.unwrap_or(0);
 
-                                    let record_batch_stream = process_incremental_deleted_file_task(
-                                        file_path,
-                                        total_records,
-                                        batch_size,
-                                    );
+                                        let record_batch_stream =
+                                            process_incremental_deleted_file_task(
+                                                file_path,
+                                                total_records,
+                                                batch_size,
+                                            );
 
-                                    process_record_batch_stream(
-                                        record_batch_stream,
-                                        deletes_tx,
-                                        "failed to read deleted file record batch",
-                                    )
-                                    .await;
+                                        process_record_batch_stream(
+                                            record_batch_stream,
+                                            deletes_tx,
+                                            "failed to read deleted file record batch",
+                                        )
+                                        .await;
+                                    }
+                                    DeleteScanTask::PositionalDeletes(file_path, delete_vector) => {
+                                        let record_batch_stream = process_incremental_delete_task(
+                                            file_path,
+                                            delete_vector,
+                                            batch_size,
+                                        );
+
+                                        process_record_batch_stream(
+                                            record_batch_stream,
+                                            deletes_tx,
+                                            "failed to read deleted record batch",
+                                        )
+                                        .await;
+                                    }
+                                    DeleteScanTask::EqualityDeletes(equality_delete_task) => {
+                                        // equality delete tasks always need the page index: we always have a predicate
+                                        let mut eq_read_options = parquet_read_options;
+                                        eq_read_options.preload_page_index = true;
+                                        let record_batch_stream = process_equality_delete_task(
+                                            equality_delete_task,
+                                            batch_size,
+                                            file_io.clone(),
+                                            eq_read_options,
+                                            scan_metrics,
+                                        )
+                                        .await;
+
+                                        process_record_batch_stream(
+                                            record_batch_stream,
+                                            deletes_tx,
+                                            "failed to read equality delete record batch",
+                                        )
+                                        .await;
+                                    }
                                 }
-                                DeleteScanTask::PositionalDeletes(file_path, delete_vector) => {
-                                    let record_batch_stream = process_incremental_delete_task(
-                                        file_path,
-                                        delete_vector,
-                                        batch_size,
-                                    );
-
-                                    process_record_batch_stream(
-                                        record_batch_stream,
-                                        deletes_tx,
-                                        "failed to read deleted record batch",
-                                    )
-                                    .await;
-                                }
-                                DeleteScanTask::EqualityDeletes(equality_delete_task) => {
-                                    // equality delete tasks always need the page index: we always have a predicate
-                                    let mut eq_read_options = parquet_read_options;
-                                    eq_read_options.preload_page_index = true;
-                                    let record_batch_stream = process_equality_delete_task(
-                                        equality_delete_task,
-                                        batch_size,
-                                        file_io.clone(),
-                                        eq_read_options,
-                                        scan_metrics,
-                                    )
-                                    .await;
-
-                                    process_record_batch_stream(
-                                        record_batch_stream,
-                                        deletes_tx,
-                                        "failed to read equality delete record batch",
-                                    )
-                                    .await;
-                                }
-                            }
-                        })
-                        .await;
+                            })
+                            .await;
 
                         Ok(())
                     }

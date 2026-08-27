@@ -24,7 +24,9 @@ use crate::arrow::delete_filter::{DeleteFilter, is_equality_delete};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Predicate;
 use crate::scan::context::ManifestEntryContext;
-use crate::spec::{DataFileFormat, PartitionSpec, Schema, SchemaRef, Struct, TableMetadataRef};
+use crate::spec::{
+    DataFileFormat, PartitionSpec, Schema, SchemaRef, Struct, StructType, TableMetadataRef,
+};
 
 /// Base file scan task containing common attributes for incremental scan tasks.
 #[derive(Debug, Clone)]
@@ -53,6 +55,18 @@ pub struct BaseIncrementalFileScanTask {
     pub partition_spec: Option<Arc<PartitionSpec>>,
     /// Whether to match column names case-sensitively when binding predicates.
     pub case_sensitive: bool,
+    /// The unified partition type across all partition specs involved in the scan, used to
+    /// materialize the `_partition` metadata column. `None` unless `_partition` is projected.
+    pub unified_partition_type: Option<Arc<StructType>>,
+    /// The row id of the first row in the data file, from the manifest entry. Used to
+    /// materialize the `_last_updated_sequence_number` metadata column.
+    pub first_row_id: Option<i64>,
+    /// The data sequence number of the manifest entry. Used to materialize the
+    /// `_last_updated_sequence_number` metadata column.
+    pub data_sequence_number: Option<i64>,
+    /// Encryption key metadata for the data file, present only for Parquet Modular
+    /// Encryption-encrypted files.
+    pub key_metadata: Option<Box<[u8]>>,
 }
 
 impl BaseIncrementalFileScanTask {
@@ -238,6 +252,17 @@ impl IncrementalFileScanTask {
                 partition,
                 partition_spec,
                 case_sensitive: manifest_entry_context.case_sensitive,
+                unified_partition_type: manifest_entry_context.unified_partition_type.clone(),
+                first_row_id: manifest_entry_context
+                    .manifest_entry
+                    .data_file()
+                    .first_row_id(),
+                data_sequence_number: manifest_entry_context.manifest_entry.sequence_number(),
+                key_metadata: manifest_entry_context
+                    .manifest_entry
+                    .data_file
+                    .key_metadata()
+                    .map(Box::from),
             },
             positional_deletes: delete_filter.get_delete_vector_for_path(data_file_path),
             equality_delete_predicate,

@@ -53,7 +53,6 @@ pub const ADLS_ENDPOINT: &str = "adls.endpoint";
 ///
 /// This struct contains all the configuration options for connecting to Azure Data Lake Storage.
 /// Use the builder pattern via `AzdlsConfig::builder()` to construct instances.
-/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypedBuilder)]
 pub struct AzdlsConfig {
     /// Connection string.
