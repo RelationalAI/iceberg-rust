@@ -52,8 +52,8 @@ pub struct RefreshableOpenDalStorage {
     /// Table identifier passed to `load_credentials`
     table_ident: TableIdent,
 
-    /// Cached AccessorInfo (created lazily from first operator)
-    cached_info: Mutex<Option<Arc<AccessorInfo>>>,
+    /// Cached ServiceInfo (created lazily from first operator)
+    cached_info: Mutex<Option<ServiceInfo>>,
 
     /// Monotonically increasing version number, incremented each time credentials
     /// are refreshed via do_refresh. Used by RefreshableAccessor instances to detect
@@ -119,9 +119,9 @@ impl RefreshableOpenDalStorage {
         let version = self.credential_version();
         drop(storage_guard);
 
-        let accessor = operator.into_inner();
+        let (ctx, accessor) = operator.into_parts();
 
-        // Cache AccessorInfo if not already cached
+        // Cache ServiceInfo if not already cached
         {
             let mut info_guard = self.lock_cached_info();
             if info_guard.is_none() {
@@ -131,7 +131,7 @@ impl RefreshableOpenDalStorage {
         let refreshable_accessor =
             RefreshableAccessor::new(accessor, version, path.to_string(), Arc::clone(self));
 
-        let wrapped_operator = Operator::from_inner(Arc::new(refreshable_accessor));
+        let wrapped_operator = Operator::from_parts(ctx, Arc::new(refreshable_accessor));
         Ok((wrapped_operator, relative_path))
     }
 
@@ -164,7 +164,7 @@ impl RefreshableOpenDalStorage {
     }
 
     /// Lock and return the cached info guard.
-    pub(crate) fn lock_cached_info(&self) -> MutexGuard<'_, Option<Arc<AccessorInfo>>> {
+    pub(crate) fn lock_cached_info(&self) -> MutexGuard<'_, Option<ServiceInfo>> {
         self.cached_info.lock().unwrap()
     }
 

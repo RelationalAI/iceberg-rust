@@ -138,11 +138,13 @@ pub(crate) fn s3_config_build(
         .bucket(bucket);
 
     if let Some(customized_credential_load) = customized_credential_load {
-        builder = builder
-            .customized_credential_load(customized_credential_load.clone().into_opendal_loader());
+        let chain = reqsign_core::ProvideCredentialChain::new().push(
+            CustomAwsCredentialLoaderBridge(customized_credential_load.clone()),
+        );
+        builder = builder.credential_provider_chain(chain);
     }
 
-    Ok(Operator::new(builder)?.finish())
+    Ok(Operator::new(builder)?)
 }
 
 /// Custom AWS credential loader.
@@ -175,5 +177,44 @@ impl CustomAwsCredentialLoader {
 impl AwsCredentialLoad for CustomAwsCredentialLoader {
     async fn load_credential(&self, client: Client) -> anyhow::Result<Option<AwsCredential>> {
         self.0.load_credential(client).await
+    }
+}
+
+/// Bridges a [`CustomAwsCredentialLoader`] (built against the old `reqsign` v0.16
+/// `AwsCredentialLoad` trait, which the fork's vended-credentials feature is written
+/// against) into `reqsign_core::ProvideCredential`, which is what opendal's S3 service
+/// backend now requires (it moved to the `reqsign-core`/`reqsign-aws-v4` crate family).
+/// These are two independent major versions of reqsign with incompatible credential
+/// traits; there is no adapter provided upstream, so this constructs a fresh
+/// `reqwest::Client` per call (the old trait requires one) and converts the returned
+/// credential's fields across the two (structurally identical) `Credential` types.
+struct CustomAwsCredentialLoaderBridge(CustomAwsCredentialLoader);
+
+impl std::fmt::Debug for CustomAwsCredentialLoaderBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomAwsCredentialLoaderBridge")
+            .finish_non_exhaustive()
+    }
+}
+
+impl reqsign_core::ProvideCredential for CustomAwsCredentialLoaderBridge {
+    type Credential = reqsign_aws_v4::Credential;
+
+    async fn provide_credential(
+        &self,
+        _ctx: &reqsign_core::Context,
+    ) -> reqsign_core::Result<Option<Self::Credential>> {
+        let loaded = self.0.load_credential(Client::new()).await.map_err(|e| {
+            reqsign_core::Error::new(reqsign_core::ErrorKind::Unexpected, e.to_string())
+        })?;
+
+        Ok(loaded.map(|c| reqsign_aws_v4::Credential {
+            access_key_id: c.access_key_id,
+            secret_access_key: c.secret_access_key,
+            session_token: c.session_token,
+            expires_in: c
+                .expires_in
+                .and_then(|dt| reqsign_core::time::Timestamp::from_second(dt.timestamp()).ok()),
+        }))
     }
 }

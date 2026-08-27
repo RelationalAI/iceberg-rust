@@ -30,13 +30,16 @@ use crate::delete_file_index::DeleteFileIndex;
 use crate::io::FileIO;
 use crate::io::object_cache::ObjectCache;
 use crate::metadata_columns::{
-    RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, get_metadata_field_id, is_metadata_column_name,
+    RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_PARTITION,
+    get_metadata_field_id, is_metadata_column_name,
 };
+use crate::partitioning::compute_unified_partition_type;
 use crate::scan::DeleteFileContext;
 use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
 use crate::spec::{
-    DataContentType, ManifestEntryRef, ManifestStatus, Snapshot, SnapshotRef, TableMetadataRef,
+    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, ManifestEntryRef, ManifestStatus, NameMapping,
+    Snapshot, SnapshotRef, TableMetadataRef,
 };
 use crate::table::Table;
 use crate::util::available_parallelism;
@@ -51,7 +54,7 @@ use futures::{SinkExt, StreamExt, TryStreamExt};
 use itertools::Itertools;
 pub use task::*;
 
-use crate::runtime::spawn;
+use crate::runtime::Runtime;
 
 /// Builder for an incremental table scan.
 #[derive(Debug)]
@@ -366,6 +369,39 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             field_ids.push(field_id);
         }
 
+        let name_mapping = self
+            .table
+            .metadata()
+            .properties()
+            .get(DEFAULT_SCHEMA_NAME_MAPPING)
+            .map(|raw| {
+                serde_json::from_str::<NameMapping>(raw).map_err(|e| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "Failed to parse table property {DEFAULT_SCHEMA_NAME_MAPPING} as a NameMapping"
+                        ),
+                    )
+                    .with_source(e)
+                })
+            })
+            .transpose()?
+            .map(Arc::new);
+
+        // Compute unified partition type if _partition is projected
+        let unified_partition_type = if field_ids.contains(&RESERVED_FIELD_ID_PARTITION) {
+            let partition_type = compute_unified_partition_type(
+                self.table
+                    .metadata()
+                    .partition_specs_iter()
+                    .map(|s| s.as_ref()),
+                &schema,
+            )?;
+            Some(Arc::new(partition_type))
+        } else {
+            None
+        };
+
         let plan_context = IncrementalPlanContext {
             snapshots,
             from_snapshot: snapshot_from,
@@ -378,8 +414,11 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             caching_delete_file_loader: CachingDeleteFileLoader::new(
                 self.table.file_io().clone(),
                 self.concurrency_limit_data_files,
+                self.table.runtime().clone(),
             ),
             case_sensitive: self.case_sensitive,
+            name_mapping,
+            unified_partition_type,
         };
 
         Ok(IncrementalTableScan {
@@ -390,6 +429,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             concurrency_limit_data_files: self.concurrency_limit_data_files,
             concurrency_limit_manifest_entries: self.concurrency_limit_manifest_entries,
             concurrency_limit_manifest_files: self.concurrency_limit_manifest_files,
+            runtime: self.table.runtime().clone(),
         })
     }
 }
@@ -404,6 +444,7 @@ pub struct IncrementalTableScan {
     concurrency_limit_data_files: usize,
     concurrency_limit_manifest_entries: usize,
     concurrency_limit_manifest_files: usize,
+    runtime: Runtime,
 }
 
 impl IncrementalTableScan {
@@ -445,7 +486,7 @@ impl IncrementalTableScan {
         // Used to stream the results back to the caller.
         let (file_scan_task_tx, file_scan_task_rx) = channel(concurrency_limit_manifest_entries);
 
-        let (delete_file_idx, delete_file_tx) = DeleteFileIndex::new();
+        let (delete_file_idx, delete_file_tx) = DeleteFileIndex::new(self.runtime.clone());
 
         let manifest_file_contexts = self
             .plan_context
@@ -458,8 +499,10 @@ impl IncrementalTableScan {
 
         let mut channel_for_manifest_error: Sender<Result<_>> = file_scan_task_tx.clone();
 
+        let rt = self.runtime.clone();
+
         // Concurrently load all [`Manifest`]s and stream their [`ManifestEntry`]s
-        spawn(async move {
+        rt.io().spawn(async move {
             let result = futures::stream::iter(manifest_file_contexts)
                 .try_for_each_concurrent(concurrency_limit_manifest_files, |ctx| async move {
                     ctx.fetch_manifest_and_stream_manifest_entries().await
@@ -476,26 +519,39 @@ impl IncrementalTableScan {
 
         // Process the delete file [`ManifestEntry`] stream in parallel. Builds the delete
         // index below.
-        spawn(async move {
-            let result = manifest_entry_delete_ctx_rx
-                .map(|me_ctx| Ok((me_ctx, delete_file_tx.clone())))
-                .try_for_each_concurrent(
-                    concurrency_limit_manifest_entries,
-                    |(manifest_entry_context, tx)| async move {
-                        spawn(async move {
-                            Self::process_delete_manifest_entry(tx, manifest_entry_context).await
-                        })
-                        .await
-                    },
-                )
-                .await;
-
-            if let Err(error) = result {
-                let _ = channel_for_delete_manifest_entry_error
-                    .send(Err(error))
+        {
+            let rt = rt.clone();
+            let rt_inner = rt.clone();
+            rt.cpu().spawn(async move {
+                let result = manifest_entry_delete_ctx_rx
+                    .map(|me_ctx| Ok((me_ctx, delete_file_tx.clone())))
+                    .try_for_each_concurrent(
+                        concurrency_limit_manifest_entries,
+                        |(manifest_entry_context, tx)| {
+                            let rt_inner = rt_inner.clone();
+                            async move {
+                                rt_inner
+                                    .cpu()
+                                    .spawn(async move {
+                                        Self::process_delete_manifest_entry(
+                                            tx,
+                                            manifest_entry_context,
+                                        )
+                                        .await
+                                    })
+                                    .await?
+                            }
+                        },
+                    )
                     .await;
-            }
-        });
+
+                if let Err(error) = result {
+                    let _ = channel_for_delete_manifest_entry_error
+                        .send(Err(error))
+                        .await;
+                }
+            });
+        }
 
         // TODO: Streaming this into the delete index seems somewhat redundant, as we
         // could directly stream into the CachingDeleteFileLoader and instantly load the
@@ -514,6 +570,7 @@ impl IncrementalTableScan {
                 self.plan_context.table_metadata.clone(),
                 self.plan_context.object_cache.clone(),
                 concurrency_limit_manifest_files,
+                rt.clone(),
             ))
         } else {
             None
@@ -540,7 +597,8 @@ impl IncrementalTableScan {
         let filter = delete_filter.clone();
         let table_metadata = self.plan_context.table_metadata.clone();
         let from_snapshot_is_none = self.plan_context.from_snapshot_id.is_none();
-        spawn(async move {
+        let rt_inner = rt.clone();
+        rt.cpu().spawn(async move {
             let result = manifest_entry_data_ctx_rx
                 .map(|me_ctx| Ok((me_ctx, file_scan_task_tx.clone())))
                 .try_for_each_concurrent(
@@ -548,6 +606,7 @@ impl IncrementalTableScan {
                     |(manifest_entry_context, tx)| {
                         let filter = filter.clone();
                         let table_metadata = table_metadata.clone();
+                        let rt_inner = rt_inner.clone();
                         async move {
                             let status = manifest_entry_context.manifest_entry.status();
                             // When from=None (full-scan semantics), treat both Added and Existing
@@ -557,25 +616,29 @@ impl IncrementalTableScan {
                             if status == ManifestStatus::Added
                                 || (from_snapshot_is_none && status == ManifestStatus::Existing)
                             {
-                                spawn(async move {
-                                    Self::process_data_manifest_entry(
-                                        tx,
-                                        manifest_entry_context,
-                                        &filter,
-                                        &table_metadata,
-                                    )
-                                    .await
-                                })
-                                .await
+                                rt_inner
+                                    .cpu()
+                                    .spawn(async move {
+                                        Self::process_data_manifest_entry(
+                                            tx,
+                                            manifest_entry_context,
+                                            &filter,
+                                            &table_metadata,
+                                        )
+                                        .await
+                                    })
+                                    .await?
                             } else if status == ManifestStatus::Deleted && !from_snapshot_is_none {
-                                spawn(async move {
-                                    Self::process_deleted_data_manifest_entry(
-                                        tx,
-                                        manifest_entry_context,
-                                    )
-                                    .await
-                                })
-                                .await
+                                rt_inner
+                                    .cpu()
+                                    .spawn(async move {
+                                        Self::process_deleted_data_manifest_entry(
+                                            tx,
+                                            manifest_entry_context,
+                                        )
+                                        .await
+                                    })
+                                    .await?
                             } else {
                                 Ok(())
                             }
@@ -718,6 +781,13 @@ impl IncrementalTableScan {
                             partition: None,
                             partition_spec: None,
                             case_sensitive: self.plan_context.case_sensitive,
+                            unified_partition_type: self
+                                .plan_context
+                                .unified_partition_type
+                                .clone(),
+                            first_row_id: entry.data_file().first_row_id(),
+                            data_sequence_number: entry.sequence_number(),
+                            key_metadata: entry.data_file.key_metadata().map(Box::from),
                         },
                         combined_predicate,
                     };
@@ -734,10 +804,11 @@ impl IncrementalTableScan {
 
     /// Returns a [`CombinedIncrementalScanResult`] for this incremental table scan.
     pub async fn to_arrow(&self) -> Result<CombinedIncrementalScanResult> {
-        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
-            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
-            .with_row_group_filtering_enabled(true)
-            .with_row_selection_enabled(true);
+        let mut arrow_reader_builder =
+            ArrowReaderBuilder::new(self.file_io.clone(), self.runtime.clone())
+                .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+                .with_row_group_filtering_enabled(true)
+                .with_row_selection_enabled(true);
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
@@ -752,10 +823,11 @@ impl IncrementalTableScan {
     /// This result contains separate streams for appended and deleted record batches,
     /// together with scan metrics.
     pub async fn to_unzipped_arrow(&self) -> Result<UnzippedIncrementalScanResult> {
-        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
-            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
-            .with_row_group_filtering_enabled(true)
-            .with_row_selection_enabled(true);
+        let mut arrow_reader_builder =
+            ArrowReaderBuilder::new(self.file_io.clone(), self.runtime.clone())
+                .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+                .with_row_group_filtering_enabled(true)
+                .with_row_selection_enabled(true);
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
@@ -773,13 +845,14 @@ impl IncrementalTableScan {
         table_metadata: TableMetadataRef,
         object_cache: Arc<ObjectCache>,
         concurrency_limit: usize,
+        runtime: Runtime,
     ) -> (
         Receiver<ManifestEntryRef>,
         futures::channel::oneshot::Receiver<Error>,
     ) {
         let (entry_tx, entry_rx) = channel(concurrency_limit);
         let (error_tx, error_rx) = futures::channel::oneshot::channel();
-        spawn({
+        runtime.io().spawn({
             async move {
                 let manifest_list = match object_cache
                     .get_manifest_list(&snapshot, &table_metadata)
@@ -924,6 +997,17 @@ impl IncrementalTableScan {
                 partition: None,
                 partition_spec: None,
                 case_sensitive: manifest_entry_context.case_sensitive,
+                unified_partition_type: manifest_entry_context.unified_partition_type.clone(),
+                first_row_id: manifest_entry_context
+                    .manifest_entry
+                    .data_file()
+                    .first_row_id(),
+                data_sequence_number: manifest_entry_context.manifest_entry.sequence_number(),
+                key_metadata: manifest_entry_context
+                    .manifest_entry
+                    .data_file
+                    .key_metadata()
+                    .map(Box::from),
             },
         });
 

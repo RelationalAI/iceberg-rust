@@ -15,36 +15,35 @@
 # specific language governing permissions and limitations
 # under the License.
 
-name: Typos Check
+[package]
+edition = { workspace = true }
+homepage = { workspace = true }
+name = "iceberg-property-macro"
+publish = true
+readme = "README.md"
+rust-version = { workspace = true }
+version = { workspace = true }
 
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+license = { workspace = true }
+repository = { workspace = true }
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: true
+categories = ["database"]
+description = "Property derive macro for Apache Iceberg Rust"
+keywords = ["iceberg"]
 
-env:
-  RUST_BACKTRACE: 1
+[lib]
+proc-macro = true
 
-permissions:
-  contents: read
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["full"] }
 
-jobs:
-  typos-check:
-    name: typos check
-    runs-on: ubuntu-slim
-    timeout-minutes: 10
-    env:
-      FORCE_COLOR: 1
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Check typos
-        uses: crate-ci/typos@cf5f1c29a8ac336af8568821ec41919923b05a83 # v1.45.1
+[dev-dependencies]
+iceberg = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+trybuild = { workspace = true }
+
+[lints]
+workspace = true

@@ -25,7 +25,7 @@ on:
     paths:
       - '**'                              # Include all files and directories in the repository by default.
       - '!.github/ISSUE_TEMPLATE/**'      # Exclude files and directories that don't impact tests or code like templates, metadata, and documentation.
-      - '!scripts/**'
+      - '!dev/release/**'
       - '!website/**'
       - '!.asf.yml'
       - '!.gitattributes'
@@ -44,32 +44,27 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      max-parallel: 15
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+  lint:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      - name: Install lint tools
+        # Keep versions in sync with the local install targets in Makefile.
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        with:
+          tool: taplo@0.9.3,cargo-machete@0.7.0
+
       - name: Check License Header
         uses: apache/skywalking-eyes/header@61275cc80d0798a405cb070f7d3a8aaf7cf2c2c1 # v0.8.0
 
       - name: Check toml format
-        run: make check-toml
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: taplo fmt --check
 
       - name: Cargo format
         run: make check-fmt
@@ -77,14 +72,35 @@ jobs:
       - name: Check diff
         run: git diff --exit-code
 
+      - name: Check Cargo.lock is up-to-date
+        run: cargo update --workspace --locked
+
+      - name: Cargo Machete
+        run: cargo machete
+
+      - name: Check typos
+        uses: crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f # v1.49.0
+
+  clippy:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-builder
+
       - name: Cargo clippy
         run: make check-clippy
 
-      - name: Cargo Machete
-        run: make cargo-machete
-
   build:
+    needs: lint
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     strategy:
       max-parallel: 15
       matrix:
@@ -93,7 +109,7 @@ jobs:
           - macos-latest
           - windows-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -101,18 +117,46 @@ jobs:
         uses: ./.github/actions/setup-builder
 
       - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: make build
 
+  # Checks each crate individually to catch missing feature declarations that
+  # are otherwise masked by Cargo's feature unification across the workspace.
+  check_standalone:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-builder
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Check each crate standalone
+        run: |
+          for pkg in $(cargo metadata --no-deps --format-version=1 | jq -r '.packages[].name'); do
+            echo "Checking $pkg..."
+            cargo check -p "$pkg" --all-targets || exit 1
+          done
+
+  # Verifies the core iceberg crate compiles without default features, ensuring
+  # optional functionality is properly gated behind feature flags.
   build_with_no_default_features:
+    needs: lint
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     strategy:
       max-parallel: 15
       matrix:
@@ -121,7 +165,7 @@ jobs:
           - macos-latest
           - windows-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -129,13 +173,19 @@ jobs:
         uses: ./.github/actions/setup-builder
 
       - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: cargo build -p iceberg --no-default-features
 
   tests:
+    needs: lint
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     strategy:
       max-parallel: 15
       matrix:
@@ -144,26 +194,22 @@ jobs:
           - { name: "doc", args: "--doc --all-features --workspace" }
     name: Tests (${{ matrix.test-suite.name }})
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.test-suite.name }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-nextest
         if: matrix.test-suite.name == 'default'
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-nextest
 
@@ -174,8 +220,11 @@ jobs:
       - name: Run tests
         shell: bash
         env:
-          # Disable debug info to speed up compilation and reduce artifact size
-          RUSTFLAGS: "-C debuginfo=0"
+          # HuggingFace Hub integration tests self-skip when these are unset
+          # (e.g. PRs from forks); see crates/storage/opendal/tests/file_io_hf_test.rs
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_BUCKET: ${{ secrets.HF_BUCKET }}
+          HF_DATASET: ${{ secrets.HF_DATASET }}
         run: |
           if [ "${{ matrix.test-suite.name }}" = "default" ]; then
             cargo nextest run ${{ matrix.test-suite.args }}
@@ -189,15 +238,12 @@ jobs:
 
   msrv:
     name: Verify MSRV
+    needs: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Get MSRV
         id: get-msrv
         uses: ./.github/actions/get-msrv

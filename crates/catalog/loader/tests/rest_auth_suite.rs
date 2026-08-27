@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use common::{cleanup_namespace_dyn, rest_catalog_with_auth};
+use iceberg::encryption::kms::{KmsClientFactory, MemoryKmsClientFactory};
 use iceberg::{Catalog, NamespaceIdent, Result as IcebergResult};
 use iceberg_catalog_rest::CustomAuthenticator;
 use iceberg_test_utils::set_up;
@@ -53,7 +54,8 @@ async fn test_authenticator_token_refresh() {
         count: token_request_count.clone(),
     });
 
-    let catalog = rest_catalog_with_auth(Some(authenticator)).await;
+    let kms_client_factory = Arc::new(MemoryKmsClientFactory::new()) as Arc<dyn KmsClientFactory>;
+    let catalog = rest_catalog_with_auth(Some(authenticator), kms_client_factory).await;
 
     let ns1_ident = NamespaceIdent::from_strs(["test_refresh_1"]).unwrap();
     let ns2_ident = NamespaceIdent::from_strs(["test_refresh_2"]).unwrap();
@@ -108,7 +110,8 @@ async fn test_authenticator_persists_across_operations() {
         count: operation_count.clone(),
     });
 
-    let catalog = rest_catalog_with_auth(Some(authenticator)).await;
+    let kms_client_factory = Arc::new(MemoryKmsClientFactory::new()) as Arc<dyn KmsClientFactory>;
+    let catalog = rest_catalog_with_auth(Some(authenticator), kms_client_factory).await;
 
     let ns_ident = NamespaceIdent::from_strs(["test_persist", "auth"]).unwrap();
     let parent_ident = NamespaceIdent::from_strs(["test_persist"]).unwrap();

@@ -655,7 +655,7 @@ mod tests {
             &self,
             _table_ident: &TableIdent,
             _location: &str,
-        ) -> crate::Result<StorageCredential> {
+        ) -> Result<StorageCredential> {
             Ok(StorageCredential {
                 prefix: "s3://test/".to_string(),
                 config: HashMap::new(),
