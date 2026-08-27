@@ -365,6 +365,12 @@ impl PopulatedDeleteFileIndex {
             .flatten()
             .for_each(|ctx| result.push(ctx.as_ref().into()));
 
+        // Add positional deletes indexed by the exact data file path they reference
+        self.pos_deletes_by_path
+            .values()
+            .flatten()
+            .for_each(|ctx| result.push(ctx.as_ref().into()));
+
         result
     }
 }

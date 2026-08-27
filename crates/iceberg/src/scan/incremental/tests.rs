@@ -621,6 +621,12 @@ impl IncrementalTestFixture {
                                             .record_count(positions.len() as u64)
                                             .partition(empty_partition.clone())
                                             .key_metadata(None)
+                                            // Matches real writers (e.g. Spark): a position
+                                            // delete file that covers a single data file sets
+                                            // `referenced_data_file`, which routes it through
+                                            // `DeleteFileIndex`'s `pos_deletes_by_path` bucket
+                                            // instead of `pos_deletes_by_partition`.
+                                            .referenced_data_file(Some(data_file_path.clone()))
                                             .build()
                                             .unwrap(),
                                     )
@@ -878,6 +884,15 @@ impl IncrementalTestFixture {
                                                     .record_count(positions.len() as u64)
                                                     .partition(empty_partition.clone())
                                                     .key_metadata(None)
+                                                    // Matches real writers (e.g. Spark): a
+                                                    // position delete file that covers a single
+                                                    // data file sets `referenced_data_file`,
+                                                    // which routes it through
+                                                    // `DeleteFileIndex`'s `pos_deletes_by_path`
+                                                    // bucket instead of `pos_deletes_by_partition`.
+                                                    .referenced_data_file(Some(
+                                                        data_file_path.clone(),
+                                                    ))
                                                     .build()
                                                     .unwrap(),
                                             )
