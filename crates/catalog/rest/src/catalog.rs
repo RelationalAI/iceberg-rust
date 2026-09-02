@@ -4740,7 +4740,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_table_with_refreshable_storage_factory() {
-        use iceberg::io::{RefreshableStorageFactory, StorageCredential, StorageCredentialsLoader};
+        use iceberg::io::{StorageCredential, StorageCredentialsLoader};
+        use iceberg_storage_refreshable::RefreshableStorageFactory;
 
         #[derive(Debug)]
         struct DummyCredentialLoader;
