@@ -4041,6 +4041,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "iceberg-storage-refreshable"
+version = "0.10.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "iceberg",
+ "iceberg-storage-opendal",
+ "serde",
+ "serde_json",
+ "tokio",
+ "typetag",
+]
+
+[[package]]
 name = "iceberg_test_utils"
 version = "0.10.0"
 dependencies = [
