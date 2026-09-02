@@ -5158,6 +5158,7 @@ dependencies = [
  "opendal-service-fs",
  "opendal-service-gcs",
  "opendal-service-hf",
+ "opendal-service-http",
  "opendal-service-oss",
  "opendal-service-s3",
 ]
@@ -5325,6 +5326,18 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "opendal-service-http"
+version = "0.58.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2ebcbdfad4b81a1e6dde70e898396e011dfd52b5f8639b2628656f7915d6f4c"
+dependencies = [
+ "http 1.5.0",
+ "log",
+ "opendal-core",
+ "serde",
 ]
 
 [[package]]

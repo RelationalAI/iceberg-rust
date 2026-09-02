@@ -48,6 +48,14 @@ pub const ADLS_CLIENT_SECRET: &str = "adls.client-secret";
 pub const ADLS_AUTHORITY_HOST: &str = "adls.authority-host";
 /// The endpoint of the storage account.
 pub const ADLS_ENDPOINT: &str = "adls.endpoint";
+/// Whether to allow genuinely anonymous, unsigned access when no credential
+/// is configured (e.g. a container with public read access). Mirrors
+/// `s3.allow-anonymous`; unlike that flag, this is required explicitly here
+/// rather than inferred from "no credentials configured", since the absence
+/// of an adls.* credential can also mean "rely on ambient Azure credentials
+/// (managed identity, Azure CLI, environment variables)", which this must not
+/// break.
+pub const ADLS_ALLOW_ANONYMOUS: &str = "adls.allow-anonymous";
 
 /// Azure Data Lake Storage configuration.
 ///

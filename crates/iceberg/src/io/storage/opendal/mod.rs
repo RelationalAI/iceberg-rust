@@ -44,6 +44,8 @@ use url::Url;
 
 use crate::catalog::{NamespaceIdent, TableIdent};
 use crate::io::refreshable_storage::RefreshableOpenDalStorageBuilder;
+#[cfg(feature = "storage-azdls")]
+use crate::io::storage::config::ADLS_ALLOW_ANONYMOUS;
 use crate::io::storage::config::{PROP_METADATA_LOCATION, PROP_TABLE_IDENT};
 use crate::io::{
     FileMetadata, FileRead, FileWrite, InputFile, OutputFile, Storage, StorageConfig,
@@ -113,6 +115,13 @@ pub enum OpenDalStorageFactory {
     },
 }
 
+#[cfg(feature = "storage-azdls")]
+fn azdls_allow_anonymous(properties: &HashMap<String, String>) -> bool {
+    properties
+        .get(ADLS_ALLOW_ANONYMOUS)
+        .is_some_and(|v| crate::io::is_truthy(v.to_lowercase().as_str()))
+}
+
 #[typetag::serde(name = "OpenDalStorageFactory")]
 impl StorageFactory for OpenDalStorageFactory {
     #[allow(unused_variables)]
@@ -145,6 +154,7 @@ impl StorageFactory for OpenDalStorageFactory {
             OpenDalStorageFactory::Azdls { configured_scheme } => {
                 Ok(Arc::new(OpenDalStorage::Azdls {
                     configured_scheme: configured_scheme.clone(),
+                    allow_anonymous: azdls_allow_anonymous(config.props()),
                     config: azdls_config_parse(config.props().clone())?.into(),
                 }))
             }
@@ -216,6 +226,9 @@ pub enum OpenDalStorage {
         configured_scheme: AzureStorageScheme,
         /// Azure DLS configuration.
         config: Arc<AzdlsConfig>,
+        /// Whether to fall back to genuinely anonymous, unsigned access when
+        /// no credential is configured. See [`ADLS_ALLOW_ANONYMOUS`].
+        allow_anonymous: bool,
     },
     /// Wraps any storage with credential refresh capability.
     Refreshable {
@@ -259,9 +272,11 @@ impl OpenDalStorage {
             #[cfg(feature = "storage-azdls")]
             "abfss" | "abfs" | "wasbs" | "wasb" => {
                 let configured_scheme = scheme_str.parse::<AzureStorageScheme>()?;
+                let allow_anonymous = azdls_allow_anonymous(&props);
                 Ok(Self::Azdls {
                     config: azdls_config_parse(props)?.into(),
                     configured_scheme,
+                    allow_anonymous,
                 })
             }
             _ => Err(Error::new(
@@ -357,7 +372,8 @@ impl OpenDalStorage {
             OpenDalStorage::Azdls {
                 configured_scheme,
                 config,
-            } => azdls_create_operator(path, config, configured_scheme)?,
+                allow_anonymous,
+            } => azdls_create_operator(path, config, configured_scheme, *allow_anonymous)?,
             OpenDalStorage::Refreshable { backend } => {
                 let backend = backend.as_ref().ok_or_else(|| {
                     Error::new(
