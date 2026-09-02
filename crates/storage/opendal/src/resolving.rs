@@ -111,9 +111,11 @@ fn build_storage_for_scheme(
         }
         #[cfg(feature = "opendal-azdls")]
         "azdls" => {
+            let allow_anonymous = crate::azdls::azdls_allow_anonymous(props);
             let config = crate::azdls::azdls_config_parse(props.clone())?;
             Ok(OpenDalStorage::Azdls {
                 config: Arc::new(config),
+                allow_anonymous,
             })
         }
         #[cfg(feature = "opendal-fs")]

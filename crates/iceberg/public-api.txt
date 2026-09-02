@@ -732,6 +732,7 @@ pub mod iceberg::io::config
 pub struct iceberg::io::config::AzdlsConfig
 pub iceberg::io::config::AzdlsConfig::account_key: core::option::Option<alloc::string::String>
 pub iceberg::io::config::AzdlsConfig::account_name: core::option::Option<alloc::string::String>
+pub iceberg::io::config::AzdlsConfig::allow_anonymous: bool
 pub iceberg::io::config::AzdlsConfig::authority_host: core::option::Option<alloc::string::String>
 pub iceberg::io::config::AzdlsConfig::client_id: core::option::Option<alloc::string::String>
 pub iceberg::io::config::AzdlsConfig::client_secret: core::option::Option<alloc::string::String>
@@ -754,7 +755,7 @@ impl core::fmt::Debug for iceberg::io::AzdlsConfig
 pub fn iceberg::io::AzdlsConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for iceberg::io::AzdlsConfig
 impl iceberg::io::AzdlsConfig
-pub fn iceberg::io::AzdlsConfig::builder() -> AzdlsConfigBuilder<((), (), (), (), (), (), (), (), (), ())>
+pub fn iceberg::io::AzdlsConfig::builder() -> AzdlsConfigBuilder<((), (), (), (), (), (), (), (), (), (), ())>
 impl serde_core::ser::Serialize for iceberg::io::AzdlsConfig
 pub fn iceberg::io::AzdlsConfig::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for iceberg::io::AzdlsConfig
@@ -1108,6 +1109,7 @@ pub fn iceberg::io::opendal::OpenDalStorageFactory::deserialize<__D>(__deseriali
 pub struct iceberg::io::AzdlsConfig
 pub iceberg::io::AzdlsConfig::account_key: core::option::Option<alloc::string::String>
 pub iceberg::io::AzdlsConfig::account_name: core::option::Option<alloc::string::String>
+pub iceberg::io::AzdlsConfig::allow_anonymous: bool
 pub iceberg::io::AzdlsConfig::authority_host: core::option::Option<alloc::string::String>
 pub iceberg::io::AzdlsConfig::client_id: core::option::Option<alloc::string::String>
 pub iceberg::io::AzdlsConfig::client_secret: core::option::Option<alloc::string::String>
@@ -1130,7 +1132,7 @@ impl core::fmt::Debug for iceberg::io::AzdlsConfig
 pub fn iceberg::io::AzdlsConfig::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for iceberg::io::AzdlsConfig
 impl iceberg::io::AzdlsConfig
-pub fn iceberg::io::AzdlsConfig::builder() -> AzdlsConfigBuilder<((), (), (), (), (), (), (), (), (), ())>
+pub fn iceberg::io::AzdlsConfig::builder() -> AzdlsConfigBuilder<((), (), (), (), (), (), (), (), (), (), ())>
 impl serde_core::ser::Serialize for iceberg::io::AzdlsConfig
 pub fn iceberg::io::AzdlsConfig::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for iceberg::io::AzdlsConfig
