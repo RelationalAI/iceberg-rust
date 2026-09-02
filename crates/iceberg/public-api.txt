@@ -909,6 +909,7 @@ impl<'de> serde_core::de::Deserialize<'de> for iceberg::io::StorageConfig
 pub fn iceberg::io::StorageConfig::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub const iceberg::io::config::ADLS_ACCOUNT_KEY: &str
 pub const iceberg::io::config::ADLS_ACCOUNT_NAME: &str
+pub const iceberg::io::config::ADLS_ALLOW_ANONYMOUS: &str
 pub const iceberg::io::config::ADLS_AUTHORITY_HOST: &str
 pub const iceberg::io::config::ADLS_CLIENT_ID: &str
 pub const iceberg::io::config::ADLS_CLIENT_SECRET: &str
@@ -952,6 +953,7 @@ pub use iceberg::io::opendal::AwsCredential
 pub use iceberg::io::opendal::AwsCredentialLoad
 pub enum iceberg::io::opendal::OpenDalStorage
 pub iceberg::io::opendal::OpenDalStorage::Azdls
+pub iceberg::io::opendal::OpenDalStorage::Azdls::allow_anonymous: bool
 pub iceberg::io::opendal::OpenDalStorage::Azdls::config: alloc::sync::Arc<opendal_service_azdls::config::AzdlsConfig>
 pub iceberg::io::opendal::OpenDalStorage::Azdls::configured_scheme: iceberg::io::storage::opendal::azdls::AzureStorageScheme
 pub iceberg::io::opendal::OpenDalStorage::Gcs
@@ -1048,6 +1050,7 @@ impl<'de> serde_core::de::Deserialize<'de> for iceberg::io::opendal::Refreshable
 pub fn iceberg::io::opendal::RefreshableStorageFactory::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub enum iceberg::io::OpenDalStorage
 pub iceberg::io::OpenDalStorage::Azdls
+pub iceberg::io::OpenDalStorage::Azdls::allow_anonymous: bool
 pub iceberg::io::OpenDalStorage::Azdls::config: alloc::sync::Arc<opendal_service_azdls::config::AzdlsConfig>
 pub iceberg::io::OpenDalStorage::Azdls::configured_scheme: iceberg::io::storage::opendal::azdls::AzureStorageScheme
 pub iceberg::io::OpenDalStorage::Gcs
@@ -1459,6 +1462,7 @@ impl<'de> serde_core::de::Deserialize<'de> for iceberg::io::StorageCredential
 pub fn iceberg::io::StorageCredential::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub const iceberg::io::ADLS_ACCOUNT_KEY: &str
 pub const iceberg::io::ADLS_ACCOUNT_NAME: &str
+pub const iceberg::io::ADLS_ALLOW_ANONYMOUS: &str
 pub const iceberg::io::ADLS_AUTHORITY_HOST: &str
 pub const iceberg::io::ADLS_CLIENT_ID: &str
 pub const iceberg::io::ADLS_CLIENT_SECRET: &str
