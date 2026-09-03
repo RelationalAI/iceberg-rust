@@ -222,9 +222,10 @@ impl FileIOBuilder {
 
     /// Set the runtime table identity context.
     ///
-    /// Serializes the `TableIdent` as JSON into a well-known prop key so that
-    /// `RefreshableStorageFactory::build()` can recover it and pass it to the
-    /// credential loader on refresh. Other storage factories ignore this prop.
+    /// Serializes the `TableIdent` as JSON into a well-known prop key so that a
+    /// credential-refreshing `StorageFactory` implementation (e.g. a fork's own
+    /// vended-credentials wrapper) can recover it and pass it to its credential loader on
+    /// refresh. Other storage factories ignore this prop.
     pub fn with_table_ident(mut self, table_ident: crate::catalog::TableIdent) -> Self {
         let json =
             serde_json::to_string(&table_ident).expect("TableIdent serialization is infallible");
@@ -234,8 +235,8 @@ impl FileIOBuilder {
 
     /// Set the runtime metadata location context.
     ///
-    /// Stores the location under a well-known prop key so that
-    /// `RefreshableStorageFactory::build()` can pass it to the credential loader on refresh.
+    /// Stores the location under a well-known prop key so that a credential-refreshing
+    /// `StorageFactory` implementation can pass it to its credential loader on refresh.
     /// Other storage factories ignore this prop.
     pub fn with_location(mut self, location: impl Into<String>) -> Self {
         self.config = self
