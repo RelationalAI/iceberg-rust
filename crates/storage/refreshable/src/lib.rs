@@ -35,6 +35,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -139,15 +140,12 @@ impl FileRead for RefreshableReader {
 
         match attempt {
             Ok(v) => Ok(v),
-            Err(_) => {
-                self.state.refresh(version).await?;
-                self.state
-                    .current()
-                    .0
-                    .reader(&self.path)
-                    .await?
-                    .read(range)
-                    .await
+            Err(e) => {
+                let path = self.path.clone();
+                refresh_and_retry(&self.state, version, e, move |b| async move {
+                    b.reader(&path).await?.read(range).await
+                })
+                .await
             }
         }
     }
@@ -261,6 +259,29 @@ impl RefreshableStorage {
     }
 }
 
+/// Refreshes credentials (double-checked against `seen_version`) and retries `op`
+/// against the freshly-refreshed backend. If `op` also fails, `original_err` is
+/// attached as context on the final error — so a caller debugging the failure can see
+/// what the *first* attempt failed with too, not just whatever the retry hit, which
+/// may be an unrelated, more confusing symptom (e.g. credentials refresh successfully
+/// but the retry then 404s for a genuinely separate reason).
+async fn refresh_and_retry<T, F, Fut>(
+    state: &State,
+    seen_version: u64,
+    original_err: Error,
+    op: F,
+) -> Result<T>
+where
+    F: FnOnce(Arc<dyn Storage>) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    state.refresh(seen_version).await?;
+    let (backend, _) = state.current();
+    op(backend)
+        .await
+        .map_err(|e| e.with_context("original_error", original_err.to_string()))
+}
+
 #[async_trait]
 #[typetag::serde(name = "RefreshableStorage")]
 impl Storage for RefreshableStorage {
@@ -269,9 +290,8 @@ impl Storage for RefreshableStorage {
         let (backend, version) = state.current();
         match backend.exists(path).await {
             Ok(v) => Ok(v),
-            Err(_) => {
-                state.refresh(version).await?;
-                state.current().0.exists(path).await
+            Err(e) => {
+                refresh_and_retry(state, version, e, |b| async move { b.exists(path).await }).await
             }
         }
     }
@@ -281,9 +301,9 @@ impl Storage for RefreshableStorage {
         let (backend, version) = state.current();
         match backend.metadata(path).await {
             Ok(v) => Ok(v),
-            Err(_) => {
-                state.refresh(version).await?;
-                state.current().0.metadata(path).await
+            Err(e) => {
+                refresh_and_retry(state, version, e, |b| async move { b.metadata(path).await })
+                    .await
             }
         }
     }
@@ -293,9 +313,8 @@ impl Storage for RefreshableStorage {
         let (backend, version) = state.current();
         match backend.read(path).await {
             Ok(v) => Ok(v),
-            Err(_) => {
-                state.refresh(version).await?;
-                state.current().0.read(path).await
+            Err(e) => {
+                refresh_and_retry(state, version, e, |b| async move { b.read(path).await }).await
             }
         }
     }
@@ -313,9 +332,14 @@ impl Storage for RefreshableStorage {
         let (backend, version) = state.current();
         match backend.write(path, bs.clone()).await {
             Ok(v) => Ok(v),
-            Err(_) => {
-                state.refresh(version).await?;
-                state.current().0.write(path, bs).await
+            Err(e) => {
+                refresh_and_retry(
+                    state,
+                    version,
+                    e,
+                    |b| async move { b.write(path, bs).await },
+                )
+                .await
             }
         }
     }
@@ -334,9 +358,8 @@ impl Storage for RefreshableStorage {
         let (backend, version) = state.current();
         match backend.writer(path).await {
             Ok(v) => Ok(v),
-            Err(_) => {
-                state.refresh(version).await?;
-                state.current().0.writer(path).await
+            Err(e) => {
+                refresh_and_retry(state, version, e, |b| async move { b.writer(path).await }).await
             }
         }
     }
@@ -346,9 +369,8 @@ impl Storage for RefreshableStorage {
         let (backend, version) = state.current();
         match backend.delete(path).await {
             Ok(v) => Ok(v),
-            Err(_) => {
-                state.refresh(version).await?;
-                state.current().0.delete(path).await
+            Err(e) => {
+                refresh_and_retry(state, version, e, |b| async move { b.delete(path).await }).await
             }
         }
     }
@@ -358,9 +380,14 @@ impl Storage for RefreshableStorage {
         let (backend, version) = state.current();
         match backend.delete_prefix(path).await {
             Ok(v) => Ok(v),
-            Err(_) => {
-                state.refresh(version).await?;
-                state.current().0.delete_prefix(path).await
+            Err(e) => {
+                refresh_and_retry(
+                    state,
+                    version,
+                    e,
+                    |b| async move { b.delete_prefix(path).await },
+                )
+                .await
             }
         }
     }
@@ -720,5 +747,101 @@ mod tests {
         // the already-refreshed state and need no further refresh.
         reader.read(0..4).await.unwrap();
         assert_eq!(loader.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_failure_preserves_original_error_as_context() {
+        let loader = Arc::new(TrackingLoader {
+            call_count: AtomicUsize::new(0),
+        });
+        // Never succeeds, no matter how many times it's refreshed -- so the retry
+        // fails too, and its error must still mention the *original* failure.
+        let storage = build(u64::MAX, Arc::clone(&loader));
+
+        let err = storage.exists("x").await.unwrap_err();
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("original_error"),
+            "error should carry the original attempt's failure as context: {rendered}"
+        );
+        assert!(
+            rendered.contains("stale credentials"),
+            "context should contain the original error's message: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_and_read_roundtrip_through_real_backend() {
+        // Unlike the other tests here, this goes through a real
+        // iceberg-storage-opendal backend (in-memory) rather than FakeStorage, to
+        // prove write()/read() actually work end-to-end through this wrapper, not
+        // just that the retry bookkeeping around them is correct.
+        let loader = Arc::new(TrackingLoader {
+            call_count: AtomicUsize::new(0),
+        });
+        let factory = RefreshableStorageFactory::new(loader).with_factory(Arc::new(
+            iceberg_storage_opendal::OpenDalStorageFactory::Memory,
+        ));
+        let storage = factory.build(&StorageConfig::new()).unwrap();
+
+        storage
+            .write("memory:/roundtrip-file", Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+        let data = storage.read("memory:/roundtrip-file").await.unwrap();
+        assert_eq!(data, Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn factory_build_parses_table_ident_and_location_from_props() {
+        #[derive(Debug)]
+        struct CapturingLoader {
+            captured: std::sync::Mutex<Option<(TableIdent, String)>>,
+        }
+
+        #[async_trait]
+        impl StorageCredentialsLoader for CapturingLoader {
+            async fn load_credentials(
+                &self,
+                table_ident: &TableIdent,
+                location: &str,
+            ) -> Result<StorageCredential> {
+                *self.captured.lock().unwrap() = Some((table_ident.clone(), location.to_string()));
+                Ok(StorageCredential {
+                    prefix: String::new(),
+                    config: HashMap::from([("version".to_string(), "1".to_string())]),
+                })
+            }
+        }
+
+        let loader = Arc::new(CapturingLoader {
+            captured: std::sync::Mutex::new(None),
+        });
+        let table_ident = TableIdent::from_strs(["ns", "tbl"]).unwrap();
+        // This is exactly what FileIOBuilder::with_table_ident/with_location populate.
+        let config = StorageConfig::new()
+            .with_prop(
+                PROP_METADATA_LOCATION,
+                "s3://test-bucket/table/metadata.json",
+            )
+            .with_prop(
+                PROP_TABLE_IDENT,
+                serde_json::to_string(&table_ident).unwrap(),
+            );
+
+        let factory = RefreshableStorageFactory::new(Arc::clone(&loader) as _).with_factory(
+            Arc::new(FakeStorageFactory {
+                fail_until_version: 1,
+            }),
+        );
+        let storage = factory.build(&config).unwrap();
+
+        // fail_until_version: 1 guarantees the first call fails and triggers exactly
+        // one refresh, so the loader is actually invoked by the time we assert below.
+        storage.exists("x").await.unwrap();
+
+        let (captured_ident, captured_location) = loader.captured.lock().unwrap().clone().unwrap();
+        assert_eq!(captured_ident, table_ident);
+        assert_eq!(captured_location, "s3://test-bucket/table/metadata.json");
     }
 }
