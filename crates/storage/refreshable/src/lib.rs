@@ -119,33 +119,39 @@ impl State {
 /// groups) — exactly the scenario a credential expiring mid-flight needs to survive,
 /// and exactly what retrying only the initial `reader()` construction would miss.
 ///
-/// Each `.read()` call resolves the current backend and constructs a fresh inner
-/// reader from it, rather than holding one open across calls. This has no real cost:
-/// every `Storage` method (including `reader()` itself) already rebuilds its
-/// backend's operator from config on each call, so a `Storage::reader(path)` call is
-/// already exactly this cheap per invocation — and range reads are naturally
-/// idempotent, so re-resolving per call is safe. It also avoids needing a lock that
-/// would otherwise serialize concurrent range reads through one shared reader.
+/// The current inner reader is held across calls behind a `tokio::sync::RwLock`
+/// rather than rebuilt on every `.read()` — every `Storage` method call rebuilds its
+/// backend's whole `opendal::Operator` from config, so re-resolving *that* on every
+/// single range read (as an earlier version of this wrapper did) would multiply that
+/// cost by the number of reads in a long scan instead of paying it once. Concurrent
+/// reads (e.g. parallel row-group fetches against the same file) share a read lock
+/// and aren't serialized on the happy path; only a failure-triggered rebuild briefly
+/// takes the write lock to swap in a freshly-built reader. This mirrors this crate's
+/// predecessor's own `RetryableReader` design exactly, including its reasoning.
 struct RefreshableReader {
     state: Arc<State>,
     path: String,
+    inner: tokio::sync::RwLock<(Box<dyn FileRead>, u64)>,
 }
 
 #[async_trait]
 impl FileRead for RefreshableReader {
     async fn read(&self, range: std::ops::Range<u64>) -> Result<Bytes> {
-        let (backend, version) = self.state.current();
-        let attempt: Result<Bytes> =
-            async { backend.reader(&self.path).await?.read(range.clone()).await }.await;
+        let attempt = { self.inner.read().await.0.read(range.clone()).await };
 
         match attempt {
             Ok(v) => Ok(v),
-            Err(e) => {
-                let path = self.path.clone();
-                refresh_and_retry(&self.state, version, e, move |b| async move {
-                    b.reader(&path).await?.read(range).await
-                })
-                .await
+            Err(original_err) => {
+                let seen_version = self.inner.read().await.1;
+                self.state.refresh(seen_version).await?;
+                let (backend, new_version) = self.state.current();
+                let new_inner = backend
+                    .reader(&self.path)
+                    .await
+                    .map_err(|e| e.with_context("original_error", original_err.to_string()))?;
+                let result = new_inner.read(range).await;
+                *self.inner.write().await = (new_inner, new_version);
+                result.map_err(|e| e.with_context("original_error", original_err.to_string()))
             }
         }
     }
@@ -321,9 +327,23 @@ impl Storage for RefreshableStorage {
 
     async fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
         let state = Arc::clone(self.state()?);
+        let (backend, version) = state.current();
+        let (inner, version) = match backend.reader(path).await {
+            Ok(r) => (r, version),
+            Err(e) => {
+                state.refresh(version).await?;
+                let (backend, version) = state.current();
+                let inner = backend
+                    .reader(path)
+                    .await
+                    .map_err(|e2| e2.with_context("original_error", e.to_string()))?;
+                (inner, version)
+            }
+        };
         Ok(Box::new(RefreshableReader {
             state,
             path: path.to_string(),
+            inner: tokio::sync::RwLock::new((inner, version)),
         }))
     }
 
@@ -525,6 +545,8 @@ mod tests {
         version: u64,
         #[serde(skip)]
         fail_until_version: u64,
+        #[serde(skip)]
+        reader_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -544,6 +566,7 @@ mod tests {
             unimplemented!()
         }
         async fn reader(&self, _path: &str) -> Result<Box<dyn FileRead>> {
+            self.reader_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeReader {
                 version: self.version,
                 fail_until_version: self.fail_until_version,
@@ -597,6 +620,11 @@ mod tests {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct FakeStorageFactory {
         fail_until_version: u64,
+        /// Shared across every `FakeStorage` this factory builds, so a test can
+        /// count how many times `FakeStorage::reader()` was called -- i.e. how many
+        /// times the (simulated) backend operator was rebuilt.
+        #[serde(skip)]
+        reader_calls: Arc<AtomicUsize>,
     }
 
     #[typetag::serde]
@@ -609,6 +637,7 @@ mod tests {
             Ok(Arc::new(FakeStorage {
                 version,
                 fail_until_version: self.fail_until_version,
+                reader_calls: Arc::clone(&self.reader_calls),
             }))
         }
     }
@@ -641,8 +670,11 @@ mod tests {
     }
 
     fn build(fail_until_version: u64, loader: Arc<TrackingLoader>) -> Arc<dyn Storage> {
-        let factory = RefreshableStorageFactory::new(loader)
-            .with_factory(Arc::new(FakeStorageFactory { fail_until_version }));
+        let factory =
+            RefreshableStorageFactory::new(loader).with_factory(Arc::new(FakeStorageFactory {
+                fail_until_version,
+                reader_calls: Arc::new(AtomicUsize::new(0)),
+            }));
         factory.build(&StorageConfig::new()).unwrap()
     }
 
@@ -730,9 +762,9 @@ mod tests {
         });
         let storage = build(1, Arc::clone(&loader));
 
-        // Obtain the reader *before* any refresh has happened -- reader() itself
-        // always succeeds immediately (construction is deferred), so this must not
-        // trigger a refresh on its own.
+        // FakeStorage::reader() never itself fails (only .read() calls simulate
+        // failure), so constructing the reader must not trigger a refresh on its own
+        // -- even though the backend it's bound to is already stale at this point.
         let reader = storage.reader("x").await.unwrap();
         assert_eq!(loader.call_count.load(Ordering::SeqCst), 0);
 
@@ -832,6 +864,7 @@ mod tests {
         let factory = RefreshableStorageFactory::new(Arc::clone(&loader) as _).with_factory(
             Arc::new(FakeStorageFactory {
                 fail_until_version: 1,
+                reader_calls: Arc::new(AtomicUsize::new(0)),
             }),
         );
         let storage = factory.build(&config).unwrap();
@@ -843,5 +876,40 @@ mod tests {
         let (captured_ident, captured_location) = loader.captured.lock().unwrap().clone().unwrap();
         assert_eq!(captured_ident, table_ident);
         assert_eq!(captured_location, "s3://test-bucket/table/metadata.json");
+    }
+
+    #[tokio::test]
+    async fn reader_reuses_inner_reader_across_successful_reads() {
+        // Regression test: an earlier version of RefreshableReader constructed a
+        // fresh inner reader (and therefore rebuilt the whole backend operator) on
+        // *every* .read() call, which would multiply that cost by the number of
+        // reads in a long scan instead of paying it once, unlike this crate's
+        // predecessor. Successful reads must reuse the same inner reader.
+        let loader = Arc::new(TrackingLoader {
+            call_count: AtomicUsize::new(0),
+        });
+        let reader_calls = Arc::new(AtomicUsize::new(0));
+        let factory =
+            RefreshableStorageFactory::new(loader).with_factory(Arc::new(FakeStorageFactory {
+                fail_until_version: 0,
+                reader_calls: Arc::clone(&reader_calls),
+            }));
+        let storage = factory.build(&StorageConfig::new()).unwrap();
+
+        let reader = storage.reader("x").await.unwrap();
+        assert_eq!(
+            reader_calls.load(Ordering::SeqCst),
+            1,
+            "reader() itself builds the inner reader exactly once"
+        );
+
+        for _ in 0..5 {
+            reader.read(0..4).await.unwrap();
+        }
+        assert_eq!(
+            reader_calls.load(Ordering::SeqCst),
+            1,
+            "5 successful reads must reuse the same inner reader, not rebuild it each time"
+        );
     }
 }
