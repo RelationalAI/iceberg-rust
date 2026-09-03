@@ -109,6 +109,50 @@ impl State {
     }
 }
 
+/// Wraps the [`FileRead`] a backend returns from `reader()` so that *every*
+/// subsequent `.read()` call gets the same refresh-and-retry-once protection as a
+/// direct [`RefreshableStorage`] method call — not just the call that constructed it.
+///
+/// This matters because a reader is typically obtained once and then used for many
+/// range reads over the lifetime of a long read (e.g. a Parquet scan reading many row
+/// groups) — exactly the scenario a credential expiring mid-flight needs to survive,
+/// and exactly what retrying only the initial `reader()` construction would miss.
+///
+/// Each `.read()` call resolves the current backend and constructs a fresh inner
+/// reader from it, rather than holding one open across calls. This has no real cost:
+/// every `Storage` method (including `reader()` itself) already rebuilds its
+/// backend's operator from config on each call, so a `Storage::reader(path)` call is
+/// already exactly this cheap per invocation — and range reads are naturally
+/// idempotent, so re-resolving per call is safe. It also avoids needing a lock that
+/// would otherwise serialize concurrent range reads through one shared reader.
+struct RefreshableReader {
+    state: Arc<State>,
+    path: String,
+}
+
+#[async_trait]
+impl FileRead for RefreshableReader {
+    async fn read(&self, range: std::ops::Range<u64>) -> Result<Bytes> {
+        let (backend, version) = self.state.current();
+        let attempt: Result<Bytes> =
+            async { backend.reader(&self.path).await?.read(range.clone()).await }.await;
+
+        match attempt {
+            Ok(v) => Ok(v),
+            Err(_) => {
+                self.state.refresh(version).await?;
+                self.state
+                    .current()
+                    .0
+                    .reader(&self.path)
+                    .await?
+                    .read(range)
+                    .await
+            }
+        }
+    }
+}
+
 /// A [`Storage`] that wraps another [`Storage`] (by default, any backend
 /// [`iceberg-storage-opendal`](iceberg_storage_opendal) can build) and transparently
 /// refreshes credentials on failure.
@@ -129,10 +173,22 @@ impl State {
 ///   predecessor (an opendal-accessor-level wrapper), which had no error-kind filter
 ///   either.
 ///
-/// `delete_stream` is the one exception: the input `Stream` is consumed by the first
+/// `delete_stream` is one exception: the input `Stream` is consumed by the first
 /// attempt and can't be safely replayed, so it is never retried — a failure always
 /// propagates immediately, matching this crate's predecessor's already-accepted lack of
 /// retry for several stream-based operations.
+///
+/// `reader`/`writer` are handled specially, since both return a long-lived object
+/// rather than a single result:
+/// - `reader()`'s returned [`FileRead`] is wrapped ([`RefreshableReader`]) so every
+///   subsequent `.read()` call gets this same retry-once treatment, not just the call
+///   that constructed it — this crate's predecessor gave every read this protection
+///   for a reader's whole lifetime (via an opendal-level accessor wrapper), and a
+///   long-lived reader used for many range reads (e.g. a Parquet scan) is exactly the
+///   scenario this whole mechanism exists to protect.
+/// - `writer()`'s returned [`FileWrite`] is NOT wrapped this way — see its own doc
+///   comment for why a stateful writer can't safely retry a failed write against a
+///   freshly-constructed one.
 pub struct RefreshableStorage {
     /// `None` only after deserialization, which cannot reconstruct live credential state
     /// (the credentials loader and current backend are never serializable) — every method
@@ -245,15 +301,11 @@ impl Storage for RefreshableStorage {
     }
 
     async fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
-        let state = self.state()?;
-        let (backend, version) = state.current();
-        match backend.reader(path).await {
-            Ok(v) => Ok(v),
-            Err(_) => {
-                state.refresh(version).await?;
-                state.current().0.reader(path).await
-            }
-        }
+        let state = Arc::clone(self.state()?);
+        Ok(Box::new(RefreshableReader {
+            state,
+            path: path.to_string(),
+        }))
     }
 
     async fn write(&self, path: &str, bs: Bytes) -> Result<()> {
@@ -268,6 +320,15 @@ impl Storage for RefreshableStorage {
         }
     }
 
+    /// Unlike `reader()`, the returned [`FileWrite`] is NOT wrapped with per-call
+    /// retry — only this construction call is retried. A writer is frequently
+    /// stateful (e.g. a multipart upload accumulating state across `.write()` calls),
+    /// so a write that fails partway through can't be safely retried by constructing
+    /// a fresh writer and replaying just the failed call: any bytes already
+    /// successfully written to the old, now-abandoned writer would be silently lost
+    /// rather than replayed, potentially producing truncated output. Reads don't
+    /// have this problem — a range read is naturally idempotent, so retrying it
+    /// against a freshly-constructed reader is always safe.
     async fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
         let state = self.state()?;
         let (backend, version) = state.current();
@@ -456,7 +517,10 @@ mod tests {
             unimplemented!()
         }
         async fn reader(&self, _path: &str) -> Result<Box<dyn FileRead>> {
-            unimplemented!()
+            Ok(Box::new(FakeReader {
+                version: self.version,
+                fail_until_version: self.fail_until_version,
+            }))
         }
         async fn write(&self, _path: &str, _bs: Bytes) -> Result<()> {
             unimplemented!()
@@ -478,6 +542,28 @@ mod tests {
         }
         fn new_output(&self, _path: &str) -> Result<OutputFile> {
             unimplemented!()
+        }
+    }
+
+    /// A [`FileRead`] whose `.read()` succeeds only once `version >= fail_until_version`
+    /// — fixed at construction time (mirrors the version the *backend* that built it was
+    /// built with), so a reader obtained before a refresh keeps failing on every `.read()`
+    /// call even after a later, separately-obtained backend would succeed. This is what
+    /// makes `reader_retries_individual_read_calls_not_just_construction` a meaningful
+    /// test of [`RefreshableReader`] specifically, not just of `reader()`'s construction.
+    struct FakeReader {
+        version: u64,
+        fail_until_version: u64,
+    }
+
+    #[async_trait]
+    impl FileRead for FakeReader {
+        async fn read(&self, _range: std::ops::Range<u64>) -> Result<Bytes> {
+            if self.version < self.fail_until_version {
+                Err(Error::new(ErrorKind::Unexpected, "stale credentials"))
+            } else {
+                Ok(Bytes::from_static(b"data"))
+            }
         }
     }
 
@@ -607,6 +693,32 @@ mod tests {
         // triggered through one still succeeds when read back through the other.
         let input = storage.new_input("x").unwrap();
         assert!(input.exists().await.unwrap());
+        assert_eq!(loader.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reader_retries_individual_read_calls_not_just_construction() {
+        let loader = Arc::new(TrackingLoader {
+            call_count: AtomicUsize::new(0),
+        });
+        let storage = build(1, Arc::clone(&loader));
+
+        // Obtain the reader *before* any refresh has happened -- reader() itself
+        // always succeeds immediately (construction is deferred), so this must not
+        // trigger a refresh on its own.
+        let reader = storage.reader("x").await.unwrap();
+        assert_eq!(loader.call_count.load(Ordering::SeqCst), 0);
+
+        // The first .read() call is what actually hits the (still-stale) backend and
+        // must itself trigger exactly one refresh-and-retry -- proving retry isn't
+        // limited to whatever call constructed the reader.
+        let data = reader.read(0..4).await.unwrap();
+        assert_eq!(data, Bytes::from_static(b"data"));
+        assert_eq!(loader.call_count.load(Ordering::SeqCst), 1);
+
+        // A second .read() call on the *same*, already-obtained reader must observe
+        // the already-refreshed state and need no further refresh.
+        reader.read(0..4).await.unwrap();
         assert_eq!(loader.call_count.load(Ordering::SeqCst), 1);
     }
 }
