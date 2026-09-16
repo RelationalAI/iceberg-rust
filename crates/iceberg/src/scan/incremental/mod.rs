@@ -71,6 +71,7 @@ pub struct IncrementalTableScanBuilder<'a> {
     concurrency_limit_data_files: usize,
     concurrency_limit_manifest_entries: usize,
     concurrency_limit_manifest_files: usize,
+    bloom_filter_enabled: bool,
 }
 
 impl<'a> IncrementalTableScanBuilder<'a> {
@@ -90,6 +91,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             concurrency_limit_data_files: num_cpus,
             concurrency_limit_manifest_entries: num_cpus,
             concurrency_limit_manifest_files: num_cpus,
+            bloom_filter_enabled: false,
         }
     }
 
@@ -236,6 +238,21 @@ impl<'a> IncrementalTableScanBuilder<'a> {
     /// Set whether column names should be matched case-sensitively.
     pub fn with_case_sensitive(mut self, case_sensitive: bool) -> Self {
         self.case_sensitive = case_sensitive;
+        self
+    }
+
+    /// Determines whether to enable bloom filter-based row group filtering.
+    ///
+    /// When enabled, if a read is performed with an equality or IN predicate,
+    /// the bloom filter for relevant columns in each row group is read and
+    /// checked. Row groups where the bloom filter proves the value is absent
+    /// are skipped entirely.
+    ///
+    /// Defaults to disabled. Each bloom filter is a separate read, and they are
+    /// issued serially — one round trip per relevant column per row group, before
+    /// any data is read.
+    pub fn with_bloom_filter_enabled(mut self, bloom_filter_enabled: bool) -> Self {
+        self.bloom_filter_enabled = bloom_filter_enabled;
         self
     }
 
@@ -429,6 +446,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             concurrency_limit_manifest_entries: self.concurrency_limit_manifest_entries,
             concurrency_limit_manifest_files: self.concurrency_limit_manifest_files,
             runtime: self.table.runtime().clone(),
+            bloom_filter_enabled: self.bloom_filter_enabled,
         })
     }
 }
@@ -444,6 +462,7 @@ pub struct IncrementalTableScan {
     concurrency_limit_manifest_entries: usize,
     concurrency_limit_manifest_files: usize,
     runtime: Runtime,
+    bloom_filter_enabled: bool,
 }
 
 impl IncrementalTableScan {
@@ -807,7 +826,8 @@ impl IncrementalTableScan {
             ArrowReaderBuilder::new(self.file_io.clone(), self.runtime.clone())
                 .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
                 .with_row_group_filtering_enabled(true)
-                .with_row_selection_enabled(true);
+                .with_row_selection_enabled(true)
+                .with_bloom_filter_enabled(self.bloom_filter_enabled);
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
@@ -826,7 +846,8 @@ impl IncrementalTableScan {
             ArrowReaderBuilder::new(self.file_io.clone(), self.runtime.clone())
                 .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
                 .with_row_group_filtering_enabled(true)
-                .with_row_selection_enabled(true);
+                .with_row_selection_enabled(true)
+                .with_bloom_filter_enabled(self.bloom_filter_enabled);
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);

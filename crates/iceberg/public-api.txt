@@ -1659,6 +1659,7 @@ pub fn iceberg::scan::incremental::IncrementalTableScanBuilder<'a>::select_all(s
 pub fn iceberg::scan::incremental::IncrementalTableScanBuilder<'a>::select_empty(self) -> Self
 pub fn iceberg::scan::incremental::IncrementalTableScanBuilder<'a>::to_snapshot_id(self, to_snapshot_id: i64) -> Self
 pub fn iceberg::scan::incremental::IncrementalTableScanBuilder<'a>::with_batch_size(self, batch_size: core::option::Option<usize>) -> Self
+pub fn iceberg::scan::incremental::IncrementalTableScanBuilder<'a>::with_bloom_filter_enabled(self, bloom_filter_enabled: bool) -> Self
 pub fn iceberg::scan::incremental::IncrementalTableScanBuilder<'a>::with_case_sensitive(self, case_sensitive: bool) -> Self
 pub fn iceberg::scan::incremental::IncrementalTableScanBuilder<'a>::with_data_file_concurrency_limit(self, limit: usize) -> Self
 pub fn iceberg::scan::incremental::IncrementalTableScanBuilder<'a>::with_file_column(self) -> Self
