@@ -283,7 +283,18 @@ impl FileScanTask {
                 ))
             }
             (Some(_), Some(partition_spec)) => {
-                partition_spec.partition_type(&self.schema)?;
+                // A historical spec may reference a source column that was later dropped
+                // from the schema, which is a legitimate v2+ state (see
+                // `PartitionFilterCache::get`, which applies the same fallback for the same
+                // reason). Such a spec cannot be resolved to a partition type; skip this
+                // check rather than rejecting an otherwise-valid task.
+                let has_dropped_source_column = partition_spec
+                    .fields()
+                    .iter()
+                    .any(|field| self.schema.field_by_id(field.source_id).is_none());
+                if !has_dropped_source_column {
+                    partition_spec.partition_type(&self.schema)?;
+                }
                 Ok(())
             }
         }
@@ -689,7 +700,11 @@ mod tests {
     }
 
     #[test]
-    fn test_file_scan_task_builder_rejects_dropped_partition_source_column() {
+    fn test_file_scan_task_builder_tolerates_dropped_partition_source_column() {
+        // A historical spec may reference a source column that was later dropped from the
+        // schema, which is a legitimate v2+ state (see `PartitionFilterCache::get`, which
+        // applies the same tolerance at the partition-filter layer for the same reason).
+        // Building the task must succeed rather than reject it.
         let (_historical_schema, partition_spec) =
             schema_and_spec(PrimitiveType::Long, Transform::Identity);
         let current_schema = Arc::new(
@@ -703,15 +718,17 @@ mod tests {
                 .unwrap(),
         );
 
-        let err = build_file_scan_task(
+        let task = build_file_scan_task(
             current_schema,
             Some(Struct::from_iter([Some(Literal::long(42))])),
             Some(partition_spec),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(err.kind(), ErrorKind::Unexpected);
-        assert!(err.message().contains("No column with source column id 1"));
+        assert_eq!(
+            task.partition(),
+            Some(&Struct::from_iter([Some(Literal::long(42))]))
+        );
     }
 
     #[test]
