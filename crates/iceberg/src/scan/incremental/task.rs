@@ -215,7 +215,7 @@ impl IncrementalFileScanTask {
                 manifest_entry_context.manifest_entry.data_file(),
                 manifest_entry_context.manifest_entry.sequence_number(),
             )
-            .await;
+            .await?;
 
         // Filter to get only equality deletes and eagerly build the combined predicate.
         let equality_deletes: Vec<_> = all_deletes.into_iter().filter(is_equality_delete).collect();

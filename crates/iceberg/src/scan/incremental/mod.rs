@@ -17,7 +17,7 @@
 
 //! Incremental table scan implementation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Not;
 use std::sync::Arc;
 
@@ -38,8 +38,8 @@ use crate::scan::DeleteFileContext;
 use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
 use crate::spec::{
-    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, ManifestEntryRef, ManifestStatus, NameMapping,
-    Snapshot, SnapshotRef, TableMetadataRef,
+    DataContentType, ManifestEntryRef, ManifestStatus, Snapshot, SnapshotRef, SortOrderRef,
+    TableMetadataRef,
 };
 use crate::table::Table;
 use crate::util::available_parallelism;
@@ -372,20 +372,8 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         let name_mapping = self
             .table
             .metadata()
-            .properties()
-            .get(DEFAULT_SCHEMA_NAME_MAPPING)
-            .map(|raw| {
-                serde_json::from_str::<NameMapping>(raw).map_err(|e| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!(
-                            "Failed to parse table property {DEFAULT_SCHEMA_NAME_MAPPING} as a NameMapping"
-                        ),
-                    )
-                    .with_source(e)
-                })
-            })
-            .transpose()?
+            .table_properties()
+            .default_name_mapping()?
             .map(Arc::new);
 
         // Compute unified partition type if _partition is projected
@@ -401,6 +389,16 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         } else {
             None
         };
+
+        // Precompute the table's sort orders once, keyed by id, so each manifest-file
+        // context carries only this narrow map instead of the full table metadata.
+        let sort_orders = Arc::new(
+            self.table
+                .metadata()
+                .sort_orders_iter()
+                .map(|order| (order.order_id, order.clone()))
+                .collect::<HashMap<i64, SortOrderRef>>(),
+        );
 
         let plan_context = IncrementalPlanContext {
             snapshots,
@@ -419,6 +417,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             case_sensitive: self.case_sensitive,
             name_mapping,
             unified_partition_type,
+            sort_orders,
         };
 
         Ok(IncrementalTableScan {
@@ -556,7 +555,7 @@ impl IncrementalTableScan {
         // TODO: Streaming this into the delete index seems somewhat redundant, as we
         // could directly stream into the CachingDeleteFileLoader and instantly load the
         // delete files.
-        let all_deletes = delete_file_idx.all_deletes().await;
+        let all_deletes = delete_file_idx.all_deletes().await?;
 
         // Collect data files that were live at from_snapshot. These are needed to generate
         // equality delete tasks for files that predate the scan range.
@@ -751,7 +750,7 @@ impl IncrementalTableScan {
             for entry in &from_snapshot_data_files {
                 let equality_deletes = delete_file_idx
                     .get_equality_deletes_for_data_file(entry.data_file(), entry.sequence_number())
-                    .await;
+                    .await?;
 
                 if !equality_deletes.is_empty() {
                     // The predicate from build_combined_equality_delete_predicate is a "survival"

@@ -24,13 +24,15 @@ use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{Stream, StreamExt, TryStreamExt};
 
-use crate::arrow::reader::{ParquetReadOptions, process_record_batch_stream};
+use crate::arrow::reader::{
+    PRUNABLE_METADATA_FIELDS, ParquetReadOptions, process_record_batch_stream,
+};
 use crate::arrow::scan_metrics::ScanMetrics;
 use crate::arrow::{ArrowReader, StreamsInto};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Bind;
 use crate::io::FileIO;
-use crate::metadata_columns::row_pos_field;
+use crate::metadata_columns::{RESERVED_FIELD_ID_POS, RESERVED_FIELD_ID_ROW_ID, row_pos_field};
 use crate::scan::ArrowRecordBatchStream;
 use crate::scan::incremental::{
     AppendedFileScanTask, DeleteScanTask, EqualityDeleteScanTask, IncrementalFileScanTaskStreams,
@@ -77,6 +79,7 @@ async fn process_incremental_append_task(
     file_io: FileIO,
     parquet_read_options: ParquetReadOptions,
     scan_metrics: ScanMetrics,
+    bloom_filter_enabled: bool,
 ) -> Result<ArrowRecordBatchStream> {
     let AppendedFileScanTask {
         base,
@@ -88,12 +91,34 @@ async fn process_incremental_append_task(
         .map(|p| p.bind(base.schema.clone(), base.case_sensitive))
         .transpose()?;
 
+    let project_pos = base.project_field_ids.contains(&RESERVED_FIELD_ID_POS);
+    let project_row_id = base.project_field_ids.contains(&RESERVED_FIELD_ID_ROW_ID);
+    // See the equivalent comment in `FileScanTaskReader::process` (pipeline.rs): the
+    // RowNumber virtual column is also the per-row positional fallback `_row_id` synthesis
+    // needs (`first_row_id + pos`), so request it whenever `_row_id` is synthesized -- not
+    // just when `_pos` is itself projected.
+    let need_row_number = project_row_id && base.first_row_id.is_some();
+
+    // See the equivalent comment in `FileScanTaskReader::process` (pipeline.rs): a
+    // projection consisting only of prunable metadata fields needs the RowNumber virtual
+    // column so the row count survives a metadata-only-projection mask downgrade.
+    let metadata_only_projection = !base.project_field_ids.is_empty()
+        && base
+            .project_field_ids
+            .iter()
+            .all(|id| PRUNABLE_METADATA_FIELDS.contains(id));
+
+    let mut virtual_columns = ArrowReader::build_virtual_columns(&base.project_field_ids);
+    if (need_row_number || metadata_only_projection) && !project_pos {
+        virtual_columns.push(Arc::clone(row_pos_field()));
+    }
+
     let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
         &base.data_file_path,
         base.file_size_in_bytes,
         file_io,
         parquet_read_options,
-        ArrowReader::build_virtual_columns(&base.project_field_ids),
+        virtual_columns,
         batch_size,
         None, // name_mapping not yet supported in incremental scan
         Some(Arc::clone(scan_metrics.bytes_read_counter())),
@@ -109,11 +134,13 @@ async fn process_incremental_append_task(
         &base.schema,
         equality_delete_bound.as_ref(),
         positional_deletes.as_deref(),
-        true,  // row_group_filtering_enabled
-        true,  // row_selection_enabled
+        true, // row_group_filtering_enabled
+        true, // row_selection_enabled
+        bloom_filter_enabled,
         false, // use_predicate_projection: projection applied separately via build_projected_record_batch_stream
         has_missing_field_ids,
-    )?;
+    )
+    .await?;
 
     ArrowReader::build_projected_record_batch_stream(
         builder,
@@ -207,6 +234,7 @@ async fn process_equality_delete_task(
     file_io: FileIO,
     parquet_read_options: ParquetReadOptions,
     scan_metrics: ScanMetrics,
+    bloom_filter_enabled: bool,
 ) -> Result<ArrowRecordBatchStream> {
     let file_path = task.data_file_path().to_string();
 
@@ -243,9 +271,11 @@ async fn process_equality_delete_task(
         None,  // no positional deletes for equality delete tasks
         true,  // row_group_filtering_enabled
         false, // row_selection_enabled
-        true,  // use_predicate_projection: project to predicate columns only
+        bloom_filter_enabled,
+        true, // use_predicate_projection: project to predicate columns only
         has_missing_field_ids,
-    )?;
+    )
+    .await?;
 
     // Build the stream of filtered records
     let record_batch_stream = builder.build()?;
@@ -340,6 +370,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalScanResult> for IncrementalFile
 
         let batch_size = reader.batch_size;
         let parquet_read_options = reader.parquet_read_options;
+        let bloom_filter_enabled = reader.bloom_filter_enabled;
         let scan_metrics = ScanMetrics::new();
         let runtime = reader.runtime.clone();
 
@@ -375,6 +406,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalScanResult> for IncrementalFile
                                     file_io,
                                     append_read_options,
                                     scan_metrics,
+                                    bloom_filter_enabled,
                                 )
                                 .await;
 
@@ -456,6 +488,7 @@ impl StreamsInto<ArrowReader, UnzippedIncrementalScanResult> for IncrementalFile
                                             file_io.clone(),
                                             eq_read_options,
                                             scan_metrics,
+                                            bloom_filter_enabled,
                                         )
                                         .await;
 
