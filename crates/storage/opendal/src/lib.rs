@@ -161,6 +161,7 @@ impl StorageFactory for OpenDalStorageFactory {
             })),
             #[cfg(feature = "opendal-azdls")]
             OpenDalStorageFactory::Azdls => Ok(Arc::new(OpenDalStorage::Azdls {
+                allow_anonymous: azdls_allow_anonymous(config.props()),
                 config: azdls_config_parse(config.props().clone())?.into(),
             })),
             #[cfg(feature = "opendal-hf")]
@@ -232,6 +233,9 @@ pub enum OpenDalStorage {
     Azdls {
         /// Azure DLS configuration.
         config: Arc<AzdlsConfig>,
+        /// Whether to allow genuinely anonymous, unsigned access when no
+        /// credential is configured. See `ADLS_ALLOW_ANONYMOUS`.
+        allow_anonymous: bool,
     },
     /// HuggingFace Hub storage variant.
     ///
@@ -335,7 +339,10 @@ impl OpenDalStorage {
                 }
             }
             #[cfg(feature = "opendal-azdls")]
-            OpenDalStorage::Azdls { config } => azdls_create_operator(path, config)?,
+            OpenDalStorage::Azdls {
+                config,
+                allow_anonymous,
+            } => azdls_create_operator(path, config, *allow_anonymous)?,
             #[cfg(feature = "opendal-hf")]
             OpenDalStorage::Hf { config } => hf_config_build(config, path)?,
             #[cfg(all(
@@ -453,7 +460,7 @@ impl OpenDalStorage {
                 }
             }
             #[cfg(feature = "opendal-azdls")]
-            OpenDalStorage::Azdls { config } => {
+            OpenDalStorage::Azdls { config, .. } => {
                 let azure_path = path.parse::<AzureStoragePath>()?;
                 match_path_with_config(&azure_path, config)?;
                 let relative_path_len = azure_path.path.len();
@@ -758,6 +765,7 @@ mod tests {
                 endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
                 ..Default::default()
             }),
+            allow_anonymous: false,
         };
 
         assert_eq!(

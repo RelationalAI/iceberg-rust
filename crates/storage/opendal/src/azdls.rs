@@ -20,8 +20,8 @@ use std::fmt::Display;
 use std::str::FromStr;
 
 use iceberg::io::{
-    ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID, ADLS_CLIENT_SECRET,
-    ADLS_CONNECTION_STRING, ADLS_ENDPOINT, ADLS_SAS_TOKEN, ADLS_TENANT_ID,
+    ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_ALLOW_ANONYMOUS, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
+    ADLS_CLIENT_SECRET, ADLS_CONNECTION_STRING, ADLS_ENDPOINT, ADLS_SAS_TOKEN, ADLS_TENANT_ID,
 };
 use iceberg::{Error, ErrorKind, Result};
 use opendal::Configurator;
@@ -29,7 +29,7 @@ use opendal::services::AzdlsConfig;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::utils::from_opendal_error;
+use crate::utils::{from_opendal_error, is_truthy};
 
 /// Local version of `ensure_data_valid` macro since the iceberg crate's macro
 /// uses `$crate::error::Error` paths that don't resolve from external crates
@@ -117,6 +117,18 @@ pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Res
     Ok(config)
 }
 
+/// Returns whether `adls.allow-anonymous` is set on the given properties.
+///
+/// This is read directly from the raw properties map, rather than through
+/// [`AzdlsConfig`], since opendal's `AzdlsConfig` (unlike its S3 counterpart,
+/// which has a `skip_signature` field) has no concept of anonymous access at
+/// all -- see [`azdls_anonymous_operator_build`] for why.
+pub(crate) fn azdls_allow_anonymous(properties: &HashMap<String, String>) -> bool {
+    properties
+        .get(ADLS_ALLOW_ANONYMOUS)
+        .is_some_and(|v| is_truthy(v.to_lowercase().as_str()))
+}
+
 /// Builds an OpenDAL operator from the AzdlsConfig and path.
 ///
 /// The path is expected to include the scheme in a format like:
@@ -124,11 +136,12 @@ pub(crate) fn azdls_config_parse(mut properties: HashMap<String, String>) -> Res
 pub(crate) fn azdls_create_operator<'a>(
     absolute_path: &'a str,
     config: &AzdlsConfig,
+    allow_anonymous: bool,
 ) -> Result<(opendal::Operator, &'a str)> {
     let path = absolute_path.parse::<AzureStoragePath>()?;
     match_path_with_config(&path, config)?;
 
-    let op = azdls_config_build(config, &path)?;
+    let op = azdls_config_build(config, &path, allow_anonymous)?;
 
     // Paths to files in ADLS tend to be written in fully qualified form,
     // including their filesystem and account name.
@@ -230,7 +243,41 @@ pub(crate) fn match_path_with_config(path: &AzureStoragePath, config: &AzdlsConf
     Ok(())
 }
 
-fn azdls_config_build(config: &AzdlsConfig, path: &AzureStoragePath) -> Result<opendal::Operator> {
+fn azdls_config_build(
+    config: &AzdlsConfig,
+    path: &AzureStoragePath,
+    allow_anonymous: bool,
+) -> Result<opendal::Operator> {
+    // opendal's Azdls service (via reqsign-azure-storage) has no anonymous/
+    // unsigned mode: every request goes through a generic credential-provider
+    // chain whose `Credential` variants (SharedKey/SasToken/BearerToken) all
+    // require a non-empty secret to be considered valid, and the signer hard
+    // errors ("failed to load signing credential") if none can be found or
+    // validated -- unlike e.g. its S3 service, which exposes an explicit
+    // `skip_signature` bypass. So when no credential was configured at all,
+    // we can't get a genuinely anonymous request out of the Azdls service no
+    // matter what we pass it (an empty SAS token doesn't help either: it's
+    // treated as a *found but invalid* credential, which fails the same way).
+    //
+    // Public/anonymous-read Azure containers are plain, unauthenticated HTTPS
+    // (GET with a Range header for data, HEAD for stat) -- exactly what
+    // opendal's generic `Http` service already provides, with no built-in
+    // auth of its own unless a username/password/token is set. So route the
+    // opt-in anonymous case there instead, scoped to the same
+    // account/container endpoint the Azdls builder would have used.
+    //
+    // This is opt-in via `allow_anonymous` (see `ADLS_ALLOW_ANONYMOUS`), not
+    // inferred from "no credentials configured": the absence of an explicit
+    // adls.* credential can also legitimately mean "rely on ambient Azure
+    // credentials" (managed identity, Azure CLI, environment variables, all
+    // tried by the Azdls service's own default credential chain), which this
+    // must not silently break for callers who never asked for anonymous
+    // access. Whenever `allow_anonymous` is false, this always goes through
+    // the real, signed Azdls service exactly as before.
+    if allow_anonymous {
+        return azdls_anonymous_operator_build(config, path);
+    }
+
     let mut builder = config.clone().into_builder();
 
     if config.endpoint.is_none() {
@@ -240,6 +287,27 @@ fn azdls_config_build(config: &AzdlsConfig, path: &AzureStoragePath) -> Result<o
     builder = builder.filesystem(&path.filesystem);
 
     opendal::Operator::new(builder).map_err(from_opendal_error)
+}
+
+/// Builds a read-only, unauthenticated `opendal::Operator` (via opendal's
+/// generic `Http` service) against the same account/container endpoint the
+/// signed Azdls builder would have used. Only `read` and `stat` are
+/// supported, which matches Iceberg's own read-only file access pattern.
+fn azdls_anonymous_operator_build(
+    config: &AzdlsConfig,
+    path: &AzureStoragePath,
+) -> Result<opendal::Operator> {
+    let endpoint = config
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| path.as_endpoint());
+    let mut http_config = opendal::services::HttpConfig::default();
+    http_config.endpoint = Some(endpoint);
+    http_config.root = Some(format!("/{}", path.filesystem));
+    // Deliberately leave username/password/token unset: opendal's Http
+    // service only adds an Authorization header when one of these is set, so
+    // leaving them unset is what makes this a genuinely unsigned request.
+    opendal::Operator::new(http_config.into_builder()).map_err(from_opendal_error)
 }
 
 /// Represents a fully qualified path to blob/ file in Azure Storage.
@@ -585,7 +653,7 @@ mod tests {
         ];
 
         for (name, input, expected) in test_cases {
-            let result = azdls_create_operator(input.0, &input.1);
+            let result = azdls_create_operator(input.0, &input.1, false);
             match expected {
                 Some((expected_filesystem, expected_path)) => {
                     assert!(result.is_ok(), "Test case {name} failed: {result:?}");
@@ -599,6 +667,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_azdls_create_operator_anonymous() {
+        let path = "abfss://myfs@myaccount.dfs.core.windows.net/path/to/file.parquet";
+        let config = AzdlsConfig::default();
+
+        // No credentials, no `allow_anonymous`: goes through the real (signed)
+        // Azdls service as before -- unaffected by this fix. Building the
+        // operator itself still succeeds (loading a credential is deferred
+        // until an actual request is signed), so this only demonstrates it's
+        // *not* the anonymous HTTP fallback, via the scheme name.
+        let (op, relative_path) = azdls_create_operator(path, &config, false)
+            .expect("operator should build without a credential");
+        assert_eq!(relative_path, "/path/to/file.parquet");
+        assert_eq!(op.info().scheme(), "azdls");
+
+        // No credentials, `allow_anonymous=true`: routes to the anonymous
+        // HTTP fallback instead.
+        let (op, relative_path) =
+            azdls_create_operator(path, &config, true).expect("anonymous operator should build");
+        assert_eq!(relative_path, "/path/to/file.parquet");
+        assert_eq!(op.info().scheme(), "http");
+
+        // `allow_anonymous=true` takes priority even when a credential is
+        // also configured -- matching S3's `skip_signature`, which is checked
+        // unconditionally before any credential is loaded. Callers only ever
+        // set this alongside a real credential by mistake; since it's an
+        // explicit opt-in flag (never inferred), that mistake is on them.
+        let config_with_key = AzdlsConfig {
+            account_key: Some("secret".to_string()),
+            ..Default::default()
+        };
+        let (op, _) = azdls_create_operator(path, &config_with_key, true)
+            .expect("anonymous operator should still build");
+        assert_eq!(op.info().scheme(), "http");
     }
 
     #[test]

@@ -46,12 +46,15 @@ pub use s3::*;
 use serde::{Deserialize, Serialize};
 
 /// Prop key under which the JSON-serialized `TableIdent` is stored in `StorageConfig::props`.
-/// Consumed and stripped by `RefreshableStorageFactory::build()`; ignored by all other factories.
-pub(crate) const PROP_TABLE_IDENT: &str = "iceberg.internal.table-ident";
+/// Consumed by third-party `StorageFactory` implementations that need table identity to look
+/// up credentials (e.g. a refreshable/vended-credentials wrapper); ignored by the built-in
+/// factories.
+pub const PROP_TABLE_IDENT: &str = "iceberg.internal.table-ident";
 
 /// Prop key under which the metadata location string is stored in `StorageConfig::props`.
-/// Consumed and stripped by `RefreshableStorageFactory::build()`; ignored by all other factories.
-pub(crate) const PROP_METADATA_LOCATION: &str = "iceberg.internal.metadata-location";
+/// Consumed by third-party `StorageFactory` implementations that need the table's metadata
+/// location to look up credentials; ignored by the built-in factories.
+pub const PROP_METADATA_LOCATION: &str = "iceberg.internal.metadata-location";
 
 /// Configuration properties for storage backends.
 ///

@@ -442,11 +442,6 @@ define_from_err!(
 );
 
 define_from_err!(std::io::Error, ErrorKind::Unexpected, "IO Operation failed");
-define_from_err!(
-    opendal::Error,
-    ErrorKind::Unexpected,
-    "Failure in doing io operation"
-);
 
 /// Converts a [`PoisonError`] from a poisoned lock into an [`Error`].
 pub(crate) fn lock_error<T>(e: PoisonError<T>) -> Error {

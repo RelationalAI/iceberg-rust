@@ -24,6 +24,7 @@ use typed_builder::TypedBuilder;
 
 use super::StorageConfig;
 use crate::Result;
+use crate::io::is_truthy;
 
 /// A connection string.
 ///
@@ -93,6 +94,9 @@ pub struct AzdlsConfig {
     /// Filesystem name.
     #[builder(default, setter(into))]
     pub filesystem: String,
+    /// Allow anonymous access.
+    #[builder(default)]
+    pub allow_anonymous: bool,
 }
 
 /// Finds the appropriate SAS token from properties based on account name.
@@ -163,6 +167,11 @@ impl TryFrom<&StorageConfig> for AzdlsConfig {
         }
         if let Some(authority_host) = props.get(ADLS_AUTHORITY_HOST) {
             cfg.authority_host = Some(authority_host.clone());
+        }
+        if let Some(allow_anonymous) = props.get(ADLS_ALLOW_ANONYMOUS)
+            && is_truthy(allow_anonymous.to_lowercase().as_str())
+        {
+            cfg.allow_anonymous = true;
         }
 
         Ok(cfg)
@@ -284,5 +293,14 @@ mod tests {
             azdls_config.sas_token.as_deref(),
             Some("token-without-prefix")
         );
+    }
+
+    #[test]
+    fn test_azdls_config_allow_anonymous() {
+        let storage_config = StorageConfig::new().with_prop(ADLS_ALLOW_ANONYMOUS, "true");
+
+        let azdls_config = AzdlsConfig::try_from(&storage_config).unwrap();
+
+        assert!(azdls_config.allow_anonymous);
     }
 }
