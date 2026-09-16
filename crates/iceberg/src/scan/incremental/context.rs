@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::channel::mpsc::Sender;
@@ -28,7 +28,7 @@ use crate::scan::ExpressionEvaluatorCache;
 use crate::scan::context::{ManifestEntryContext, ManifestEntryFilterFn, ManifestFileContext};
 use crate::spec::{
     ManifestContentType, ManifestEntryRef, ManifestFile, NameMapping, SchemaRef, SnapshotRef,
-    StructType, TableMetadataRef,
+    SortOrderRef, StructType, TableMetadataRef,
 };
 
 #[derive(Debug)]
@@ -72,6 +72,11 @@ pub(crate) struct IncrementalPlanContext {
     /// The unified partition type across all partition specs involved in the scan, computed
     /// only when the `_partition` metadata column is projected.
     pub unified_partition_type: Option<Arc<StructType>>,
+
+    /// The table's sort orders keyed by id, precomputed once so each
+    /// [`ManifestFileContext`] carries only this narrow map rather than the full table
+    /// metadata. Mirrors how `unified_partition_type` carries a precomputed value.
+    pub sort_orders: Arc<HashMap<i64, SortOrderRef>>,
 }
 
 impl IncrementalPlanContext {
@@ -172,6 +177,7 @@ impl IncrementalPlanContext {
                     .partition_spec_by_id(manifest_file.partition_spec_id)
                     .cloned(),
                 unified_partition_type: self.unified_partition_type.clone(),
+                sort_orders: self.sort_orders.clone(),
                 filter_fn: filter_fn.clone(),
             };
 

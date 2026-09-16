@@ -17,7 +17,7 @@
 
 //! Incremental table scan implementation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Not;
 use std::sync::Arc;
 
@@ -38,8 +38,8 @@ use crate::scan::DeleteFileContext;
 use crate::scan::cache::ExpressionEvaluatorCache;
 use crate::scan::context::ManifestEntryContext;
 use crate::spec::{
-    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, ManifestEntryRef, ManifestStatus, NameMapping,
-    Snapshot, SnapshotRef, TableMetadataRef,
+    DataContentType, ManifestEntryRef, ManifestStatus, Snapshot, SnapshotRef, SortOrderRef,
+    TableMetadataRef,
 };
 use crate::table::Table;
 use crate::util::available_parallelism;
@@ -71,6 +71,7 @@ pub struct IncrementalTableScanBuilder<'a> {
     concurrency_limit_data_files: usize,
     concurrency_limit_manifest_entries: usize,
     concurrency_limit_manifest_files: usize,
+    bloom_filter_enabled: bool,
 }
 
 impl<'a> IncrementalTableScanBuilder<'a> {
@@ -90,6 +91,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             concurrency_limit_data_files: num_cpus,
             concurrency_limit_manifest_entries: num_cpus,
             concurrency_limit_manifest_files: num_cpus,
+            bloom_filter_enabled: false,
         }
     }
 
@@ -239,6 +241,21 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         self
     }
 
+    /// Determines whether to enable bloom filter-based row group filtering.
+    ///
+    /// When enabled, if a read is performed with an equality or IN predicate,
+    /// the bloom filter for relevant columns in each row group is read and
+    /// checked. Row groups where the bloom filter proves the value is absent
+    /// are skipped entirely.
+    ///
+    /// Defaults to disabled. Each bloom filter is a separate read, and they are
+    /// issued serially — one round trip per relevant column per row group, before
+    /// any data is read.
+    pub fn with_bloom_filter_enabled(mut self, bloom_filter_enabled: bool) -> Self {
+        self.bloom_filter_enabled = bloom_filter_enabled;
+        self
+    }
+
     /// Build the incremental table scan.
     pub fn build(self) -> Result<IncrementalTableScan> {
         let metadata = self.table.metadata();
@@ -372,20 +389,8 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         let name_mapping = self
             .table
             .metadata()
-            .properties()
-            .get(DEFAULT_SCHEMA_NAME_MAPPING)
-            .map(|raw| {
-                serde_json::from_str::<NameMapping>(raw).map_err(|e| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!(
-                            "Failed to parse table property {DEFAULT_SCHEMA_NAME_MAPPING} as a NameMapping"
-                        ),
-                    )
-                    .with_source(e)
-                })
-            })
-            .transpose()?
+            .table_properties()
+            .default_name_mapping()?
             .map(Arc::new);
 
         // Compute unified partition type if _partition is projected
@@ -401,6 +406,16 @@ impl<'a> IncrementalTableScanBuilder<'a> {
         } else {
             None
         };
+
+        // Precompute the table's sort orders once, keyed by id, so each manifest-file
+        // context carries only this narrow map instead of the full table metadata.
+        let sort_orders = Arc::new(
+            self.table
+                .metadata()
+                .sort_orders_iter()
+                .map(|order| (order.order_id, order.clone()))
+                .collect::<HashMap<i64, SortOrderRef>>(),
+        );
 
         let plan_context = IncrementalPlanContext {
             snapshots,
@@ -419,6 +434,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             case_sensitive: self.case_sensitive,
             name_mapping,
             unified_partition_type,
+            sort_orders,
         };
 
         Ok(IncrementalTableScan {
@@ -430,6 +446,7 @@ impl<'a> IncrementalTableScanBuilder<'a> {
             concurrency_limit_manifest_entries: self.concurrency_limit_manifest_entries,
             concurrency_limit_manifest_files: self.concurrency_limit_manifest_files,
             runtime: self.table.runtime().clone(),
+            bloom_filter_enabled: self.bloom_filter_enabled,
         })
     }
 }
@@ -445,6 +462,7 @@ pub struct IncrementalTableScan {
     concurrency_limit_manifest_entries: usize,
     concurrency_limit_manifest_files: usize,
     runtime: Runtime,
+    bloom_filter_enabled: bool,
 }
 
 impl IncrementalTableScan {
@@ -556,7 +574,7 @@ impl IncrementalTableScan {
         // TODO: Streaming this into the delete index seems somewhat redundant, as we
         // could directly stream into the CachingDeleteFileLoader and instantly load the
         // delete files.
-        let all_deletes = delete_file_idx.all_deletes().await;
+        let all_deletes = delete_file_idx.all_deletes().await?;
 
         // Collect data files that were live at from_snapshot. These are needed to generate
         // equality delete tasks for files that predate the scan range.
@@ -751,7 +769,7 @@ impl IncrementalTableScan {
             for entry in &from_snapshot_data_files {
                 let equality_deletes = delete_file_idx
                     .get_equality_deletes_for_data_file(entry.data_file(), entry.sequence_number())
-                    .await;
+                    .await?;
 
                 if !equality_deletes.is_empty() {
                     // The predicate from build_combined_equality_delete_predicate is a "survival"
@@ -808,7 +826,8 @@ impl IncrementalTableScan {
             ArrowReaderBuilder::new(self.file_io.clone(), self.runtime.clone())
                 .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
                 .with_row_group_filtering_enabled(true)
-                .with_row_selection_enabled(true);
+                .with_row_selection_enabled(true)
+                .with_bloom_filter_enabled(self.bloom_filter_enabled);
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
@@ -827,7 +846,8 @@ impl IncrementalTableScan {
             ArrowReaderBuilder::new(self.file_io.clone(), self.runtime.clone())
                 .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
                 .with_row_group_filtering_enabled(true)
-                .with_row_selection_enabled(true);
+                .with_row_selection_enabled(true)
+                .with_bloom_filter_enabled(self.bloom_filter_enabled);
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);

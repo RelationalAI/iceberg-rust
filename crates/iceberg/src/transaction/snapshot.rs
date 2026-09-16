@@ -66,6 +66,17 @@ pub(crate) trait SnapshotProduceOperation: Send + Sync {
     /// which is stored in the snapshot metadata for tracking and auditing purposes.
     fn operation(&self) -> Operation;
 
+    /// Whether the snapshot summary should report a full-table truncate: computed
+    /// added/removed counts are discarded and every `total-*` property is replaced with
+    /// the previous snapshot's totals under `deleted-*`/`removed-*` (see
+    /// `truncate_table_summary`). This only makes sense for an operation that genuinely
+    /// replaces the entire table's contents; an operation with an explicit, partial set
+    /// of added/deleted files already has exact counts and must not have them overwritten
+    /// with the previous snapshot's totals. Defaults to `false`.
+    fn truncate_full_table(&self) -> bool {
+        false
+    }
+
     /// Returns manifest entries that should be marked as deleted in the new snapshot.
     #[allow(unused)]
     fn delete_entries(
@@ -123,6 +134,10 @@ pub(crate) struct SnapshotProducer<'a> {
 impl<'a> SnapshotProducer<'a> {
     pub(crate) fn snapshot_id(&self) -> i64 {
         self.snapshot_id
+    }
+
+    pub(crate) fn commit_uuid(&self) -> Uuid {
+        self.commit_uuid
     }
 
     pub(crate) fn new(
@@ -442,7 +457,7 @@ impl<'a> SnapshotProducer<'a> {
         update_snapshot_summaries(
             summary,
             previous_snapshot.map(|s| s.summary()),
-            snapshot_produce_operation.operation() == Operation::Overwrite,
+            snapshot_produce_operation.truncate_full_table(),
         )
     }
 
