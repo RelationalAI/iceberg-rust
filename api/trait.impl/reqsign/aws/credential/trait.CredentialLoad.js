@@ -1,9 +1,0 @@
-(function() {
-    const implementors = Object.fromEntries([["iceberg",[["impl <a class=\"trait\" href=\"iceberg/io/opendal/trait.AwsCredentialLoad.html\" title=\"trait iceberg::io::opendal::AwsCredentialLoad\">CredentialLoad</a> for <a class=\"struct\" href=\"iceberg/io/struct.CustomAwsCredentialLoader.html\" title=\"struct iceberg::io::CustomAwsCredentialLoader\">CustomAwsCredentialLoader</a>",0]]]]);
-    if (window.register_implementors) {
-        window.register_implementors(implementors);
-    } else {
-        window.pending_implementors = implementors;
-    }
-})()
-//{"start":59,"fragment_lengths":[343]}

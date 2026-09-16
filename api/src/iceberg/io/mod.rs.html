@@ -50,18 +50,16 @@
 <a href=#50 id=50 data-nosnippet>50</a>//! - `new_output`: Create output file for writing.
 <a href=#51 id=51 data-nosnippet>51</a>
 <a href=#52 id=52 data-nosnippet>52</a></span><span class="kw">mod </span>file_io;
-<a href=#53 id=53 data-nosnippet>53</a><span class="kw">mod </span>refreshable_accessor;
-<a href=#54 id=54 data-nosnippet>54</a><span class="kw">mod </span>refreshable_storage;
-<a href=#55 id=55 data-nosnippet>55</a><span class="kw">mod </span>storage;
-<a href=#56 id=56 data-nosnippet>56</a><span class="kw">mod </span>storage_credential;
-<a href=#57 id=57 data-nosnippet>57</a>
-<a href=#58 id=58 data-nosnippet>58</a><span class="kw">pub use </span>file_io::<span class="kw-2">*</span>;
-<a href=#59 id=59 data-nosnippet>59</a><span class="kw">pub use </span>storage::<span class="kw-2">*</span>;
-<a href=#60 id=60 data-nosnippet>60</a><span class="kw">pub use </span>storage_credential::{MetadataLocation, StorageCredential, StorageCredentialsLoader};
+<a href=#53 id=53 data-nosnippet>53</a><span class="kw">mod </span>storage;
+<a href=#54 id=54 data-nosnippet>54</a><span class="kw">mod </span>storage_credential;
+<a href=#55 id=55 data-nosnippet>55</a>
+<a href=#56 id=56 data-nosnippet>56</a><span class="kw">pub use </span>file_io::<span class="kw-2">*</span>;
+<a href=#57 id=57 data-nosnippet>57</a><span class="kw">pub use </span>storage::<span class="kw-2">*</span>;
+<a href=#58 id=58 data-nosnippet>58</a><span class="kw">pub use </span>storage_credential::{MetadataLocation, StorageCredential, StorageCredentialsLoader};
+<a href=#59 id=59 data-nosnippet>59</a>
+<a href=#60 id=60 data-nosnippet>60</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span>object_cache;
 <a href=#61 id=61 data-nosnippet>61</a>
-<a href=#62 id=62 data-nosnippet>62</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span>object_cache;
-<a href=#63 id=63 data-nosnippet>63</a>
-<a href=#64 id=64 data-nosnippet>64</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_truthy(value: <span class="kw-2">&amp;</span>str) -&gt; bool {
-<a href=#65 id=65 data-nosnippet>65</a>    [<span class="string">"true"</span>, <span class="string">"t"</span>, <span class="string">"1"</span>, <span class="string">"on"</span>].contains(<span class="kw-2">&amp;</span>value.to_lowercase().as_str())
-<a href=#66 id=66 data-nosnippet>66</a>}
+<a href=#62 id=62 data-nosnippet>62</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_truthy(value: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#63 id=63 data-nosnippet>63</a>    [<span class="string">"true"</span>, <span class="string">"t"</span>, <span class="string">"1"</span>, <span class="string">"on"</span>].contains(<span class="kw-2">&amp;</span>value.to_lowercase().as_str())
+<a href=#64 id=64 data-nosnippet>64</a>}
 </code></pre></div></section></main></body></html>

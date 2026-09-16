@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["OpenDalStorage","OpenDalStorageFactory"],"struct":["AwsCredential","CustomAwsCredentialLoader","OpenDalRoutingStorageFactory","RefreshableStorageFactory"],"trait":["AwsCredentialLoad"]};
