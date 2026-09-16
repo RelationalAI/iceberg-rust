@@ -149,6 +149,13 @@ impl SnapshotProduceOperation for OverwriteOperation {
         Operation::Overwrite
     }
 
+    // `OverwriteAction` always works from an explicit, exact list of added/deleted data
+    // files, so the snapshot summary's computed added/removed counts are already correct
+    // -- never truncate them to "everything in the previous snapshot was removed."
+    fn truncate_full_table(&self) -> bool {
+        false
+    }
+
     async fn delete_entries(
         &self,
         _snapshot_produce: &SnapshotProducer<'_>,
@@ -184,6 +191,10 @@ impl SnapshotProduceOperation for OverwriteOperation {
         }
 
         let mut result = Vec::new();
+        // Shared across every manifest rewritten by this one commit, so rewritten
+        // manifest names stay unique within the commit without needing a fresh random
+        // UUID per manifest (see `rewrite_manifest`).
+        let mut rewrite_counter: u64 = 0;
 
         for manifest_file in manifest_list.entries() {
             if !manifest_file.has_added_files()
@@ -205,8 +216,9 @@ impl SnapshotProduceOperation for OverwriteOperation {
 
             if has_deletes {
                 let rewritten = self
-                    .rewrite_manifest(snapshot_produce, manifest_file, &manifest)
+                    .rewrite_manifest(snapshot_produce, manifest_file, &manifest, rewrite_counter)
                     .await?;
+                rewrite_counter += 1;
                 result.push(rewritten);
             } else {
                 result.push(manifest_file.clone());
@@ -219,36 +231,37 @@ impl SnapshotProduceOperation for OverwriteOperation {
 
 impl OverwriteOperation {
     /// Rewrite a manifest, marking entries whose file paths are in `deleted_file_paths`
-    /// as `ManifestStatus::Deleted`.
+    /// as `ManifestStatus::Deleted`. `index` disambiguates this manifest's name from
+    /// others rewritten by the same commit (see `rewrite_counter` in `existing_manifest`).
     async fn rewrite_manifest(
         &self,
         snapshot_produce: &SnapshotProducer<'_>,
         manifest_file: &ManifestFile,
         manifest: &crate::spec::Manifest,
+        index: u64,
     ) -> Result<ManifestFile> {
         let table = snapshot_produce.table;
 
+        // Match the naming/location convention `SnapshotProducer::new_manifest_writer`
+        // uses for newly-written manifests: `metadata_location()` (which, unlike a bare
+        // `location()`, respects a configured `write.metadata.path`) and the commit's own
+        // UUID, so every manifest touched by one commit is identifiable by that UUID
+        // rather than each rewritten manifest getting its own unrelated random one.
         let new_manifest_path = format!(
-            "{}/metadata/{}-m-overwrite.avro",
-            table.metadata().location(),
-            Uuid::now_v7(),
+            "{}/{}-m-overwrite-{}.avro",
+            table.metadata().metadata_location()?,
+            snapshot_produce.commit_uuid(),
+            index,
         );
         let output_file = table.file_io().new_output(&new_manifest_path)?;
-        let partition_spec = table
-            .metadata()
-            .partition_spec_by_id(manifest_file.partition_spec_id)
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!(
-                        "Partition spec {} not found in table metadata",
-                        manifest_file.partition_spec_id
-                    ),
-                )
-            })?
-            .as_ref()
-            .clone();
-        let schema = table.metadata().current_schema().clone();
+        // Derive schema and partition spec from the manifest being rewritten itself,
+        // not the table's current/default ones: if the table has since undergone schema
+        // or partition evolution, stamping the current schema-id/partition-spec-id onto
+        // entries written under an older one would misrepresent them and cause
+        // implementations that respect the manifest's own schema-id (e.g. Java,
+        // PyIceberg) to misread them.
+        let partition_spec = manifest.metadata().partition_spec().clone();
+        let schema = manifest.metadata().schema().clone();
 
         // Preserve the original manifest's own encryption key when rewriting it, rather
         // than generating a new one, so the rewritten manifest stays decryptable the same
@@ -291,6 +304,14 @@ impl OverwriteOperation {
                 let mut deleted: ManifestEntry = (**entry).clone();
                 deleted.snapshot_id = Some(self.snapshot_id);
                 writer.add_deleted_entry(deleted)?;
+            } else if !entry.is_alive() {
+                // Already deleted by a prior snapshot. Preserve it as a tombstone via
+                // add_deleted_entry (which keeps its original snapshot_id, since we
+                // don't touch it here) rather than add_existing_entry, which
+                // unconditionally resets status to Existing and would resurrect this
+                // file as live data.
+                let cloned: ManifestEntry = (**entry).clone();
+                writer.add_deleted_entry(cloned)?;
             } else {
                 let cloned: ManifestEntry = (**entry).clone();
                 writer.add_existing_entry(cloned)?;
@@ -705,23 +726,85 @@ mod tests {
 
         let props = &snapshot.summary().additional_properties;
 
-        // Overwrite semantics use truncate_table_summary which treats overwrite as
-        // "replace all": deleted-data-files reflects the previous total (3), not the
-        // number of explicitly deleted files (1). Without Fix 1, previous_snapshot
-        // would be None so previous_total=0 and u64 subtraction would underflow.
+        // OverwriteAction always works from an explicit, exact file list, so a partial
+        // (delete-only) overwrite must report exactly what was removed (1), not the
+        // previous snapshot's total (3) -- `truncate_full_table()` returning `false`
+        // for OverwriteOperation is what keeps `update_snapshot_summaries` from
+        // overwriting these already-correct computed counts with "replace all"
+        // semantics.
         assert_eq!(
             props.get("deleted-data-files").map(|s| s.as_str()),
-            Some("3"),
-            "Expected deleted-data-files=3 (overwrite semantics), got: {props:?}"
+            Some("1"),
+            "Expected deleted-data-files=1 (only the explicitly deleted file), got: {props:?}"
         );
 
-        // total-data-files should be 0 after a delete-only overwrite (overwrite
-        // semantics: 3 removed - 3 previous = 0). Without Fix 1 this would panic
-        // with u64 underflow in debug mode.
+        // total-data-files should be 2 after deleting 1 of the 3 previously-appended files.
         assert_eq!(
             props.get("total-data-files").map(|s| s.as_str()),
-            Some("0"),
-            "Expected total-data-files=0 (overwrite semantics), got: {props:?}"
+            Some("2"),
+            "Expected total-data-files=2 (3 appended - 1 deleted), got: {props:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_second_overwrite_does_not_resurrect_deleted_file() {
+        use crate::memory::tests::new_memory_catalog;
+        use crate::transaction::ApplyTransactionAction;
+        use crate::transaction::tests::make_v3_minimal_table_in_catalog;
+
+        let catalog = new_memory_catalog().await;
+        let table = make_v3_minimal_table_in_catalog(&catalog).await;
+        let spec_id = table.metadata().default_partition_spec_id();
+
+        // Append files A and B together so they land in the same manifest.
+        let file_a = test_data_file("test/a.parquet", spec_id);
+        let file_b = test_data_file("test/b.parquet", spec_id);
+        let tx = Transaction::new(&table);
+        let action = tx
+            .fast_append()
+            .add_data_files(vec![file_a.clone(), file_b.clone()]);
+        let tx = action.apply(tx).unwrap();
+        let table = tx.commit(&catalog).await.unwrap();
+
+        // First overwrite: delete A. Rewrites the shared manifest: A -> Deleted, B ->
+        // Existing (carried forward via add_existing_entry).
+        let tx = Transaction::new(&table);
+        let action = tx.overwrite().delete_data_files(vec![file_a.clone()]);
+        let tx = action.apply(tx).unwrap();
+        let table = tx.commit(&catalog).await.unwrap();
+
+        // Second overwrite: delete B. This forces the *same* manifest (which already
+        // holds A as a Deleted tombstone) to be rewritten again. Before the fix, A's
+        // entry would fall into rewrite_manifest's `else` branch and go through
+        // add_existing_entry, which unconditionally resets status to Existing --
+        // resurrecting A as live data.
+        let tx = Transaction::new(&table);
+        let action = tx.overwrite().delete_data_files(vec![file_b.clone()]);
+        let tx = action.apply(tx).unwrap();
+        let table = tx.commit(&catalog).await.unwrap();
+
+        let snapshot = table.metadata().current_snapshot().unwrap();
+        let manifest_list = table.manifest_list_reader(snapshot).load().await.unwrap();
+
+        let mut all_entries = vec![];
+        for manifest_file in manifest_list.entries() {
+            let manifest = table.manifest_reader().read(manifest_file).await.unwrap();
+            for entry in manifest.entries() {
+                all_entries.push((entry.status(), entry.file_path().to_string()));
+            }
+        }
+
+        assert!(
+            all_entries.iter().any(
+                |(status, path)| *status == ManifestStatus::Deleted && path == "test/a.parquet"
+            ),
+            "File A must still be Deleted after the second overwrite, not resurrected: {all_entries:?}",
+        );
+        assert!(
+            all_entries.iter().any(
+                |(status, path)| *status == ManifestStatus::Deleted && path == "test/b.parquet"
+            ),
+            "File B must be Deleted after being targeted by the second overwrite: {all_entries:?}",
         );
     }
 }
