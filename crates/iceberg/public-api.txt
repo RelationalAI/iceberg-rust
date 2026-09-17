@@ -3631,7 +3631,9 @@ pub struct iceberg::transaction::ActionCommit
 impl iceberg::transaction::ActionCommit
 pub fn iceberg::transaction::ActionCommit::new(updates: alloc::vec::Vec<iceberg::TableUpdate>, requirements: alloc::vec::Vec<iceberg::TableRequirement>) -> Self
 pub fn iceberg::transaction::ActionCommit::take_requirements(&mut self) -> alloc::vec::Vec<iceberg::TableRequirement>
+pub fn iceberg::transaction::ActionCommit::take_unchecked_requirements(&mut self) -> alloc::vec::Vec<iceberg::TableRequirement>
 pub fn iceberg::transaction::ActionCommit::take_updates(&mut self) -> alloc::vec::Vec<iceberg::TableUpdate>
+pub fn iceberg::transaction::ActionCommit::with_unchecked_requirements(self, requirements: alloc::vec::Vec<iceberg::TableRequirement>) -> Self
 pub struct iceberg::transaction::AddColumn
 impl iceberg::transaction::AddColumn
 pub fn iceberg::transaction::AddColumn::optional(name: impl alloc::string::ToString, field_type: iceberg::spec::Type) -> Self
@@ -3652,6 +3654,7 @@ pub fn iceberg::transaction::FastAppendAction::with_check_duplicate(self, v: boo
 pub struct iceberg::transaction::OverwriteAction
 impl iceberg::transaction::OverwriteAction
 pub fn iceberg::transaction::OverwriteAction::add_data_files(self, data_files: impl core::iter::traits::collect::IntoIterator<Item = iceberg::spec::DataFile>) -> Self
+pub fn iceberg::transaction::OverwriteAction::assert_requirements(self, requirements: impl core::iter::traits::collect::IntoIterator<Item = iceberg::TableRequirement>) -> Self
 pub fn iceberg::transaction::OverwriteAction::delete_data_files(self, data_files: impl core::iter::traits::collect::IntoIterator<Item = iceberg::spec::DataFile>) -> Self
 pub fn iceberg::transaction::OverwriteAction::set_commit_uuid(self, commit_uuid: uuid::Uuid) -> Self
 pub fn iceberg::transaction::OverwriteAction::set_key_metadata(self, key_metadata: alloc::vec::Vec<u8>) -> Self
@@ -3661,6 +3664,21 @@ pub struct iceberg::transaction::ReplaceSortOrderAction
 impl iceberg::transaction::ReplaceSortOrderAction
 pub fn iceberg::transaction::ReplaceSortOrderAction::asc(self, name: &str, null_order: iceberg::spec::NullOrder) -> Self
 pub fn iceberg::transaction::ReplaceSortOrderAction::desc(self, name: &str, null_order: iceberg::spec::NullOrder) -> Self
+pub struct iceberg::transaction::StagedCommit
+pub iceberg::transaction::StagedCommit::identifier: iceberg::TableIdent
+pub iceberg::transaction::StagedCommit::requirements: alloc::vec::Vec<iceberg::TableRequirement>
+pub iceberg::transaction::StagedCommit::updates: alloc::vec::Vec<iceberg::TableUpdate>
+impl core::clone::Clone for iceberg::transaction::StagedCommit
+pub fn iceberg::transaction::StagedCommit::clone(&self) -> iceberg::transaction::StagedCommit
+impl core::cmp::PartialEq for iceberg::transaction::StagedCommit
+pub fn iceberg::transaction::StagedCommit::eq(&self, other: &iceberg::transaction::StagedCommit) -> bool
+impl core::fmt::Debug for iceberg::transaction::StagedCommit
+pub fn iceberg::transaction::StagedCommit::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for iceberg::transaction::StagedCommit
+impl serde_core::ser::Serialize for iceberg::transaction::StagedCommit
+pub fn iceberg::transaction::StagedCommit::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for iceberg::transaction::StagedCommit
+pub fn iceberg::transaction::StagedCommit::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct iceberg::transaction::Transaction
 impl iceberg::transaction::Transaction
 pub async fn iceberg::transaction::Transaction::commit(self, catalog: &dyn iceberg::Catalog) -> iceberg::Result<iceberg::table::Table>
@@ -3669,6 +3687,7 @@ pub fn iceberg::transaction::Transaction::fast_append(&self) -> iceberg::transac
 pub fn iceberg::transaction::Transaction::new(table: &iceberg::table::Table) -> Self
 pub fn iceberg::transaction::Transaction::overwrite(&self) -> iceberg::transaction::OverwriteAction
 pub fn iceberg::transaction::Transaction::replace_sort_order(&self) -> iceberg::transaction::ReplaceSortOrderAction
+pub async fn iceberg::transaction::Transaction::stage_commit(self) -> iceberg::Result<iceberg::transaction::StagedCommit>
 pub fn iceberg::transaction::Transaction::update_location(&self) -> iceberg::transaction::UpdateLocationAction
 pub fn iceberg::transaction::Transaction::update_schema(&self) -> iceberg::transaction::UpdateSchemaAction
 pub fn iceberg::transaction::Transaction::update_statistics(&self) -> iceberg::transaction::UpdateStatisticsAction
