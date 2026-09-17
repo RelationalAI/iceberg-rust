@@ -81,6 +81,7 @@ impl<T: TransactionAction + 'static> ApplyTransactionAction for T {
 pub struct ActionCommit {
     updates: Vec<TableUpdate>,
     requirements: Vec<TableRequirement>,
+    unchecked_requirements: Vec<TableRequirement>,
 }
 
 impl ActionCommit {
@@ -89,7 +90,23 @@ impl ActionCommit {
         Self {
             updates,
             requirements,
+            unchecked_requirements: vec![],
         }
+    }
+
+    /// Attaches requirements that should be included in the final commit but must *not* be
+    /// locally validated against the table this action is being applied to.
+    ///
+    /// This is for caller-supplied requirements (e.g. via `OverwriteAction::assert_requirements`)
+    /// that may deliberately assert something other than what the in-memory `Table` currently
+    /// reports — the whole point of such an assertion is to let the catalog (or whatever
+    /// external component eventually submits the commit) be the arbiter, not this crate's own
+    /// local, `table.metadata()`-derived sanity check. Requirements passed to [`Self::new`]
+    /// remain locally checked, since those are always derived from — and so trivially consistent
+    /// with — the very table metadata they'd be checked against.
+    pub fn with_unchecked_requirements(mut self, requirements: Vec<TableRequirement>) -> Self {
+        self.unchecked_requirements = requirements;
+        self
     }
 
     /// Consumes and returns the list of table updates.
@@ -97,9 +114,16 @@ impl ActionCommit {
         take(&mut self.updates)
     }
 
-    /// Consumes and returns the list of table requirements.
+    /// Consumes and returns the list of table requirements that should be locally validated
+    /// against the table this action was applied to.
     pub fn take_requirements(&mut self) -> Vec<TableRequirement> {
         take(&mut self.requirements)
+    }
+
+    /// Consumes and returns the list of table requirements that should be included in the final
+    /// commit but skipped during local validation. See [`Self::with_unchecked_requirements`].
+    pub fn take_unchecked_requirements(&mut self) -> Vec<TableRequirement> {
+        take(&mut self.unchecked_requirements)
     }
 }
 
