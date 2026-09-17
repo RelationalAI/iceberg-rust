@@ -31,7 +31,7 @@ use crate::transaction::snapshot::{
     DefaultManifestProcess, SnapshotProduceOperation, SnapshotProducer,
 };
 use crate::transaction::{ActionCommit, TransactionAction};
-use crate::{Error, ErrorKind};
+use crate::{Error, ErrorKind, TableRequirement};
 
 /// OverwriteAction is a transaction action for overwriting data files in the table.
 ///
@@ -43,6 +43,7 @@ pub struct OverwriteAction {
     commit_uuid: Option<Uuid>,
     key_metadata: Option<Vec<u8>>,
     snapshot_properties: HashMap<String, String>,
+    extra_requirements: Vec<TableRequirement>,
     added_data_files: Vec<DataFile>,
     deleted_data_files: Vec<DataFile>,
 }
@@ -54,6 +55,7 @@ impl OverwriteAction {
             commit_uuid: None,
             key_metadata: None,
             snapshot_properties: HashMap::default(),
+            extra_requirements: vec![],
             added_data_files: vec![],
             deleted_data_files: vec![],
         }
@@ -94,6 +96,25 @@ impl OverwriteAction {
         self.snapshot_properties = snapshot_properties;
         self
     }
+
+    /// Assert additional table requirements before this commit is attempted, alongside the
+    /// ones this action derives automatically from the table it's applied to (currently:
+    /// `UuidMatch`, and a `RefSnapshotIdMatch` for the branch this commit targets).
+    ///
+    /// A supplied requirement of the same kind as one this action would otherwise derive
+    /// automatically replaces the derived one, rather than producing a duplicate — e.g. to
+    /// assert a pinned base snapshot id that differs from whatever the `Table` passed to
+    /// `commit`/`commit_pinned`/`stage_commit` currently reports, supply your own
+    /// `TableRequirement::RefSnapshotIdMatch` here. Any other requirement kind (schema id,
+    /// partition spec id, sort order id, ...) is added alongside the derived ones. Calling
+    /// this more than once accumulates requirements rather than replacing the whole set.
+    pub fn assert_requirements(
+        mut self,
+        requirements: impl IntoIterator<Item = TableRequirement>,
+    ) -> Self {
+        self.extra_requirements.extend(requirements);
+        self
+    }
 }
 
 #[async_trait]
@@ -112,6 +133,7 @@ impl TransactionAction for OverwriteAction {
             self.snapshot_properties.clone(),
             self.added_data_files.clone(),
             self.deleted_data_files.clone(),
+            self.extra_requirements.clone(),
         );
 
         snapshot_producer.validate_added_data_files()?;
@@ -478,6 +500,130 @@ mod tests {
             manifest.entries()[0].snapshot_id().unwrap()
         );
         assert_eq!(data_file, *manifest.entries()[0].data_file());
+    }
+
+    #[tokio::test]
+    async fn test_overwrite_assert_requirements_overrides_ref_snapshot_id_match() {
+        let table = make_v2_minimal_table();
+
+        let data_file = test_data_file(
+            "test/override.parquet",
+            table.metadata().default_partition_spec_id(),
+        );
+
+        // Deliberately different from the table's actual current snapshot id, to prove this
+        // is what gets asserted, not what `SnapshotProducer` would derive on its own.
+        let overridden_base = table
+            .metadata()
+            .current_snapshot_id()
+            .map(|id| id + 1)
+            .unwrap_or(1);
+
+        let tx = Transaction::new(&table);
+        let action = tx
+            .overwrite()
+            .add_data_files(vec![data_file])
+            .assert_requirements(vec![TableRequirement::RefSnapshotIdMatch {
+                r#ref: MAIN_BRANCH.to_string(),
+                snapshot_id: Some(overridden_base),
+            }]);
+        let mut action_commit = Arc::new(action).commit(&table).await.unwrap();
+        let mut requirements = action_commit.take_requirements();
+        requirements.extend(action_commit.take_unchecked_requirements());
+
+        // Exactly one ref-snapshot-id requirement for `main`, and it's the override -- not
+        // duplicated, and not the table's real current snapshot id.
+        let ref_requirements: Vec<_> = requirements
+            .iter()
+            .filter(|r| matches!(r, TableRequirement::RefSnapshotIdMatch { r#ref, .. } if r#ref == MAIN_BRANCH))
+            .collect();
+        assert_eq!(ref_requirements.len(), 1);
+        assert_eq!(ref_requirements[0], &TableRequirement::RefSnapshotIdMatch {
+            r#ref: MAIN_BRANCH.to_string(),
+            snapshot_id: Some(overridden_base),
+        });
+
+        // The other auto-derived requirement is untouched.
+        assert!(
+            requirements
+                .iter()
+                .any(|r| matches!(r, TableRequirement::UuidMatch { uuid } if *uuid == table.metadata().uuid()))
+        );
+        assert_eq!(requirements.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_overwrite_assert_requirements_adds_new_requirement_kind() {
+        let table = make_v2_minimal_table();
+
+        let data_file = test_data_file(
+            "test/extra.parquet",
+            table.metadata().default_partition_spec_id(),
+        );
+
+        let tx = Transaction::new(&table);
+        let action = tx
+            .overwrite()
+            .add_data_files(vec![data_file])
+            .assert_requirements(vec![TableRequirement::CurrentSchemaIdMatch {
+                current_schema_id: table.metadata().current_schema_id(),
+            }]);
+        let mut action_commit = Arc::new(action).commit(&table).await.unwrap();
+        let mut requirements = action_commit.take_requirements();
+        requirements.extend(action_commit.take_unchecked_requirements());
+
+        // Both auto-derived requirements are still present, plus the supplied one -- nothing
+        // replaced, since `CurrentSchemaIdMatch` isn't one of the kinds this action derives.
+        assert_eq!(requirements.len(), 3);
+        assert!(
+            requirements
+                .iter()
+                .any(|r| matches!(r, TableRequirement::UuidMatch { .. }))
+        );
+        assert!(requirements.iter().any(
+            |r| matches!(r, TableRequirement::RefSnapshotIdMatch { r#ref, .. } if r#ref == MAIN_BRANCH)
+        ));
+        assert!(requirements.iter().any(|r| matches!(
+            r,
+            TableRequirement::CurrentSchemaIdMatch { current_schema_id } if *current_schema_id == table.metadata().current_schema_id()
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_overwrite_assert_requirements_accumulates_across_calls() {
+        let table = make_v2_minimal_table();
+
+        let data_file = test_data_file(
+            "test/accumulate.parquet",
+            table.metadata().default_partition_spec_id(),
+        );
+
+        let tx = Transaction::new(&table);
+        let action = tx
+            .overwrite()
+            .add_data_files(vec![data_file])
+            .assert_requirements(vec![TableRequirement::CurrentSchemaIdMatch {
+                current_schema_id: table.metadata().current_schema_id(),
+            }])
+            .assert_requirements(vec![TableRequirement::LastAssignedFieldIdMatch {
+                last_assigned_field_id: table.metadata().last_column_id(),
+            }]);
+        let mut action_commit = Arc::new(action).commit(&table).await.unwrap();
+        let mut requirements = action_commit.take_requirements();
+        requirements.extend(action_commit.take_unchecked_requirements());
+
+        // Both calls' requirements survive, alongside the two auto-derived ones: 4 total.
+        assert_eq!(requirements.len(), 4);
+        assert!(
+            requirements
+                .iter()
+                .any(|r| matches!(r, TableRequirement::CurrentSchemaIdMatch { .. }))
+        );
+        assert!(
+            requirements
+                .iter()
+                .any(|r| matches!(r, TableRequirement::LastAssignedFieldIdMatch { .. }))
+        );
     }
 
     #[tokio::test]

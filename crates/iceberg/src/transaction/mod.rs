@@ -68,6 +68,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder, RetryableWithContext};
+use serde_derive::{Deserialize, Serialize};
 pub use update_schema::AddColumn;
 
 use crate::error::Result;
@@ -83,13 +84,30 @@ pub use crate::transaction::update_properties::UpdatePropertiesAction;
 pub use crate::transaction::update_schema::UpdateSchemaAction;
 pub use crate::transaction::update_statistics::UpdateStatisticsAction;
 pub use crate::transaction::upgrade_format_version::UpgradeFormatVersionAction;
-use crate::{Catalog, TableCommit, TableRequirement, TableUpdate};
+use crate::{Catalog, TableCommit, TableIdent, TableRequirement, TableUpdate};
 
 /// Table transaction.
 #[derive(Clone)]
 pub struct Transaction {
     table: Table,
     actions: Vec<BoxedTransactionAction>,
+}
+
+/// The result of [`Transaction::stage_commit`]: a table (or one element of a multi-table
+/// transaction) commit that has been fully computed but not yet submitted to a catalog.
+///
+/// Serializes to exactly the JSON body the Iceberg REST catalog protocol expects for
+/// `POST .../tables/{table}` (this shape, with `identifier` omitted since the URL already
+/// names the table) or as one element of `POST .../transactions/commit`'s `table-changes`
+/// array (with `identifier` present, as it is here).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StagedCommit {
+    /// The table this commit applies to.
+    pub identifier: TableIdent,
+    /// Requirements that must hold for this commit to be accepted.
+    pub requirements: Vec<TableRequirement>,
+    /// Metadata changes to apply once the requirements are validated.
+    pub updates: Vec<TableUpdate>,
 }
 
 impl Transaction {
@@ -120,6 +138,7 @@ impl Transaction {
     ) -> Result<Table> {
         let updates = action_commit.take_updates();
         let requirements = action_commit.take_requirements();
+        let unchecked_requirements = action_commit.take_unchecked_requirements();
 
         for requirement in &requirements {
             requirement.check(Some(table.metadata()))?;
@@ -129,6 +148,7 @@ impl Transaction {
 
         existing_updates.extend(updates);
         existing_requirements.extend(requirements);
+        existing_requirements.extend(unchecked_requirements);
 
         Ok(updated_table)
     }
@@ -176,6 +196,41 @@ impl Transaction {
     /// Expire snapshots from the table metadata.
     pub fn expire_snapshots(&self) -> ExpireSnapshotsAction {
         ExpireSnapshotsAction::new()
+    }
+
+    /// Runs every action's commit logic — writing any new manifest/manifest-list files to
+    /// storage as a side effect, via the table's existing `FileIO` — and returns the
+    /// resulting identifier, requirements and updates without submitting them to the
+    /// catalog. The caller is responsible for eventually sending this as a commit, to this
+    /// catalog or to whatever external component finalizes it; [`StagedCommit`] serializes
+    /// to exactly the JSON body the Iceberg REST catalog protocol expects for a table or
+    /// transaction commit.
+    ///
+    /// Unlike [`Transaction::commit`], this never reads current catalog state and never
+    /// retries — the returned requirements assert against exactly the base each action
+    /// resolved from the `Table` this `Transaction` was constructed with (or from any
+    /// override supplied via `OverwriteAction::assert_requirements`).
+    pub async fn stage_commit(self) -> Result<StagedCommit> {
+        let identifier = self.table.identifier().to_owned();
+        let mut current_table = self.table.clone();
+        let mut existing_updates: Vec<TableUpdate> = vec![];
+        let mut existing_requirements: Vec<TableRequirement> = vec![];
+
+        for action in &self.actions {
+            let action_commit = Arc::clone(action).commit(&current_table).await?;
+            current_table = Self::apply(
+                current_table,
+                action_commit,
+                &mut existing_updates,
+                &mut existing_requirements,
+            )?;
+        }
+
+        Ok(StagedCommit {
+            identifier,
+            requirements: existing_requirements,
+            updates: existing_updates,
+        })
     }
 
     /// Commit transaction.
@@ -261,13 +316,15 @@ mod tests {
     use crate::io::FileIO;
     use crate::memory::tests::new_memory_catalog;
     use crate::spec::{
-        DataContentType, DataFileBuilder, DataFileFormat, Literal, Struct, TableMetadata,
-        TableProperties,
+        DataContentType, DataFileBuilder, DataFileFormat, Literal, MAIN_BRANCH, Operation, Struct,
+        TableMetadata, TableProperties,
     };
     use crate::table::Table;
     use crate::test_utils::{make_encrypted_table, test_runtime};
-    use crate::transaction::{ApplyTransactionAction, Transaction};
-    use crate::{Catalog, Error, ErrorKind, TableCreation, TableIdent};
+    use crate::transaction::{ApplyTransactionAction, StagedCommit, Transaction};
+    use crate::{
+        Catalog, Error, ErrorKind, TableCommit, TableCreation, TableIdent, TableRequirement,
+    };
 
     pub fn make_v1_table() -> Table {
         let file = File::open(format!(
@@ -573,6 +630,156 @@ mod tests {
         assert_eq!(summary.get("total-records").unwrap(), "30");
         assert_eq!(summary.get("total-data-files").unwrap(), "2");
         assert_eq!(summary.get("total-files-size").unwrap(), "300");
+    }
+
+    fn make_stage_commit_data_file(table: &Table, path: &str) -> crate::spec::DataFile {
+        DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path(path.to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(100)
+            .record_count(1)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::from_iter([Some(Literal::long(1))]))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_stage_commit_does_not_touch_catalog() {
+        let catalog = new_memory_catalog().await;
+        let table = make_v3_minimal_table_in_catalog(&catalog).await;
+        let data_file = make_stage_commit_data_file(&table, "test/staged-1.parquet");
+
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .overwrite()
+            .add_data_files(vec![data_file])
+            .apply(tx)
+            .unwrap();
+
+        let staged = tx.stage_commit().await.unwrap();
+        assert_eq!(staged.identifier, *table.identifier());
+        assert!(!staged.requirements.is_empty());
+        assert!(!staged.updates.is_empty());
+
+        // Nothing was submitted -- reloading from the catalog shows the table unchanged.
+        let reloaded = catalog.load_table(table.identifier()).await.unwrap();
+        assert_eq!(reloaded.metadata(), table.metadata());
+        assert_eq!(
+            reloaded.metadata().current_snapshot_id(),
+            table.metadata().current_snapshot_id()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage_commit_payload_is_a_valid_commit() {
+        let catalog = new_memory_catalog().await;
+        let table = make_v3_minimal_table_in_catalog(&catalog).await;
+        let data_file = make_stage_commit_data_file(&table, "test/staged-2.parquet");
+
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .overwrite()
+            .add_data_files(vec![data_file])
+            .apply(tx)
+            .unwrap();
+
+        let mut staged = tx.stage_commit().await.unwrap();
+
+        // Submit the staged payload directly, bypassing `Transaction::commit` entirely --
+        // proving `StagedCommit` alone (identifier + requirements + updates) is a complete,
+        // usable commit, exactly as an external committer would submit it.
+        let table_commit = TableCommit::builder()
+            .ident(staged.identifier.clone())
+            .requirements(std::mem::take(&mut staged.requirements))
+            .updates(std::mem::take(&mut staged.updates))
+            .build();
+        let committed = catalog.update_table(table_commit).await.unwrap();
+
+        assert!(committed.metadata().current_snapshot().is_some());
+        assert_eq!(
+            committed
+                .metadata()
+                .current_snapshot()
+                .unwrap()
+                .summary()
+                .operation,
+            Operation::Overwrite
+        );
+
+        // And the catalog now durably reflects it.
+        let reloaded = catalog.load_table(table.identifier()).await.unwrap();
+        assert_eq!(
+            reloaded.metadata().current_snapshot_id(),
+            committed.metadata().current_snapshot_id()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage_commit_respects_assert_requirements_override() {
+        let catalog = new_memory_catalog().await;
+        let table = make_v3_minimal_table_in_catalog(&catalog).await;
+        let data_file = make_stage_commit_data_file(&table, "test/staged-3.parquet");
+
+        let overridden_base = table
+            .metadata()
+            .current_snapshot_id()
+            .map(|id| id + 1)
+            .unwrap_or(1);
+
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .overwrite()
+            .add_data_files(vec![data_file])
+            .assert_requirements(vec![TableRequirement::RefSnapshotIdMatch {
+                r#ref: MAIN_BRANCH.to_string(),
+                snapshot_id: Some(overridden_base),
+            }])
+            .apply(tx)
+            .unwrap();
+
+        let staged = tx.stage_commit().await.unwrap();
+        assert!(
+            staged
+                .requirements
+                .contains(&TableRequirement::RefSnapshotIdMatch {
+                    r#ref: MAIN_BRANCH.to_string(),
+                    snapshot_id: Some(overridden_base),
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage_commit_serializes_to_rest_catalog_shape() {
+        let catalog = new_memory_catalog().await;
+        let table = make_v3_minimal_table_in_catalog(&catalog).await;
+        let data_file = make_stage_commit_data_file(&table, "test/staged-4.parquet");
+
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .overwrite()
+            .add_data_files(vec![data_file])
+            .apply(tx)
+            .unwrap();
+
+        let staged = tx.stage_commit().await.unwrap();
+        let json = serde_json::to_value(&staged).unwrap();
+
+        assert!(json.get("identifier").is_some());
+        let requirements = json["requirements"].as_array().unwrap();
+        assert!(
+            requirements
+                .iter()
+                .any(|r| r["type"] == "assert-ref-snapshot-id")
+        );
+        let updates = json["updates"].as_array().unwrap();
+        assert!(updates.iter().any(|u| u["action"] == "add-snapshot"));
+        assert!(updates.iter().any(|u| u["action"] == "set-snapshot-ref"));
+
+        // Round-trips.
+        let round_tripped: StagedCommit = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, staged);
     }
 
     #[tokio::test]

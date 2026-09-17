@@ -123,6 +123,7 @@ pub(crate) struct SnapshotProducer<'a> {
     snapshot_id: i64,
     commit_uuid: Uuid,
     snapshot_properties: HashMap<String, String>,
+    extra_requirements: Vec<TableRequirement>,
     added_data_files: Vec<DataFile>,
     deleted_data_files: Vec<DataFile>,
     // A counter used to generate unique manifest file names.
@@ -146,12 +147,14 @@ impl<'a> SnapshotProducer<'a> {
         snapshot_properties: HashMap<String, String>,
         added_data_files: Vec<DataFile>,
         deleted_data_files: Vec<DataFile>,
+        extra_requirements: Vec<TableRequirement>,
     ) -> Self {
         Self {
             table,
             snapshot_id: Self::generate_unique_snapshot_id(table),
             commit_uuid,
             snapshot_properties,
+            extra_requirements,
             added_data_files,
             deleted_data_files,
             manifest_counter: (0..),
@@ -579,16 +582,36 @@ impl<'a> SnapshotProducer<'a> {
         ]]
         .concat();
 
-        let requirements = vec![
-            TableRequirement::UuidMatch {
+        // Caller-supplied requirements (via `assert_requirements`) are intentionally *not*
+        // locally checked against `self.table`: the whole reason to supply one is that it may
+        // assert a base other than whatever this in-memory `Table` currently reports (e.g. a
+        // pinned base that a retry must keep asserting even though a fresher load of the table
+        // has since moved past it). Only the auto-derived fallbacks below — which are always
+        // read straight off `self.table` and so can never disagree with it — are locally
+        // checked; that check is a self-consistency safeguard across multiple actions within one
+        // transaction, not a substitute for the catalog's own requirement check.
+        let extra_requirements = self.extra_requirements;
+        let mut auto_requirements = vec![];
+
+        if !extra_requirements
+            .iter()
+            .any(|r| matches!(r, TableRequirement::UuidMatch { .. }))
+        {
+            auto_requirements.push(TableRequirement::UuidMatch {
                 uuid: self.table.metadata().uuid(),
-            },
-            TableRequirement::RefSnapshotIdMatch {
+            });
+        }
+
+        if !extra_requirements.iter().any(
+            |r| matches!(r, TableRequirement::RefSnapshotIdMatch { r#ref, .. } if r#ref == MAIN_BRANCH),
+        ) {
+            auto_requirements.push(TableRequirement::RefSnapshotIdMatch {
                 r#ref: MAIN_BRANCH.to_string(),
                 snapshot_id: self.table.metadata().current_snapshot_id(),
-            },
-        ];
+            });
+        }
 
-        Ok(ActionCommit::new(updates, requirements))
+        Ok(ActionCommit::new(updates, auto_requirements)
+            .with_unchecked_requirements(extra_requirements))
     }
 }
