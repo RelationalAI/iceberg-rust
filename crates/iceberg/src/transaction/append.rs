@@ -93,7 +93,8 @@ impl TransactionAction for FastAppendAction {
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
             self.snapshot_properties.clone(),
             self.dedupe_added_files(),
-            vec![],
+            vec![], // deleted_data_files: fast-append never deletes
+            vec![], // extra_requirements: not exposed on FastAppendAction
         );
 
         // validate added files

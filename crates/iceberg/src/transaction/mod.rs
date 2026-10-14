@@ -120,6 +120,7 @@ impl Transaction {
     ) -> Result<Table> {
         let updates = action_commit.take_updates();
         let requirements = action_commit.take_requirements();
+        let unchecked_requirements = action_commit.take_unchecked_requirements();
 
         for requirement in &requirements {
             requirement.check(Some(table.metadata()))?;
@@ -129,6 +130,7 @@ impl Transaction {
 
         existing_updates.extend(updates);
         existing_requirements.extend(requirements);
+        existing_requirements.extend(unchecked_requirements);
 
         Ok(updated_table)
     }
