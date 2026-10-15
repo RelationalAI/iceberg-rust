@@ -103,9 +103,9 @@ impl OverwriteAction {
     ///
     /// A supplied requirement of the same kind as one this action would otherwise derive
     /// automatically replaces the derived one, rather than producing a duplicate — e.g. to
-    /// assert a pinned base snapshot id that differs from whatever the `Table` passed to
-    /// `commit`/`commit_pinned`/`stage_commit` currently reports, supply your own
-    /// `TableRequirement::RefSnapshotIdMatch` here. Any other requirement kind (schema id,
+    /// assert a pinned base snapshot id that differs from whatever `Transaction::commit`'s
+    /// internal retry loop has rebased this action's `Table` onto by the time it runs, supply
+    /// your own `TableRequirement::RefSnapshotIdMatch` here. Any other requirement kind (schema id,
     /// partition spec id, sort order id, ...) is added alongside the derived ones. Calling
     /// this more than once accumulates requirements rather than replacing the whole set.
     pub fn assert_requirements(
