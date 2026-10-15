@@ -23,6 +23,7 @@ use arrow_schema::Schema as ArrowSchema;
 use futures::channel::mpsc::channel;
 use futures::stream::select;
 use futures::{Stream, StreamExt, TryStreamExt};
+use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, ParquetRecordBatchStreamBuilder};
 
 use crate::arrow::reader::{
     PRUNABLE_METADATA_FIELDS, ParquetReadOptions, process_record_batch_stream,
@@ -113,19 +114,38 @@ async fn process_incremental_append_task(
         virtual_columns.push(Arc::clone(row_pos_field()));
     }
 
-    let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
+    let (file_reader, arrow_metadata) = ArrowReader::open_parquet_file(
         &base.data_file_path,
+        &file_io,
         base.file_size_in_bytes,
-        file_io,
         parquet_read_options,
-        virtual_columns,
-        batch_size,
-        None, // name_mapping not yet supported in incremental scan
-        Some(Arc::clone(scan_metrics.bytes_read_counter())),
-        Some(&base.schema),
+        Some(scan_metrics.bytes_read_counter()),
         base.key_metadata.as_deref(),
     )
     .await?;
+
+    // Check if Parquet file has embedded field IDs.
+    // Corresponds to Java's ParquetSchemaUtil.hasIds()
+    let has_missing_field_ids = arrow_metadata
+        .schema()
+        .fields()
+        .iter()
+        .next()
+        .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
+
+    let arrow_metadata = ArrowReader::configure_arrow_reader_metadata(
+        arrow_metadata,
+        has_missing_field_ids,
+        None, // name_mapping not yet supported in incremental scan
+        &base.schema,
+        virtual_columns,
+    )?;
+
+    let mut builder =
+        ParquetRecordBatchStreamBuilder::new_with_metadata(file_reader, arrow_metadata);
+    if let Some(batch_size) = batch_size {
+        builder = builder.with_batch_size(batch_size);
+    }
 
     let builder = ArrowReader::apply_parquet_filters(
         builder,
@@ -248,19 +268,38 @@ async fn process_equality_delete_task(
         .combined_predicate
         .bind(task.schema_ref(), task.base.case_sensitive)?;
 
-    let (builder, has_missing_field_ids) = ArrowReader::open_parquet_stream_builder(
+    let (file_reader, arrow_metadata) = ArrowReader::open_parquet_file(
         &task.base.data_file_path,
+        &file_io,
         task.base.file_size_in_bytes,
-        file_io,
         parquet_read_options,
-        vec![Arc::clone(row_pos_field())],
-        batch_size,
-        None, // name_mapping not yet supported in incremental scan
-        Some(Arc::clone(scan_metrics.bytes_read_counter())),
-        Some(&task.base.schema),
+        Some(scan_metrics.bytes_read_counter()),
         task.base.key_metadata.as_deref(),
     )
     .await?;
+
+    // Check if Parquet file has embedded field IDs.
+    // Corresponds to Java's ParquetSchemaUtil.hasIds()
+    let has_missing_field_ids = arrow_metadata
+        .schema()
+        .fields()
+        .iter()
+        .next()
+        .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
+
+    let arrow_metadata = ArrowReader::configure_arrow_reader_metadata(
+        arrow_metadata,
+        has_missing_field_ids,
+        None, // name_mapping not yet supported in incremental scan
+        &task.base.schema,
+        vec![Arc::clone(row_pos_field())],
+    )?;
+
+    let mut builder =
+        ParquetRecordBatchStreamBuilder::new_with_metadata(file_reader, arrow_metadata);
+    if let Some(batch_size) = batch_size {
+        builder = builder.with_batch_size(batch_size);
+    }
 
     let builder = ArrowReader::apply_parquet_filters(
         builder,

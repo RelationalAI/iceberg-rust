@@ -209,16 +209,12 @@ impl FileScanTaskReader {
         }
 
         // Concurrently open the Parquet file and start loading delete files.
-        let open_fut = ArrowReader::open_parquet_stream_builder(
+        let open_fut = ArrowReader::open_parquet_file(
             task.data_file_path(),
+            &self.file_io,
             task.file_size_in_bytes(),
-            self.file_io.clone(),
             parquet_read_options,
-            virtual_columns,
-            self.batch_size,
-            task.name_mapping().map(|nm| nm.as_ref()),
-            Some(Arc::clone(self.scan_metrics.bytes_read_counter())),
-            Some(task.schema()),
+            Some(self.scan_metrics.bytes_read_counter()),
             task.key_metadata(),
         );
         let delete_filter_rx = self
@@ -228,12 +224,35 @@ impl FileScanTaskReader {
         let (open_result, delete_filter) =
             futures::join!(open_fut, async { delete_filter_rx.await.unwrap() });
 
-        let (builder, has_missing_field_ids) = open_result?;
+        let (file_reader, arrow_metadata) = open_result?;
         let delete_filter = delete_filter?;
+
+        // Check if Parquet file has embedded field IDs.
+        // Corresponds to Java's ParquetSchemaUtil.hasIds()
+        let has_missing_field_ids = arrow_metadata
+            .schema()
+            .fields()
+            .iter()
+            .next()
+            .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
+
+        let arrow_metadata = ArrowReader::configure_arrow_reader_metadata(
+            arrow_metadata,
+            has_missing_field_ids,
+            task.name_mapping().map(|nm| nm.as_ref()),
+            task.schema(),
+            virtual_columns,
+        )?;
+
+        let mut builder =
+            ParquetRecordBatchStreamBuilder::new_with_metadata(file_reader, arrow_metadata);
+        if let Some(batch_size) = self.batch_size {
+            builder = builder.with_batch_size(batch_size);
+        }
 
         // Position-based fallback applies only when the file has no embedded field IDs
         // AND no name mapping is available. With a name mapping, field IDs are assigned
-        // to the Arrow schema by `open_parquet_stream_builder`, and projection/predicate
+        // to the Arrow schema by `configure_arrow_reader_metadata`, and projection/predicate
         // planning must use them (see #2403).
         let use_position_fallback = has_missing_field_ids && task.name_mapping().is_none();
 
@@ -357,21 +376,29 @@ impl ArrowReader {
         Ok(result)
     }
 
-    /// Opens a Parquet file and loads its metadata, wrapping the reader with
-    /// [`CountingFileRead`] so all I/O is accumulated into `bytes_read`.
+    /// Opens a Parquet file and loads its metadata. When `bytes_read` is `Some`, wraps the
+    /// reader with [`CountingFileRead`] so all I/O is accumulated into the provided counter.
+    ///
+    /// This is the async, I/O-bound phase shared by every reading path. Callers that have
+    /// background work to overlap (e.g. delete-file loading) should run this concurrently
+    /// with that work using [`futures::join!`], then resolve the schema with
+    /// [`Self::configure_arrow_reader_metadata`].
     pub(crate) async fn open_parquet_file(
         data_file_path: &str,
         file_io: &FileIO,
         file_size_in_bytes: u64,
         parquet_read_options: ParquetReadOptions,
-        bytes_read: &Arc<AtomicU64>,
+        bytes_read: Option<&Arc<AtomicU64>>,
         key_metadata: Option<&[u8]>,
     ) -> Result<(ArrowFileReader, ArrowReaderMetadata)> {
         let parquet_file = file_io.new_input(data_file_path)?;
-        let counting_reader =
-            CountingFileRead::new(parquet_file.reader().await?, Arc::clone(bytes_read));
+        let raw_reader = parquet_file.reader().await?;
+        let boxed_reader: Box<dyn FileRead> = match bytes_read {
+            Some(counter) => Box::new(CountingFileRead::new(raw_reader, Arc::clone(counter))),
+            None => Box::new(raw_reader),
+        };
         Self::build_parquet_reader(
-            Box::new(counting_reader),
+            boxed_reader,
             file_size_in_bytes,
             parquet_read_options,
             key_metadata,
@@ -404,81 +431,35 @@ impl ArrowReader {
         Ok((reader, arrow_metadata))
     }
 
-    /// Opens a Parquet file, resolves its schema (name-mapping / field-ID fallback), and
-    /// applies the batch size. Returns `(builder, has_missing_field_ids)`.
-    ///
-    /// This is the async phase shared by every reading path. Callers that have background
-    /// work to overlap (e.g. delete-file loading) can run this concurrently with that work
-    /// using [`futures::join!`], then pass the result to [`Self::apply_parquet_filters`].
+    /// Resolves the schema (field-id assignment, then INT96 coercion) and applies any
+    /// virtual columns, rebuilding the Arrow reader metadata at most once.
     ///
     /// Implements the three-branch schema resolution strategy matching Java's `ReadConf` constructor:
     /// - Branch 1: file has embedded field IDs → trust them, use as-is
     /// - Branch 2: name_mapping present → apply name mapping to assign correct Iceberg field IDs
     /// - Branch 3: no name mapping → assign fallback position-based IDs
     ///
-    /// When `iceberg_schema` is `Some`, INT96 timestamp columns are coerced to the resolution
-    /// specified by the Iceberg schema before building the stream reader.
-    ///
-    /// When `bytes_read` is `Some`, wraps the file reader with [`CountingFileRead`] so all
-    /// I/O bytes are accumulated into the provided counter.
-    ///
-    /// When `key_metadata` is `Some`, the file is opened with Parquet Modular Encryption
-    /// decryption properties derived from it.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn open_parquet_stream_builder(
-        data_file_path: &str,
-        file_size_in_bytes: u64,
-        file_io: FileIO,
-        parquet_read_options: ParquetReadOptions,
-        virtual_columns: Vec<Arc<arrow_schema::Field>>,
-        batch_size: Option<usize>,
+    /// Field-id resolution and INT96 coercion both operate on a plain schema value, with
+    /// virtual columns applied once at the very end in a single rebuild. Two bugs are
+    /// avoided by not interleaving virtual columns into the earlier steps:
+    ///   1. A schema that already carries a virtual column's field confuses
+    ///      `coerce_int96_timestamps`, which expects the arrow schema to line up
+    ///      field-for-field with the real Iceberg schema.
+    ///   2. A fresh `ArrowReaderOptions` doesn't carry over a previous rebuild's
+    ///      virtual-column registration, only its schema shape -- so a schema that merely
+    ///      *looks like* it has the virtual column, without the reader being told to
+    ///      synthesize it, fails at read time ("virtual column ... is not present in
+    ///      source batch").
+    pub(crate) fn configure_arrow_reader_metadata(
+        arrow_metadata: ArrowReaderMetadata,
+        missing_field_ids: bool,
         name_mapping: Option<&NameMapping>,
-        bytes_read: Option<Arc<AtomicU64>>,
-        iceberg_schema: Option<&crate::spec::Schema>,
-        key_metadata: Option<&[u8]>,
-    ) -> Result<(ParquetRecordBatchStreamBuilder<ArrowFileReader>, bool)> {
-        let parquet_file = file_io.new_input(data_file_path)?;
-        let raw_reader = parquet_file.reader().await?;
-        let boxed_reader: Box<dyn FileRead> = if let Some(counter) = bytes_read {
-            Box::new(CountingFileRead::new(raw_reader, counter))
-        } else {
-            Box::new(raw_reader)
-        };
-        let (file_reader, arrow_metadata) = Self::build_parquet_reader(
-            boxed_reader,
-            file_size_in_bytes,
-            parquet_read_options,
-            key_metadata,
-        )
-        .await?;
+        iceberg_schema: &crate::spec::Schema,
+        virtual_columns: Vec<Arc<arrow_schema::Field>>,
+    ) -> Result<ArrowReaderMetadata> {
+        let mut schema_changed = missing_field_ids;
 
-        // Check if Parquet file has embedded field IDs.
-        // Corresponds to Java's ParquetSchemaUtil.hasIds()
-        let has_missing_field_ids = arrow_metadata
-            .schema()
-            .fields()
-            .iter()
-            .next()
-            .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
-
-        // Field-id resolution and INT96 coercion both operate on a plain schema value, with
-        // virtual columns applied once at the very end in a single rebuild. Two bugs are
-        // avoided by not interleaving virtual columns into the earlier steps:
-        //   1. A schema that already carries a virtual column's field confuses
-        //      `coerce_int96_timestamps`, which expects the arrow schema to line up
-        //      field-for-field with the real Iceberg schema.
-        //   2. A fresh `ArrowReaderOptions` doesn't carry over a previous rebuild's
-        //      virtual-column registration, only its schema shape -- so a schema that merely
-        //      *looks like* it has the virtual column, without the reader being told to
-        //      synthesize it, fails at read time ("virtual column ... is not present in
-        //      source batch").
-        let mut schema_changed = has_missing_field_ids;
-
-        // Three-branch schema resolution strategy matching Java's ReadConf constructor.
-        //
-        // When Parquet files lack field IDs (e.g., Hive/Spark migrations via add_files),
-        // we must assign field IDs BEFORE reading data to enable correct column projection.
-        let resolved_schema = if has_missing_field_ids {
+        let resolved_schema = if missing_field_ids {
             // Parquet file lacks field IDs - must assign them before reading.
             if let Some(nm) = name_mapping {
                 // Branch 2: Apply name mapping to assign correct Iceberg field IDs.
@@ -496,9 +477,7 @@ impl ArrowReader {
 
         // Coerce INT96 timestamp columns to the resolution specified by the Iceberg schema.
         // This must happen before building the stream reader to avoid i64 overflow in arrow-rs.
-        let resolved_schema = match iceberg_schema
-            .and_then(|schema| coerce_int96_timestamps(&resolved_schema, schema))
-        {
+        let resolved_schema = match coerce_int96_timestamps(&resolved_schema, iceberg_schema) {
             Some(coerced) => {
                 schema_changed = true;
                 coerced
@@ -506,38 +485,29 @@ impl ArrowReader {
             None => resolved_schema,
         };
 
-        let arrow_metadata = if schema_changed || !virtual_columns.is_empty() {
-            let mut options = ArrowReaderOptions::new().with_schema(Arc::clone(&resolved_schema));
-            if !virtual_columns.is_empty() {
-                options = options.with_virtual_columns(virtual_columns)?;
-            }
-            ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options).map_err(
-                |e| {
-                    Error::new(
-                        ErrorKind::Unexpected,
-                        format!(
-                            "Failed to create ArrowReaderMetadata with resolved schema: {resolved_schema}"
-                        ),
-                    )
-                    .with_source(e)
-                },
-            )?
-        } else {
-            arrow_metadata
-        };
-
-        let mut builder =
-            ParquetRecordBatchStreamBuilder::new_with_metadata(file_reader, arrow_metadata);
-
-        if let Some(batch_size) = batch_size {
-            builder = builder.with_batch_size(batch_size);
+        if !schema_changed && virtual_columns.is_empty() {
+            return Ok(arrow_metadata);
         }
 
-        Ok((builder, has_missing_field_ids))
+        let mut options = ArrowReaderOptions::new().with_schema(Arc::clone(&resolved_schema));
+        if !virtual_columns.is_empty() {
+            options = options.with_virtual_columns(virtual_columns)?;
+        }
+
+        ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options).map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                format!(
+                    "Failed to create ArrowReaderMetadata with resolved schema: {resolved_schema}"
+                ),
+            )
+            .with_source(e)
+        })
     }
 
     /// Applies all row-level and row-group-level filters to a builder returned by
-    /// [`Self::open_parquet_stream_builder`].
+    /// building a [`ParquetRecordBatchStreamBuilder`] from [`Self::open_parquet_file`] and
+    /// [`Self::configure_arrow_reader_metadata`]'s result.
     ///
     /// Handles byte-range row group pruning, predicate row filtering (with optional
     /// projection), and positional-delete row selection.
