@@ -147,8 +147,7 @@ pub(crate) fn azdls_create_operator<'a>(
     // including their filesystem and account name.
     // OpenDAL's operator methods expect only the relative path, so we split it
     // off and save it for later use.
-    let relative_path_len = path.path.len();
-    let (_, relative_path) = absolute_path.split_at(absolute_path.len() - relative_path_len);
+    let relative_path = path.relative_path(absolute_path);
 
     Ok((op, relative_path))
 }
@@ -342,6 +341,13 @@ impl AzureStoragePath {
             self.account_name,
             self.endpoint_suffix
         )
+    }
+
+    /// The part of `absolute_path` below the filesystem, without a leading `/`,
+    /// like the relative paths of the other backends.
+    pub(crate) fn relative_path<'a>(&self, absolute_path: &'a str) -> &'a str {
+        let path = &absolute_path[absolute_path.len() - self.path.len()..];
+        path.strip_prefix('/').unwrap_or(path)
     }
 }
 
@@ -573,7 +579,19 @@ mod tests {
                         ..Default::default()
                     },
                 ),
-                Some(("myfs", "/path/to/file.parquet")),
+                Some(("myfs", "path/to/file.parquet")),
+            ),
+            (
+                "filesystem root",
+                (
+                    "abfss://myfs@myaccount.dfs.core.windows.net/",
+                    AzdlsConfig {
+                        account_name: Some("myaccount".to_string()),
+                        endpoint: Some("https://myaccount.dfs.core.windows.net".to_string()),
+                        ..Default::default()
+                    },
+                ),
+                Some(("myfs", "")),
             ),
             (
                 "different account",
@@ -623,7 +641,7 @@ mod tests {
                         ..Default::default()
                     },
                 ),
-                Some(("myfs", "/path/to/file.parquet")),
+                Some(("myfs", "path/to/file.parquet")),
             ),
             (
                 "different scheme is accepted",
@@ -635,7 +653,7 @@ mod tests {
                         ..Default::default()
                     },
                 ),
-                Some(("myfs", "/path/to/file.parquet")),
+                Some(("myfs", "path/to/file.parquet")),
             ),
             (
                 "azurite endpoint with explicit configuration",
@@ -648,7 +666,7 @@ mod tests {
                         ..Default::default()
                     },
                 ),
-                Some(("testfs", "/path/to/data.parquet")),
+                Some(("testfs", "path/to/data.parquet")),
             ),
         ];
 
@@ -681,14 +699,14 @@ mod tests {
         // *not* the anonymous HTTP fallback, via the scheme name.
         let (op, relative_path) = azdls_create_operator(path, &config, false)
             .expect("operator should build without a credential");
-        assert_eq!(relative_path, "/path/to/file.parquet");
+        assert_eq!(relative_path, "path/to/file.parquet");
         assert_eq!(op.info().scheme(), "azdls");
 
         // No credentials, `allow_anonymous=true`: routes to the anonymous
         // HTTP fallback instead.
         let (op, relative_path) =
             azdls_create_operator(path, &config, true).expect("anonymous operator should build");
-        assert_eq!(relative_path, "/path/to/file.parquet");
+        assert_eq!(relative_path, "path/to/file.parquet");
         assert_eq!(op.info().scheme(), "http");
 
         // `allow_anonymous=true` takes priority even when a credential is
