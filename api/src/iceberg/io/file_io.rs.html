@@ -401,10 +401,10 @@
 <a href=#401 id=401 data-nosnippet>401</a>    /// TODO: we can support writing non-contiguous bytes in the future.
 <a href=#402 id=402 data-nosnippet>402</a>    </span><span class="kw">async fn </span>write(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bs: Bytes) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt;;
 <a href=#403 id=403 data-nosnippet>403</a>
-<a href=#404 id=404 data-nosnippet>404</a>    <span class="doccomment">/// Close file.
+<a href=#404 id=404 data-nosnippet>404</a>    <span class="doccomment">/// Close the file and return its stored size, including encryption overhead for encrypted files.
 <a href=#405 id=405 data-nosnippet>405</a>    ///
 <a href=#406 id=406 data-nosnippet>406</a>    /// Calling close on closed file will generate an error.
-<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">async fn </span>close(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt;;
+<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">async fn </span>close(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;FileMetadata&gt;;
 <a href=#408 id=408 data-nosnippet>408</a>}
 <a href=#409 id=409 data-nosnippet>409</a>
 <a href=#410 id=410 data-nosnippet>410</a><span class="doccomment">/// Output file is used for writing to files..
