@@ -3693,7 +3693,9 @@ pub struct iceberg::transaction::ActionCommit
 impl iceberg::transaction::ActionCommit
 pub fn iceberg::transaction::ActionCommit::new(updates: alloc::vec::Vec<iceberg::TableUpdate>, requirements: alloc::vec::Vec<iceberg::TableRequirement>) -> Self
 pub fn iceberg::transaction::ActionCommit::take_requirements(&mut self) -> alloc::vec::Vec<iceberg::TableRequirement>
+pub fn iceberg::transaction::ActionCommit::take_unchecked_requirements(&mut self) -> alloc::vec::Vec<iceberg::TableRequirement>
 pub fn iceberg::transaction::ActionCommit::take_updates(&mut self) -> alloc::vec::Vec<iceberg::TableUpdate>
+pub fn iceberg::transaction::ActionCommit::with_unchecked_requirements(self, requirements: alloc::vec::Vec<iceberg::TableRequirement>) -> Self
 pub struct iceberg::transaction::AddColumn
 impl iceberg::transaction::AddColumn
 pub fn iceberg::transaction::AddColumn::optional(name: impl alloc::string::ToString, field_type: iceberg::spec::Type) -> Self
@@ -3714,6 +3716,7 @@ pub fn iceberg::transaction::FastAppendAction::with_check_duplicate(self, v: boo
 pub struct iceberg::transaction::OverwriteAction
 impl iceberg::transaction::OverwriteAction
 pub fn iceberg::transaction::OverwriteAction::add_data_files(self, data_files: impl core::iter::traits::collect::IntoIterator<Item = iceberg::spec::DataFile>) -> Self
+pub fn iceberg::transaction::OverwriteAction::assert_requirements(self, requirements: impl core::iter::traits::collect::IntoIterator<Item = iceberg::TableRequirement>) -> Self
 pub fn iceberg::transaction::OverwriteAction::delete_data_files(self, data_files: impl core::iter::traits::collect::IntoIterator<Item = iceberg::spec::DataFile>) -> Self
 pub fn iceberg::transaction::OverwriteAction::set_commit_uuid(self, commit_uuid: uuid::Uuid) -> Self
 pub fn iceberg::transaction::OverwriteAction::set_key_metadata(self, key_metadata: alloc::vec::Vec<u8>) -> Self
